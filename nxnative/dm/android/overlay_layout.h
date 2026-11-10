@@ -186,30 +186,43 @@ typedef struct { int style; char left[80], right[40]; } ov_srow;            // a
 int dm_save_rows(ov_srow rows[OVM_ROWS]);   // front_android.c: the picker's rows, 0 when it is not open
 
 // ---- the text entry's keyboard (front_android.c front_text_input, drawn by gfx_vk_present.c ov_text_panel), in the pause menu's panel rectangle ----
-// Four rows of ten character keys and a row of four wide ones; p is the panel's rectangle (x, y, width, height: the window's for touches, the raster's for drawing).
-// The panel: the title (its top 13%), the text field (to 28%), the keys (to 90%), the key hints
-#define OVK_N 44
+// Four rows of ten character keys and a row of five wide ones; p is the panel's rectangle (x, y, width, height: the window's for touches, the raster's for drawing).
+// The panel: the title (its top 13%), the text field (to 28%), the keys (to 90%), the key hints. The language key switches the letter rows between QWERTY and
+// the two-set Hangul layout (OVK_KO, the same positions; composed by hangul_ime.h)
+#define OVK_N 45
 static const char *const OVK_ROWS[4] = {"1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm-._"};
-enum { OVK_SHIFT = 40, OVK_SPACE, OVK_DEL, OVK_OK };
+static const uint16_t OVK_KO[3][10] = {{0x3142, 0x3148, 0x3137, 0x3131, 0x3145, 0x315B, 0x3155, 0x3151, 0x3150, 0x3154},   // the Hangul rows 2..4 (row 1 keeps its digits)
+                                       {0x3141, 0x3134, 0x3147, 0x3139, 0x314E, 0x3157, 0x3153, 0x314F, 0x3163, '\''},
+                                       {0x314B, 0x314C, 0x314A, 0x314D, 0x3160, 0x315C, 0x3161, '-', '.', '_'}};
+enum { OVK_SHIFT = 40, OVK_LANG, OVK_SPACE, OVK_DEL, OVK_OK };
 static inline void ov_kb_key(int i, const float p[4], float r[4]) {   // key i's rectangle, a small gap inside its cell
     float pad = p[2] * 0.03f, w = p[2] - 2 * pad, top = p[1] + p[3] * 0.30f, kh = p[3] * 0.60f / 5;
     if (i < 40) { float kw = w / 10; r[0] = p[0] + pad + (i % 10) * kw; r[1] = top + (i / 10) * kh; r[2] = kw; r[3] = kh; }
-    else { static const float x0[4] = {0, 0.2f, 0.65f, 0.8f}, ww[4] = {0.2f, 0.45f, 0.15f, 0.2f}; r[0] = p[0] + pad + x0[i - 40] * w; r[1] = top + 4 * kh; r[2] = ww[i - 40] * w; r[3] = kh; }
+    else { static const float x0[5] = {0, 0.15f, 0.30f, 0.65f, 0.8f}, ww[5] = {0.15f, 0.15f, 0.35f, 0.15f, 0.2f}; r[0] = p[0] + pad + x0[i - 40] * w; r[1] = top + 4 * kh; r[2] = ww[i - 40] * w; r[3] = kh; }
     float g = kh * 0.06f; r[0] += g; r[1] += g; r[2] -= 2 * g; r[3] -= 2 * g;
 }
 static inline int ov_kb_at(float x, float y, const float p[4]) {   // the key under (x, y), -1 none
     for (int i = 0; i < OVK_N; i++) { float r[4]; ov_kb_key(i, p, r); if (x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]) return i; }
     return -1;
 }
-static inline int ov_kb_char(int i, int shift) {   // a character key's character (0 for the wide keys)
+static inline uint32_t ov_kb_char(int i, int shift, int lang) {   // a character key's code point (0 for the wide keys); lang 1: the Hangul layout
     if (i < 0 || i >= 40) return 0;
-    int c = OVK_ROWS[i / 10][i % 10]; return shift && c >= 'a' && c <= 'z' ? c - 32 : c;
+    if (lang && i >= 10) {   // shift: the tense consonants and yae, ye
+        uint32_t c = OVK_KO[i / 10 - 1][i % 10]; if (!shift) return c;
+        switch (c) { case 0x3142: return 0x3143; case 0x3148: return 0x3149; case 0x3137: return 0x3138; case 0x3131: return 0x3132; case 0x3145: return 0x3146;
+                     case 0x3150: return 0x3152; case 0x3154: return 0x3156; default: return c; }
+    }
+    int c = OVK_ROWS[i / 10][i % 10]; return (uint32_t)(shift && c >= 'a' && c <= 'z' ? c - 32 : c);
+}
+static inline int ov_kb_find(int c) {   // the character key of ASCII character c (a physical keyboard's letter: its Hangul is the same key's), -1 none
+    for (int i = 0; i < 40; i++) if (OVK_ROWS[i / 10][i % 10] == c) return i;
+    return -1;
 }
 static inline int ov_kb_move(int i, int dx, int dy) {   // the d-pad's move from key i (rows wrap; the wide row maps to the columns above it)
     if (i < 0) return 0;
-    static const int wide_col[4] = {0, 4, 7, 9};   // the column each wide key sits under
+    static const int wide_col[5] = {0, 2, 4, 7, 9};   // the column each wide key sits under
     int col = i < 40 ? i % 10 : wide_col[i - 40], row = i < 40 ? i / 10 : 4;
-    if (dy) { row = (row + dy + 5) % 5; if (row == 4) return col < 2 ? OVK_SHIFT : col < 6 ? OVK_SPACE : col < 8 ? OVK_DEL : OVK_OK; return row * 10 + col; }
-    if (row == 4) return 40 + (i - 40 + dx + 4) % 4;
+    if (dy) { row = (row + dy + 5) % 5; if (row == 4) return col < 1 ? OVK_SHIFT : col < 3 ? OVK_LANG : col < 7 ? OVK_SPACE : col < 8 ? OVK_DEL : OVK_OK; return row * 10 + col; }
+    if (row == 4) return 40 + (i - 40 + dx + 5) % 5;
     return row * 10 + (col + dx + 10) % 10;
 }

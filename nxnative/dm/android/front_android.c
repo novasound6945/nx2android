@@ -11,6 +11,7 @@
 #include "dm_input.h"
 #include "overlay_layout.h"
 #include "pixel_font.h"
+#include "hangul_ime.h"
 #include "saves_android.h"
 #include <math.h>
 #include <time.h>
@@ -751,32 +752,56 @@ static void ed_touch(AInputEvent *e, float W, float H) {   // the prompt's butto
 // ---- text entry: the game's software keyboard (nn::swkbd, hle_swkbd.c → front_text_input), as an on-screen keyboard of the overlay ----
 // The game thread that asks waits here while the player types; the game is held as by the menu and the last frame is shown with the entry's panel and keys
 // (overlay_layout.h ov_kb_*, drawn by gfx_vk_present.c ov_text_panel from dm_text_entry). Touch: tap the keys. Controller: the d-pad moves the highlight,
-// A presses it, B erases, + accepts, − cancels. A physical keyboard types (letters, digits, space, punctuation as ASCII), Del erases,
-// Enter accepts. Back cancels (the game keeps its initial text). Android's own keyboard is not used: a code-less NativeActivity's content view is no text
+// A presses it, B erases, X switches English / Hangul, + accepts, − cancels. A physical keyboard types (letters, digits, space, punctuation as ASCII; in Hangul
+// mode its letters are the two-set layout's jamo), Del erases, Enter accepts, the language-switch key switches. Back cancels (the game keeps its initial text).
+// Hangul (hangul_ime.h): the syllable being composed is always the text's last character, replaced as its jamo come; Del takes one jamo away; any other key,
+// a switch of language or a new entry ends the syllable as it stands. The language is kept from entry to entry, Hangul first when the game's language
+// (DM_LANG, porter's -l) is Korean. Android's own keyboard is not used: a code-less NativeActivity's content view is no text
 // editor, so the system does not show one for it, and asking for one routed the key events to it
 static pthread_mutex_t g_tx_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_tx_cv = PTHREAD_COND_INITIALIZER;
-static struct { char title[128], text[256]; int n, cap, max, done, ok, sel, shift, ptr; } g_tx;   // n, cap: bytes of UTF-8; max: UTF-16 units, the game's limit
-int dm_text_entry(char *title, int tcap, char *text, int xcap, int *sel, int *shift) {   // the panel's content (the present thread); 0 when no entry is open
+static struct { char title[128], text[256]; int n, cap, max, done, ok, sel, shift, ptr, lang, lang_set; hg_state hg; } g_tx;   // n, cap: bytes of UTF-8; max: UTF-16 units, the game's limit; lang 1 Hangul
+int dm_text_entry(char *title, int tcap, char *text, int xcap, int *sel, int *shift, int *lang) {   // the panel's content (the present thread); 0 when no entry is open
     if (!atomic_load(&g_tx_on)) return 0;
     pthread_mutex_lock(&g_tx_mu);
-    snprintf(title, (size_t)tcap, "%s", g_tx.title); snprintf(text, (size_t)xcap, "%s", g_tx.text); *sel = g_tx.sel; *shift = g_tx.shift;
+    snprintf(title, (size_t)tcap, "%s", g_tx.title); snprintf(text, (size_t)xcap, "%s", g_tx.text); *sel = g_tx.sel; *shift = g_tx.shift; *lang = g_tx.lang;
     pthread_mutex_unlock(&g_tx_mu);
     return 1;
 }
 static void tx_changed(void) { atomic_fetch_add(&g_tx_ver, 1); dm_overlay_redraw(); }
-static void tx_add(int c) {   // the caller holds g_tx_mu; a capital ends the shift, as on a phone
-    if (!c || g_tx.n >= g_tx.cap || pf_units(g_tx.text) >= g_tx.max) return;
+static void tx_add(int c) {   // the caller holds g_tx_mu; an ASCII character, which ends a Hangul syllable; a capital ends the shift, as on a phone
+    if (!c) return;
+    hg_reset(&g_tx.hg);
+    if (g_tx.n >= g_tx.cap || pf_units(g_tx.text) >= g_tx.max) return;
     g_tx.text[g_tx.n++] = (char)c; g_tx.text[g_tx.n] = 0;
     if (c >= 'A' && c <= 'Z') g_tx.shift = 0;
 }
+static int tx_put(uint32_t c) {   // code point c added; 0 when its bytes do not fit
+    char b[4]; int k = pf_put(b, c); if (!k || g_tx.n + k > g_tx.cap) return 0;
+    memcpy(g_tx.text + g_tx.n, b, (size_t)k); g_tx.n += k; g_tx.text[g_tx.n] = 0; return 1;
+}
+static void tx_jamo(uint32_t j) {   // the caller holds g_tx_mu; a jamo in Hangul mode, taken whole or not at all (the limits); it ends the shift
+    char was[sizeof g_tx.text]; int n0 = g_tx.n, on = hg_active(&g_tx.hg); hg_state h0 = g_tx.hg; memcpy(was, g_tx.text, (size_t)n0 + 1);
+    uint32_t out[2]; int r = hg_feed(&g_tx.hg, j, out); if (!r) return;
+    if (on) g_tx.n = (int)pf_chop(g_tx.text, (size_t)g_tx.n);   // the syllable being composed, replaced
+    if (!tx_put(out[0]) || (r == 2 && !tx_put(out[1])) || pf_units(g_tx.text) > g_tx.max) { memcpy(g_tx.text, was, (size_t)n0 + 1); g_tx.n = n0; g_tx.hg = h0; return; }
+    g_tx.shift = 0;
+}
+static void tx_del(void) {   // the caller holds g_tx_mu; the composed syllable's last jamo, or the last character
+    uint32_t c; int r = hg_back(&g_tx.hg, &c);
+    g_tx.n = (int)pf_chop(g_tx.text, (size_t)g_tx.n);
+    if (r == 1) tx_put(c);   // the same three bytes as the syllable it replaces
+}
+static void tx_lang(void) { hg_reset(&g_tx.hg); g_tx.lang = !g_tx.lang; g_tx.shift = 0; }   // the caller holds g_tx_mu
+static void tx_type(uint32_t c) { if (hg_is_jamo(c)) tx_jamo(c); else tx_add((int)c); }   // the caller holds g_tx_mu; a key's character
 static void tx_finish(int ok);
 static void tx_press(int i) {   // an on-screen key
     if (i == OVK_OK) { tx_finish(1); return; }
     pthread_mutex_lock(&g_tx_mu);
     if (i == OVK_SHIFT) g_tx.shift = !g_tx.shift;
+    else if (i == OVK_LANG) tx_lang();
     else if (i == OVK_SPACE) tx_add(' ');
-    else if (i == OVK_DEL) { g_tx.n = (int)pf_chop(g_tx.text, (size_t)g_tx.n); }
-    else tx_add(ov_kb_char(i, g_tx.shift));
+    else if (i == OVK_DEL) tx_del();
+    else tx_type(ov_kb_char(i, g_tx.shift, g_tx.lang));
     pthread_mutex_unlock(&g_tx_mu);
     dm_haptics_android_tap(); tx_changed();
 }
@@ -805,10 +830,13 @@ static int tx_key(AInputEvent *e) {   // every key goes to the entry while it is
     if (bit == DM_BTN_A) { int s; pthread_mutex_lock(&g_tx_mu); s = g_tx.sel; pthread_mutex_unlock(&g_tx_mu); tx_press(s); return 1; }
     pthread_mutex_lock(&g_tx_mu);
     int dx = bit == DM_BTN_LEFT ? -1 : bit == DM_BTN_RIGHT ? 1 : 0, dy = bit == DM_BTN_UP ? -1 : bit == DM_BTN_DOWN ? 1 : 0;
+    int32_t meta = AKeyEvent_getMetaState(e);
     if (dx || dy) g_tx.sel = ov_kb_move(g_tx.sel, dx, dy);
-    else if (k == AKEYCODE_DEL || bit == DM_BTN_B) { g_tx.n = (int)pf_chop(g_tx.text, (size_t)g_tx.n); }
+    else if (k == AKEYCODE_DEL || bit == DM_BTN_B) tx_del();
     else if (bit == DM_BTN_Y) g_tx.shift = !g_tx.shift;
-    else tx_add(tx_char(k, AKeyEvent_getMetaState(e)));
+    else if (bit == DM_BTN_X || k == AKEYCODE_LANGUAGE_SWITCH || k == AKEYCODE_KANA) tx_lang();   // the controller's X, a keyboard's language (Han/Yeong) key
+    else if (g_tx.lang && k >= AKEYCODE_A && k <= AKEYCODE_Z) tx_type(ov_kb_char(ov_kb_find('a' + (k - AKEYCODE_A)), (meta & AMETA_SHIFT_ON) || g_tx.shift, 1));   // the two-set layout
+    else tx_add(tx_char(k, meta));
     pthread_mutex_unlock(&g_tx_mu);
     tx_changed();
     return 1;
@@ -842,7 +870,9 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     }
     g_tx.text[g_tx.n] = 0;
     g_tx.max = max_chars > 0 && max_chars < (int)sizeof g_tx.text - 1 ? max_chars : (int)sizeof g_tx.text - 1;
-    g_tx.done = g_tx.ok = 0; g_tx.sel = 11; g_tx.shift = g_tx.n == 0; g_tx.ptr = -1;   // the highlight on q; a capital first, as on a phone
+    if (!g_tx.lang_set) { const char *l = getenv("DM_LANG"); g_tx.lang = l && !strncmp(l, "ko", 2); g_tx.lang_set = 1; }   // the first entry: Hangul for a Korean game
+    hg_reset(&g_tx.hg);
+    g_tx.done = g_tx.ok = 0; g_tx.sel = 11; g_tx.shift = !g_tx.lang && g_tx.n == 0; g_tx.ptr = -1;   // the highlight on w (j in Hangul); a capital first in English, as on a phone
     pthread_mutex_unlock(&g_tx_mu);
     dm_input_set(0, 0, 0, 0, 0); dm_touch_set(NULL, 0); g_touch_btn = 0;   // nothing stays pressed in the game
     atomic_store(&g_tx_on, 1); hold_sync(); tx_changed();

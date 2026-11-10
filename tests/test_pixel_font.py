@@ -29,6 +29,9 @@ int main(int argc, char **argv) {
     char t[16]; strcpy(t, "a\xe5\x8b\x9d"); assert(pf_chop(t, strlen(t)) == 1 && !strcmp(t, "a")); assert(pf_chop(t, 1) == 0 && pf_chop(t, 0) == 0);
     strcpy(t, "a\xe5\x8b"); pf_trim(t); assert(!strcmp(t, "a")); strcpy(t, "a\xe5\x8b\x9d"); pf_trim(t); assert(strlen(t) == 4); strcpy(t, "ab"); pf_trim(t); assert(!strcmp(t, "ab"));
     assert(pf_units("a\xe5\x8b\x9d\xf0\x9f\x98\x80") == 4);
+    const uint32_t cps[] = {'A', 0xE9, 0x3131, 0xD55C, 0xFFFD, 0x1F600, 0x10FFFF};   // pf_put writes what pf_next reads
+    for (unsigned i = 0; i < sizeof cps / sizeof cps[0]; i++) { char b[5]; int k = pf_put(b, cps[i]); b[k] = 0; const char *r = b; assert(k == (cps[i] < 0x80 ? 1 : cps[i] < 0x800 ? 2 : cps[i] < 0x10000 ? 3 : 4) && pf_next(&r) == cps[i] && !*r); }
+    { char b[5]; int k = pf_put(b, 0xD55C); b[k] = 0; assert(!strcmp(b, "\xed\x95\x9c")); assert(pf_put(b, 0xD800) == 0 && pf_put(b, 0x110000) == 0); }
     return 0;
 }
 '''

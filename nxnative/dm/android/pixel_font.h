@@ -28,6 +28,14 @@ static inline void pf_trim(char *s) {   // a sequence that a byte limit cut shor
     uint8_t c = (uint8_t)s[k - 1]; size_t need = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
     if (n - (k - 1) < need) s[k - 1] = 0;
 }
+static inline int pf_put(char *b, uint32_t c) {   // code point c as UTF-8 in b (at most 4 bytes, no terminator); the byte count, 0 for a surrogate or beyond U+10FFFF
+    if (c < 0x80) { b[0] = (char)c; return 1; }
+    if (c < 0x800) { b[0] = (char)(0xC0 | c >> 6); b[1] = (char)(0x80 | (c & 0x3F)); return 2; }
+    if (c >= 0xD800 && c < 0xE000) return 0;
+    if (c < 0x10000) { b[0] = (char)(0xE0 | c >> 12); b[1] = (char)(0x80 | (c >> 6 & 0x3F)); b[2] = (char)(0x80 | (c & 0x3F)); return 3; }
+    if (c > 0x10FFFF) return 0;
+    b[0] = (char)(0xF0 | c >> 18); b[1] = (char)(0x80 | (c >> 12 & 0x3F)); b[2] = (char)(0x80 | (c >> 6 & 0x3F)); b[3] = (char)(0x80 | (c & 0x3F)); return 4;
+}
 static inline int pf_units(const char *s) {   // the string's length in UTF-16 units, as a software keyboard's limit counts it (hle_swkbd.c)
     int n = 0; while (*s) n += pf_next(&s) >= 0x10000 ? 2 : 1;
     return n;

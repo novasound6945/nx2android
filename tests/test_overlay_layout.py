@@ -110,6 +110,60 @@ int main(void) {
     return 0;
 }
 '''
+        self._run(cc, harness)
+
+    def test_text_entry_keyboard(self):
+        cc = shutil.which('cc') or shutil.which('clang')
+        if not cc:
+            self.skipTest('a C compiler is needed for the keyboard geometry check')
+        harness = r'''
+#include <assert.h>
+#include "overlay_layout.h"
+float dm_overlay_scale(void) { return 1; }
+int dm_overlay_custom(int layout, int ctl, float *x, float *y, float *s) { (void)layout; (void)ctl; (void)x; (void)y; *s = 1; return 0; }
+int main(void) {
+    assert(OVK_N == 45 && OVK_SHIFT == 40 && OVK_LANG == 41 && OVK_SPACE == 42 && OVK_DEL == 43 && OVK_OK == 44);
+    const float panels[][4] = {{0, 0, 915, 412}, {100, 50, 1216, 760}, {0, 0, 2400, 1080}, {30, 400, 1020, 900}};
+    for (unsigned q = 0; q < sizeof panels / sizeof panels[0]; q++) {
+        const float *p = panels[q];
+        for (int i = 0; i < OVK_N; i++) {   // inside the panel's key area, no overlaps, and the touch test finds each key at its centre
+            float r[4]; ov_kb_key(i, p, r);
+            assert(r[2] > 0 && r[3] > 0 && r[0] >= p[0] && r[1] >= p[1] + p[3] * 0.30f && r[0] + r[2] <= p[0] + p[2] && r[1] + r[3] <= p[1] + p[3] * 0.90f + 0.01f);
+            assert(ov_kb_at(r[0] + r[2] / 2, r[1] + r[3] / 2, p) == i);
+            for (int j = 0; j < i; j++) { float o[4]; ov_kb_key(j, p, o); assert(r[0] >= o[0] + o[2] || o[0] >= r[0] + r[2] || r[1] >= o[1] + o[3] || o[1] >= r[1] + r[3]); }
+        }
+        assert(ov_kb_at(p[0] - 1, p[1] - 1, p) == -1);
+    }
+    for (int i = 0; i < OVK_N; i++) {   // the d-pad: a key from every key in every direction; a row's width of moves left or right comes back, and five up or down
+        int row = i < 40 ? 10 : 5;   // from a wide key (a character key's column can change on the wide row: two columns share a wide key)
+        for (int d = -1; d <= 1; d += 2) {
+            int k = ov_kb_move(i, d, 0), m = ov_kb_move(i, 0, d); assert(k >= 0 && k < OVK_N && m >= 0 && m < OVK_N);
+            assert((k >= 40) == (i >= 40));
+            k = i; for (int s = 0; s < row; s++) k = ov_kb_move(k, d, 0); assert(k == i);
+            k = i; for (int s = 0; s < 5; s++) k = ov_kb_move(k, 0, d); assert(i < 40 || k == i);
+            if (i < 40 && (i % 10 == 0 || i % 10 == 2 || i % 10 == 4 || i % 10 == 7 || i % 10 == 9)) assert(k == i);
+            assert(ov_kb_move(ov_kb_move(i, d, 0), -d, 0) == i);
+        }
+    }
+    assert(ov_kb_move(30, 0, 1) == OVK_SHIFT && ov_kb_move(32, 0, 1) == OVK_LANG && ov_kb_move(35, 0, 1) == OVK_SPACE && ov_kb_move(37, 0, 1) == OVK_DEL && ov_kb_move(39, 0, 1) == OVK_OK);
+    assert(ov_kb_move(OVK_OK, 1, 0) == OVK_SHIFT && ov_kb_move(OVK_SHIFT, -1, 0) == OVK_OK && ov_kb_move(OVK_SHIFT, 0, -1) == 30 && ov_kb_move(OVK_LANG, 0, 1) == 2);
+    assert(ov_kb_move(-1, 1, 0) == 0);
+    // the characters: English as before, the Hangul layout and its shift
+    assert(ov_kb_char(10, 0, 0) == 'q' && ov_kb_char(11, 1, 0) == 'W' && ov_kb_char(0, 1, 0) == '1' && ov_kb_char(29, 1, 0) == '\'' && ov_kb_char(OVK_SPACE, 0, 0) == 0 && ov_kb_char(-1, 0, 1) == 0);
+    assert(ov_kb_char(0, 0, 1) == '1' && ov_kb_char(9, 1, 1) == '0');
+    static const uint32_t ko[30] = {0x3142, 0x3148, 0x3137, 0x3131, 0x3145, 0x315B, 0x3155, 0x3151, 0x3150, 0x3154, 0x3141, 0x3134, 0x3147, 0x3139, 0x314E, 0x3157, 0x3153, 0x314F, 0x3163, '\'',
+                                    0x314B, 0x314C, 0x314A, 0x314D, 0x3160, 0x315C, 0x3161, '-', '.', '_'};
+    static const uint32_t ko_shift[30] = {0x3143, 0x3149, 0x3138, 0x3132, 0x3146, 0x315B, 0x3155, 0x3151, 0x3152, 0x3156, 0x3141, 0x3134, 0x3147, 0x3139, 0x314E, 0x3157, 0x3153, 0x314F, 0x3163, '\'',
+                                          0x314B, 0x314C, 0x314A, 0x314D, 0x3160, 0x315C, 0x3161, '-', '.', '_'};
+    for (int i = 0; i < 30; i++) { assert(ov_kb_char(10 + i, 0, 1) == ko[i]); assert(ov_kb_char(10 + i, 1, 1) == ko_shift[i]); }
+    for (int i = 40; i < OVK_N; i++) assert(ov_kb_char(i, 1, 1) == 0);
+    assert(ov_kb_find('q') == 10 && ov_kb_find('m') == 36 && ov_kb_find('1') == 0 && ov_kb_find('!') == -1 && ov_kb_char(ov_kb_find('r'), 1, 1) == 0x3132);   // a physical r with shift: kk
+    return 0;
+}
+'''
+        self._run(cc, harness)
+
+    def _run(self, cc, harness):
         with tempfile.TemporaryDirectory(prefix='nx2a_overlay_') as tmp:
             tmp = Path(tmp)
             (tmp / 'android_profile.h').write_text(android_profile.header(None), encoding='utf-8')
