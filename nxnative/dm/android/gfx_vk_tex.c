@@ -103,7 +103,8 @@ const vkfmt_t *vk_fmt(int f) {
         if (f >= 0x79 && f <= 0x94) { int k = (f - 0x79) % 14; e = (fent){(uint16_t)(VK_FORMAT_ASTC_4x4_UNORM_BLOCK + 2 * k + (f >= 0x87)), 0, 0, K_FLOAT}; }
         if (e.vk) {
             int bw, bh; o->bpb = (uint8_t)nvn_fmt_bpb(f, &bw, &bh); o->bw = (uint8_t)bw; o->bh = (uint8_t)bh;
-            o->vk = (VkFormat)(e.vk == (uint16_t)VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR ? VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR : e.vk);
+            o->vk = (VkFormat)(e.vk == (uint16_t)VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR ? VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR :
+                               e.vk == (uint16_t)VK_FORMAT_A4B4G4R4_UNORM_PACK16 ? VK_FORMAT_A4B4G4R4_UNORM_PACK16 : e.vk);   // the table keeps 16 bits: the extension formats are restored here
             if (f == 0x33) {   // DEPTH24: X8_D24 where the device renders to it, else D32
                 VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(V.pd, VK_FORMAT_X8_D24_UNORM_PACK32, &fp);
                 if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) o->vk = VK_FORMAT_D32_SFLOAT;

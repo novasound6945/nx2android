@@ -1279,6 +1279,7 @@ def unity_compute(x, base, trees):
     try:
         for cid, pid, o in unityfs.serialized_objects(x, COMMON, {unityfs.CLASS_COMPUTE_SHADER}, trees):
             for v in o['variants']:
+                if v.get('targetRenderer', 22) != 22: continue   # GfxDeviceRenderer: 22 = Switch. A build can keep other renderers' variants (D3D11 DXBC, renderer 2), which are not NVN programs
                 for k in v['kernels']:
                     for i, u in enumerate(k['uniqueVariants'] if 'uniqueVariants' in k else [p['second'] for p in k['variantMap']] if 'variantMap' in k else [k]):
                         where = f'{base}#{o["m_Name"]}#{k["name"]}.{i}'
