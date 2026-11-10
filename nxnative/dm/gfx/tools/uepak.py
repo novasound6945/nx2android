@@ -9,6 +9,9 @@
 # Unreal Engine 5.6 (FINAL FANTASY RESONANCE) has no shader code archive in its pak (FFRS-Switch.pak holds configs only): the cooker converted both libraries into its IoStore container
 #   (FFRS-Switch.utoc / .ucas, Oodle in 64 KB blocks, not encrypted) as one ShaderCodeLibrary chunk each (the tables) and one ShaderCode chunk per group of shaders, every group Oodle-compressed
 #   on its own (Toc, io_archive). Both layers need the game's decoder, which runs in the Mac host's tool mode (OodleHost); the libraries come out as version 2 archives with every shader decoded.
+# Unreal Engine 4.27 (The War of Genesis: Remnants of Gray) has no shader code archive at all: WOGR_Renewal-Switch.pak (12.8 GB, 214,312 files, zlib, index not encrypted) keeps every shader
+#   inline in the cooked packages, the engine's global ones in Engine/GlobalShaderCache-SF_GLSL_SWITCH.bin (1,565) and each material's in its .uexp (inline_paks); shader_split.py reads them
+#   (ue_inline_jobs, ue_inline_shaders) and the NSP script decodes nothing.
 # The AES key is in main (Unreal embeds it): the 32-byte window of main's read-only or data segment that decrypts the index start to its mount point ("../../../"; Octopath Traveler 0: one window of
 #   116,287 tried). It is only kept in memory, never printed or written.
 # Pak footer (version 11, the last 0xdd bytes): encryption key GUID (16), encrypted index flag (u8), magic 0x5A6F12E1, version (u32), index offset (u64), index size (u64), index SHA-1 (20),
@@ -402,6 +405,31 @@ def unreal_paks(romfs, legacy=None):
         except (OSError, ValueError, struct.error): continue   # shorter than a footer, or no Unreal pak
         if legacy is None or (ver in LEGACY) == legacy: out.append(p)
     return out
+
+def inline_candidate(name):
+    """A file of an archive-less version 11 pak that can hold inline shaders: the engine's global shader cache (Engine/GlobalShaderCache-<shader format>.bin) or a package's export data (.uexp,
+    where a material keeps its shader map; The War of Genesis: Remnants of Gray's 400 .uasset looked at hold none)"""
+    return name.endswith('.uexp') or name.rsplit('/', 1)[-1].startswith('GlobalShaderCache-') and name.endswith('.bin')
+
+def inline_paks(paths):
+    """Of version 11 paks (paths), those that keep their shaders inline in the cooked packages (Unreal Engine 4.27, The War of Genesis: Remnants of Gray): the engine mounts a folder's paks as one
+    view, so a folder counts when none of its paks holds a shader code archive and one holds the global shader cache (inline_candidate). A pak whose index is encrypted is left out (listing it
+    needs main's key; job finds it for the archives). → {pak path: Pak}"""
+    out, byfolder = {}, {}
+    for p in paths:
+        try:
+            with open(p, 'rb') as f: enc = footer(f)[0]
+            if not enc: byfolder.setdefault(os.path.dirname(p), {})[p] = Pak(p)
+        except (OSError, ValueError, struct.error): pass
+    for ps in byfolder.values():
+        names = [n for pk in ps.values() for n in pk.files]
+        if not any(n.endswith('.ushaderbytecode') for n in names) and any(inline_candidate(n) and not n.endswith('.uexp') for n in names): out.update(ps)
+    return out
+
+def inline_only(romfs):
+    """Every version 11 pak under the RomFS keeps its shaders inline (inline_paks): there is no shader code archive to decode, shader_split.py reads the packages itself"""
+    v11 = unreal_paks(romfs, legacy=False)
+    return bool(v11) and set(inline_paks(v11)) == set(v11)
 
 def job(romfs, main_nso, work, decode=None):
     """The shader code archives of every pak under the RomFS into <work>/archives, and one Oodle job (<work>/oodle.job) of every compressed shader in them; <work>/job.json lists them.

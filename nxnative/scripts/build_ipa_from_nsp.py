@@ -1029,7 +1029,9 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
     (DM_OODLE_JOB, dm/host/hle_oodle.c: right before nnMain, then the host exits), and the decoded archives go to <version dir>/ue_shaders, where shader_split.py reads them.
     The job runs the packed version's code (Oodle's format does not change between builds). Unreal Engine 4.26 and later compress shaders with LZ4 by default (DRAGON QUEST VII Reimagined),
     which uepak.py decodes itself, so such a game needs no host run here. Unreal Engine 5.6 (FINAL FANTASY RESONANCE) keeps its shader libraries in the IoStore container instead, two layers
-    of Oodle (container blocks, then each shader group): uepak.py reads them through the game's Oodle in the host's tool mode (uepak.OodleHost), with no boot. A folder whose stamp matches its paks is reused"""
+    of Oodle (container blocks, then each shader group): uepak.py reads them through the game's Oodle in the host's tool mode (uepak.OodleHost), with no boot. Unreal Engine 4.27 can have no
+    archive at all (The War of Genesis: Remnants of Gray: the shaders inline in the cooked packages, uepak.inline_only): nothing is decoded, and the empty ue_shaders folder gets its stamp so the
+    next build reuses it; shader_split.py reads the packages. A folder whose stamp matches its paks is reused"""
     sys.path.insert(0, str(repo / 'dm/gfx/tools')); import uepak
     todo = {v: d for v, d in dirs.items() if not ((d / 'ue_shaders/stamp').exists() and (d / 'ue_shaders/stamp').read_text() == ue_stamp(d))}
     PROG.stage('UE shader decode')
@@ -1051,8 +1053,10 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
         try: listing, n = uepak.job(str(d / 'RomFS'), str(d / 'ExeFS/main'), str(jd), decode=dec)
         finally:
             if dec: dec.close()
-        if not listing: raise BuildError(f'the RomFS has Unreal paks, but none under {d / "RomFS"} holds a shader code archive: where the shaders are has to be found first')
-        say(f'{v}: ' + '; '.join(f'{x["name"]} {x["shaders"]:,} shaders' + (f' ({x["compression"]})' if x.get('compression') else '') for x in listing)
+        if not listing and uepak.inline_only(str(d / 'RomFS')):   # no archive in any pak, the shaders inline in the packages (Unreal Engine 4.27, The War of Genesis: Remnants of Gray)
+            say(f'{v}: no shader code archive in the Unreal paks: the shaders are inline in the cooked packages (GlobalShaderCache-*.bin, the materials\' .uexp), which shader_split.py reads itself')
+        elif not listing: raise BuildError(f'the RomFS has Unreal paks, but none under {d / "RomFS"} holds a shader code archive: where the shaders are has to be found first')
+        else: say(f'{v}: ' + '; '.join(f'{x["name"]} {x["shaders"]:,} shaders' + (f' ({x["compression"]})' if x.get('compression') else '') for x in listing)
             + (f'; decoding {n:,} with the game\'s Oodle in the Mac host' if n else ''))
         if n:   # Oodle-compressed shaders (Octopath Traveler 0); LZ4 ones (Unreal Engine 4.26 and later by default) are decoded by uepak.py already
             if not host:
