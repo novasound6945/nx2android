@@ -574,14 +574,15 @@ class Port:
                 say(f'{v}: round {rnd + 1}: {got:,} of {len(want):,} Oodle streams decoded on the device')
                 if not got: raise BuildError(f"{v}: the game's Oodle decoder on the device decoded none of {len(want):,} streams (see {self.logs / 'android_oodle_job.log'})")
             else: raise BuildError(f'{v}: the Unreal shader code archives still need Oodle streams after {self.UE_ROUNDS} rounds')
-            if not listing: raise BuildError(f'the RomFS has Unreal paks, but none under {d / "RomFS"} holds a shader code archive: where the shaders are has to be found first')
+            inline = not listing and uepak.inline_only(str(d / 'RomFS'))   # no archive in any pak, the shaders inline in the cooked packages (Unreal Engine 4.27): shader_split.py reads them itself
+            if not listing and not inline: raise BuildError(f'the RomFS has Unreal paks, but none under {d / "RomFS"} holds a shader code archive: where the shaders are has to be found first')
             if n:   # Oodle-compressed shaders in the paks' archives (Octopath Traveler 0): uepak.job's own job file
                 PROG.set(step=f"{v}: {n:,} shaders with the game's decoder on the device")
                 self.device_oodle_job(jd / 'oodle.job', jd / 'oodle.job.out')   # (finish reads job.json and the output only)
             out = d / 'ue_shaders.partial'; nsp.rmtree(out)
             uepak.finish(str(jd), str(out)); (out / 'stamp').write_text(nsp.ue_stamp(d))
             nsp.swap_in(out, d / 'ue_shaders'); nsp.rmtree(jd)
-            say(f'{v}: ' + '; '.join(f'{x["name"]} {x["shaders"]:,} shaders' + (f' ({x["compression"]})' if x.get('compression') else '') for x in listing))
+            say(f"{v}: no shader code archive in the Unreal paks: the shaders are inline in the cooked packages, which shader_split.py reads itself" if inline else f'{v}: ' + '; '.join(f'{x["name"]} {x["shaders"]:,} shaders' + (f' ({x["compression"]})' if x.get('compression') else '') for x in listing))
             total += n + sum(x['shaders'] for x in listing if x['compression'] == 'IoStore, decoded')
         nsp.rmtree(tmp)
         PROG.end(f'{total:,} shaders decoded on the device')
