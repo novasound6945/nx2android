@@ -2528,7 +2528,14 @@ NVN(nvnCommandBufferSetViewportSwizzles, void, NVNcommandBuffer *c, int first, i
     p_vp_swizzle *r = REC(c, OP_VP_SWIZZLE, p_vp_swizzle); r->first = first; r->n = n;
     for (int i = 0; i < n; i++) for (int k = 0; k < 4; k++) r->sw[i][k] = (uint8_t)((s[4 * i + k] ^ 2 * k) & 7);
 }
-NVN(nvnCommandBufferSetAlphaRef, void, NVNcommandBuffer *c, float r) { (void)c; ONCE_LOG("SetAlphaRef %.3f: the host has no alpha test (ColorStateSetAlphaTest is only recorded)", r); }
+// Alpha test (Dark Souls Remastered's grass and leaves were drawn as whole cards): the reference is recorded (NVN's default is 0); the Vulkan replay tests colour
+// output 0's alpha against it in a fragment shader variant (gfx_vk_exec.c pkey atest). The Metal and null replays skip the record
+NVN(nvnCommandBufferSetAlphaRef, void, NVNcommandBuffer *c, float r) {
+    REC(c, OP_ALPHA_REF, p_alpha_ref)->ref = r;
+#if defined(__APPLE__)
+    ONCE_LOG("SetAlphaRef %.3f: the Metal host has no alpha test (ColorStateSetAlphaTest is only recorded)", r);
+#endif
+}
 NVN(nvnCommandBufferSetLineWidth, void, NVNcommandBuffer *c, float w) { (void)c; if (w != 1.0f) ONCE_LOG("SetLineWidth %.2f: Metal has only 1-pixel lines", w); }
 NVN(nvnCommandBufferSetPointSize, void, NVNcommandBuffer *c, float s) { (void)c; (void)s; ONCE_LOG("SetPointSize: the point size comes from the shader"); }
 NVN(nvnCommandBufferSetPrimitiveRestart, void, NVNcommandBuffer *c, uint32_t en, int idx) { *REC(c, OP_PRIM_RESTART, p_prim_restart) = (p_prim_restart){(en & 0xff) != 0, (uint32_t)idx}; }

@@ -515,20 +515,90 @@ static uint32_t *spv_dual(const uint32_t *w, uint32_t nw, uint32_t *onw) {
     memcpy(&o[at + 8], &w[at + 4], (size_t)(nw - at - 4) * 4); *onw = nw + 4;
     return o;
 }
+// NVN's alpha test (ColorStateSetAlphaTest + CommandBufferSetAlphaRef): Maxwell drops a fragment whose colour output 0 alpha fails "alpha func ref" after the shader,
+// Vulkan has no such state. Dark Souls Remastered draws its grass and leaves as cards cut out that way: drawn whole, they were solid rectangles. This variant of a fragment
+// shader tests it before each return of its entry point and kills the fragment when the test fails (ordered comparisons: a NaN alpha never passes); the reference is a
+// float specialization constant with SpecId VK_ALPHA_SPEC_ID, so one module per function serves every reference (gfx_vk_exec.c build_pipeline gives it). NEVER kills
+// at every return. NULL (why says what) when output 0 is not a vec4 of 32-bit floats (or there is none: an integer target, a depth-only shader), or the module is not as expected.
+// It goes last in vk_shader_module's chain: after spv_dual, the location 0 output with Index 1 is the second blend source, not the colour, and is passed over
+static uint32_t spv_def(const uint32_t *w, uint32_t fn, uint32_t id) {   // the declaration (type, constant) whose result id is id, before the first function: its word index, 0 if none
+    for (uint32_t i = 5; i < fn;) { uint32_t n = w[i] >> 16, op = w[i] & 0xffff; if (!n) break;
+        if (n >= 2 && ((op >= 19 && op <= 39) ? w[i + 1] : (op >= 41 && op <= 52) || op == 59 ? (n >= 3 ? w[i + 2] : 0) : 0) == id) return i;
+        i += n; }
+    return 0;
+}
+static uint32_t *spv_alpha_test(const uint32_t *w, uint32_t nw, int func, uint32_t *onw, const char **why) {
+    static const uint16_t cmp[8] = {0, 0, 184, 180, 188, 186, 182, 190};   // by NVN alpha function: LESS OpFOrdLessThan, EQUAL OpFOrdEqual, LEQUAL OpFOrdLessThanEqual, GREATER OpFOrdGreaterThan, NOTEQUAL OpFOrdNotEqual, GEQUAL OpFOrdGreaterThanEqual
+    const char *nowhy; if (!why) why = &nowhy; *why = "";
+    if (func < 1 || func > 7) { *why = "not an alpha function that tests"; return NULL; }
+    if (nw < 6 || w[3] < 2) { *why = "not a module"; return NULL; }
+    spvi c = {.w = w, .fn = nw, .bound = w[3]};
+    uint32_t ep = 0, epfn = 0, firsttype = 0, loc0[16], nloc0 = 0, idx1[16], nidx1 = 0;
+    for (uint32_t i = 5; i < nw;) { uint32_t n = w[i] >> 16, op = w[i] & 0xffff; if (!n || i + n > nw) { *why = "malformed instruction"; return NULL; }
+        if (op == 15) { if (ep || n < 3 || w[i + 1] != 4) { *why = "not one Fragment entry point"; return NULL; } ep = i; epfn = w[i + 2]; }
+        if (op == 71 && n == 4 && w[i + 2] == 30 && w[i + 3] == 0 && nloc0 < 16) loc0[nloc0++] = w[i + 1];   // Location 0
+        if (op == 71 && n == 4 && w[i + 2] == 32 && w[i + 3] != 0 && nidx1 < 16) idx1[nidx1++] = w[i + 1];   // Index 1: a second blend source
+        if (op == 71 && n == 4 && w[i + 2] == 1 && w[i + 3] == VK_ALPHA_SPEC_ID) { *why = "its SpecId is taken"; return NULL; }
+        if (!firsttype && ((op >= 19 && op <= 39) || (op >= 41 && op <= 52) || op == 59)) firsttype = i;
+        if (op == 54) { c.fn = i; break; }
+        i += n; }
+    if (!ep || !firsttype || c.fn == nw) { *why = "no entry point or no function"; return NULL; }
+    uint32_t var = 0, nvar = 0, vptr = 0;   // the Output variable at Location 0 (not Index 1)
+    for (uint32_t i = 5; i < c.fn;) { uint32_t n = w[i] >> 16;
+        if ((w[i] & 0xffff) == 59 && n >= 4 && w[i + 3] == 3) { int at0 = 0, sec = 0;
+            for (uint32_t k = 0; k < nloc0; k++) at0 |= loc0[k] == w[i + 2];
+            for (uint32_t k = 0; k < nidx1; k++) sec |= idx1[k] == w[i + 2];
+            if (at0 && !sec) { var = w[i + 2]; vptr = w[i + 1]; nvar++; } }
+        i += n; }
+    if (!nvar) { *why = "no output at location 0"; return NULL; }
+    if (nvar > 1) { *why = "more than one output at location 0"; return NULL; }
+    uint32_t pi = spv_def(w, c.fn, vptr), vi = pi && (w[pi] & 0xffff) == 32 && w[pi] >> 16 == 4 && w[pi + 2] == 3 ? spv_def(w, c.fn, w[pi + 3]) : 0;   // OpTypePointer Output
+    uint32_t fi = vi && (w[vi] & 0xffff) == 23 && w[vi] >> 16 == 4 && w[vi + 3] == 4 ? spv_def(w, c.fn, w[vi + 2]) : 0;   // OpTypeVector of 4
+    if (!fi || (w[fi] & 0xffff) != 22 || w[fi] >> 16 != 3 || w[fi + 2] != 32) { *why = "output 0 is not a vec4 of 32-bit floats"; return NULL; }
+    uint32_t v4 = w[vi + 1], f32 = w[fi + 1], tb = 0, ref = 0;
+    c.nt = malloc(4096 * 4);
+    if (func != 1) { uint32_t none[1] = {0}; tb = spvi_decl(&c, 20, none, 0, 1);   // OpTypeBool
+        ref = c.bound++; c.nt[c.nnt++] = 4u << 16 | 50; c.nt[c.nnt++] = f32; c.nt[c.nnt++] = ref; c.nt[c.nnt++] = 0; }   // OpSpecConstant float 0 (the pipeline gives the reference)
+    if (func != 1 && !tb) { free(c.nt); *why = "no bool type"; return NULL; }
+    uint32_t nret = 0; for (uint32_t i = c.fn; i < nw;) { uint32_t n = w[i] >> 16; if (!n) { free(c.nt); *why = "malformed instruction"; return NULL; } nret += (w[i] & 0xffff) == 253; i += n; }
+    uint32_t *o = malloc(((size_t)nw + c.nnt + 8 + 26 * (size_t)nret) * 4), no = 5; memcpy(o, w, 20);
+    for (uint32_t i = 5; i < c.fn;) { uint32_t n = w[i] >> 16;
+        if (i == firsttype && ref) { o[no++] = 4u << 16 | 71; o[no++] = ref; o[no++] = 1; o[no++] = VK_ALPHA_SPEC_ID; }   // OpDecorate SpecId
+        memcpy(&o[no], &w[i], n * 4); no += n; i += n; }
+    memcpy(&o[no], c.nt, c.nnt * 4); no += c.nnt;
+    int in_ep = 0;
+    for (uint32_t i = c.fn; i < nw;) { uint32_t n = w[i] >> 16, op = w[i] & 0xffff;
+        if (op == 54) in_ep = w[i + 2] == epfn; else if (op == 56) in_ep = 0;   // OpFunction / OpFunctionEnd
+        if (op == 253 && in_ep && func == 1) { o[no++] = 1u << 16 | 252; i += n; continue; }   // NEVER: OpKill for OpReturn
+        if (op == 253 && in_ep) { uint32_t v = c.bound++, a = c.bound++, b = c.bound++, kl = c.bound++, ml = c.bound++;
+            uint32_t x[26] = {4u << 16 | 61, v4, v, var,              // OpLoad the colour
+                              5u << 16 | 81, f32, a, v, 3,            // OpCompositeExtract .a
+                              5u << 16 | cmp[func], tb, b, a, ref,    // alpha func ref
+                              3u << 16 | 247, ml, 0,                  // OpSelectionMerge %merge None
+                              4u << 16 | 250, b, ml, kl,              // OpBranchConditional: passed → %merge, failed → %kill
+                              2u << 16 | 248, kl, 1u << 16 | 252,     // %kill: OpKill
+                              2u << 16 | 248, ml};                    // %merge: the original OpReturn follows
+            memcpy(&o[no], x, sizeof x); no += 26; }
+        memcpy(&o[no], &w[i], n * 4); no += n; i += n; }
+    o[3] = c.bound; *onw = no; free(c.nt); return o;
+}
 static VkShaderModule vk_shader_module_(vkshader_t *s, uint64_t um, uint64_t im, uint32_t xo, int fd);
 VkShaderModule vk_shader_module(vkshader_t *s, uint64_t um, uint64_t im, uint32_t xo, int fd) { extern int g_prof_on; extern uint64_t g_prof_ns[8]; struct timespec a, b; if (g_prof_on) clock_gettime(CLOCK_MONOTONIC, &a);
     VkShaderModule m = vk_shader_module_(s, um, im, xo, fd); if (g_prof_on) { clock_gettime(CLOCK_MONOTONIC, &b); g_prof_ns[3] += (uint64_t)((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec)); } return m; }
 static VkShaderModule vk_shader_module_(vkshader_t *s, uint64_t um, uint64_t im, uint32_t xo, int fd) {
-    int dual = fd >> 1 & 1; fd &= 1;   // fd bit 1: the dual-source variant
+    int dual = fd >> 1 & 1, af = fd >> 4 & 15; fd &= 1;   // fd bit 1: the dual-source variant; bits 4-7: the alpha test's NVN function (spv_alpha_test; 0 and ALWAYS: none)
     if (fd && (s->stage != 1 || s->depth_repl)) fd = 0;
     if (dual && s->stage != 1) dual = 0;
-    if (!(um | im | xo | (uint32_t)fd | (uint32_t)dual) || !s->spv) return s->mod;
+    if (af >= 8 || s->stage != 1) af = 0;
+    if (!(um | im | xo | (uint32_t)fd | (uint32_t)dual | (uint32_t)af) || !s->spv) return s->mod;
+    enum { NVAR = (int)(sizeof s->var / sizeof s->var[0]) };
     if (xo == 1u << 31) {   // DM_VK_SPV_ALT
         pthread_mutex_lock(&g_sh_mu); for (int i = 0; i < s->nvar; i++) if (s->var[i].um == 0 && s->var[i].im == 0 && s->var[i].xo == xo) { VkShaderModule m = s->var[i].mod; pthread_mutex_unlock(&g_sh_mu); return m; }
-        VkShaderModule m = alt_module(s); if (s->nvar < 8) s->var[s->nvar++] = (typeof(s->var[0])){0, 0, xo, 0, m}; pthread_mutex_unlock(&g_sh_mu); return m; }
+        VkShaderModule m = alt_module(s); if (s->nvar < NVAR) s->var[s->nvar++] = (typeof(s->var[0])){0, 0, xo, 0, m}; pthread_mutex_unlock(&g_sh_mu); return m; }
     xo &= ~(1u << 31);
+    int fdv = fd | dual << 1 | af << 4;   // the variant's key
     pthread_mutex_lock(&g_sh_mu);
-    for (int i = 0; i < s->nvar; i++) if (s->var[i].um == um && s->var[i].im == im && s->var[i].xo == xo && s->var[i].fd == (fd | dual << 1)) { VkShaderModule m = s->var[i].mod; pthread_mutex_unlock(&g_sh_mu); return m; }
+    for (int i = 0; i < s->nvar; i++) if (s->var[i].um == um && s->var[i].im == im && s->var[i].xo == xo && s->var[i].fd == fdv) { VkShaderModule m = s->var[i].mod; pthread_mutex_unlock(&g_sh_mu); return m; }
     uint16_t bind[64]; uint8_t kind[64]; int nb = 0;
     for (int i = 0; i < s->nbind && i < 64; i++) if ((um | im) >> i & 1) { bind[nb] = s->b[i].binding; kind[nb++] = um >> i & 1 ? 1 : 2; }
     uint32_t nw = s->nspv, *w = nb ? spv_int_images(s->spv, s->nspv, bind, kind, nb, &nw) : NULL; VkShaderModule m = s->mod;
@@ -536,12 +606,21 @@ static VkShaderModule vk_shader_module_(vkshader_t *s, uint64_t um, uint64_t im,
         if (w && s->stage == 0) { uint32_t n3 = 0, *w3 = spv_vs_init(w, nw, &n3); if (w3) { free(w); w = w3; nw = n3; } } }   // the added outputs start as (0, 0, 0, 1) too
     if (fd && (w || !(nb || xo))) { uint32_t n2 = 0, *w2 = spv_frag_depth(w ? w : s->spv, nw, &n2); free(w); w = w2; nw = n2; }
     if (dual && (w || !(nb || xo || fd))) { uint32_t n2 = 0, *w2 = spv_dual(w ? w : s->spv, nw, &n2); free(w); w = w2; nw = n2; }
+    // the alpha test last. When it cannot be made, the variant keeps the rest (the fragment depth or dual source it had before) and only the test is left out,
+    // logged once per shader (every draw of a shader that writes no float colour 0 would meet it again)
+    int af_ok = 0;
+    if (af && (w || !(nb || xo || fd || dual))) { const char *why = ""; uint32_t n2 = 0, *w2 = spv_alpha_test(w ? w : s->spv, w ? nw : s->nspv, af, &n2, &why);
+        if (w2) { free(w); w = w2; nw = n2; af_ok = 1;
+            static int once; if (!once++) VKLOG("alpha test: the first fragment shader variant that tests it (shader %016llx, NVN function %d; the reference is a specialization constant)", (unsigned long long)s->key, af); }
+        else { int seen = 0; for (int i = 0; i < s->nvar; i++) seen |= s->var[i].fd >> 4 != 0; static int n;
+            if (!seen && n++ < 32) VKLOG("[RED] shader %016llx: no alpha test variant (NVN function %d): %s; drawn without the test", (unsigned long long)s->key, af, why); } }
     if (w) { VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, (size_t)nw * 4, w};
-        if (vkCreateShaderModule(V.dev, &ci, NULL, &m)) { m = s->mod; VKLOG("[RED] shader %016llx: its variant was refused (bindings %#llx / %#llx, outputs %#x, fragment depth %d, dual source %d)", (unsigned long long)s->key, (unsigned long long)um, (unsigned long long)im, xo, fd, dual); }
-        else VKLOG("shader %016llx: variant for bindings %#llx (uint texels) %#llx (int texels), outputs added %#x, fragment depth written %d, dual source %d", (unsigned long long)s->key, (unsigned long long)um, (unsigned long long)im, xo, fd, dual);
+        if (vkCreateShaderModule(V.dev, &ci, NULL, &m)) { m = s->mod; VKLOG("[RED] shader %016llx: its variant was refused (bindings %#llx / %#llx, outputs %#x, fragment depth %d, dual source %d, alpha function %d)", (unsigned long long)s->key, (unsigned long long)um, (unsigned long long)im, xo, fd, dual, af_ok ? af : 0); }
+        else VKLOG("shader %016llx: variant for bindings %#llx (uint texels) %#llx (int texels), outputs added %#x, fragment depth written %d, dual source %d, alpha function %d", (unsigned long long)s->key, (unsigned long long)um, (unsigned long long)im, xo, fd, dual, af_ok ? af : 0);
         free(w); }
-    else VKLOG("[RED] shader %016llx: no variant could be made (bindings %#llx / %#llx, outputs %#x, fragment depth %d, dual source %d)", (unsigned long long)s->key, (unsigned long long)um, (unsigned long long)im, xo, fd, dual);
-    if (s->nvar < 8) s->var[s->nvar++] = (typeof(s->var[0])){um, im, xo, fd | dual << 1, m};
+    else if (um | im | xo | (uint32_t)fd | (uint32_t)dual)
+        VKLOG("[RED] shader %016llx: no variant could be made (bindings %#llx / %#llx, outputs %#x, fragment depth %d, dual source %d, alpha function %d)", (unsigned long long)s->key, (unsigned long long)um, (unsigned long long)im, xo, fd, dual, af);
+    if (s->nvar < NVAR) s->var[s->nvar++] = (typeof(s->var[0])){um, im, xo, fdv, m};
     pthread_mutex_unlock(&g_sh_mu);
     return m;
 }
