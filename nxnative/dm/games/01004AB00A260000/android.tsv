@@ -16,3 +16,8 @@ orientation	landscape
 # the object (the player, the shield, props) flashed grey for a few frames, again with every new material / pass / state combination (994 pipelines and 5,771 skipped draws in
 # one session). Retroid Pocket Nova, 2026-11-14: with this the grey flashes are gone and the builds' hitches were not noticed at 60 fps
 env	DM_VK_ASYNC_PIPE=0
+# The rate is held at 60, not adapted: the game's movie player advances by game frames (one movie frame per two), so at the adaptive rate's 40 fps the opening ran at two
+# thirds speed and its sound starved (a third of every 10 s was silence), and after the movie the on-screen present times stopped arriving, so the rate swung between 60
+# and 40 for the rest of the session (this game's own limiter keeps its frame work at the period). Retroid Pocket Nova, 2026-11-14: pinned, the movies play at their speed
+# with sound (29 underruns in 2,000 callbacks) and play stays at 60; the float frame step keeps the game's speed when a frame is late
+env	DM_FPS_PIN=60
