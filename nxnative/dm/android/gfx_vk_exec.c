@@ -197,10 +197,31 @@ static int rc_value(uint64_t a, uint64_t *v) {   // 0 = unknown at replay time
     for (int i = g_rc_npend - 1; i >= 0; i--) if (g_rc_pend[i].addr == a) { if (g_rc_pend[i].kind != 1) return 0; *v = 0; return 1; }
     *v = *(const volatile uint64_t *)(uintptr_t)a; return 1;
 }
+// Diagnostics (no effect on the replay): which conditions a game uses, logged every 600 presents while it evaluates any. Counts since the last line: conditions by mode, known /
+// unknown at replay, judged false (skipped); SetRenderEnable(false); the counter reports by type (NVN_COUNTER_TYPE_*: TIMESTAMP 0 / TIMESTAMP_TOP 0x10, SAMPLES_PASSED 1, any other)
+static struct { uint64_t cond[2], known, unknown, unk_occ, skip, off, rep_ts, rep_sp, rep_other, last; uint32_t other_types; } g_rcs;
+static void rc_count_report(uint64_t t) {
+    if (t == 0 || t == 0x10) g_rcs.rep_ts++; else if (t == 1) g_rcs.rep_sp++; else { g_rcs.rep_other++; if (t < 32) g_rcs.other_types |= 1u << t; }
+}
+static void rc_stats_log(void) {
+    if (g_tex_frame < g_rcs.last + 600) return;
+    if (g_rcs.cond[0] + g_rcs.cond[1]) {
+        VKLOG("render_cond: %llu conditions (draw if equal %llu / if different %llu) in %llu presents: %llu known, %llu unknown (%llu on a non-timestamp report's address), %llu judged false (skipped); "
+              "%llu SetRenderEnable(false); counter reports: %llu timestamp, %llu SAMPLES_PASSED, %llu other (types mask %#x)",
+              (unsigned long long)(g_rcs.cond[0] + g_rcs.cond[1]), (unsigned long long)g_rcs.cond[0], (unsigned long long)g_rcs.cond[1], (unsigned long long)(g_tex_frame - g_rcs.last),
+              (unsigned long long)g_rcs.known, (unsigned long long)g_rcs.unknown, (unsigned long long)g_rcs.unk_occ, (unsigned long long)g_rcs.skip, (unsigned long long)g_rcs.off,
+              (unsigned long long)g_rcs.rep_ts, (unsigned long long)g_rcs.rep_sp, (unsigned long long)g_rcs.rep_other, g_rcs.other_types);
+        memset(&g_rcs, 0, sizeof g_rcs);
+    }
+    g_rcs.last = g_tex_frame;
+}
 static void render_cond(const p_render_cond *rc) {
-    if (rc->mode >= 2) { g_rc_skip = rc->mode == 3; return; }
+    rc_stats_log();
+    if (rc->mode >= 2) { g_rc_skip = rc->mode == 3; g_rcs.off += rc->mode == 3; return; }
     uint64_t x = 0, y = 0; int known = rc_value(rc->addr, &x) & rc_value(rc->addr + 16, &y);
     g_rc_skip = known && (rc->mode ? x == y : x != y);
+    g_rcs.cond[rc->mode != 0]++; if (known) g_rcs.known++; else { g_rcs.unknown++; g_rcs.unk_occ += rc_occ_has(rc->addr) || rc_occ_has(rc->addr + 16); }
+    g_rcs.skip += g_rc_skip;
 }
 
 void vk_exec_reset(void) {   // a new submission: NVN state does not carry over between command buffers, the replay starts from the defaults
@@ -2439,7 +2460,7 @@ static void exec_ops(const uint8_t *p) {
         case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
         case OP_CALL: { uint64_t t; memcpy(&t, a, 8); exec_ops((const uint8_t *)(uintptr_t)t); break; }
         case OP_SIGNAL_EVENT: { volatile uint32_t *val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, a + 8, 4); memcpy(&v, a + 12, 4); mtl_sub_event(val, m, v); break; }
-        case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, a + 8, 8); if (DM_GAME_RENDER_COND) rc_note(ad, t == 0 || t == 0x10 ? 1 : 2); mtl_sub_counter(ad, (uint32_t)t); break; }
+        case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, a + 8, 8); if (DM_GAME_RENDER_COND) { rc_note(ad, t == 0 || t == 0x10 ? 1 : 2); rc_count_report(t); } mtl_sub_counter(ad, (uint32_t)t); break; }
         case OP_RESET_COUNTER: break;
         case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8); s->fence = mtl_last_fence() + 1; s->fenced = 1; break; }
         // (DM_VK_TRACE_PASS=-2 lists the buffer writes too: copies, clears and uniform updates, by address)
