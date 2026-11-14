@@ -197,6 +197,7 @@ static void hint_report(int64_t w, int64_t pq, int64_t pace, int64_t now, int64_
 // still reaches its vsync. Viractal at 60 fps (FPSLocker's unlock) stepped down to 40 on p90 work of 17.5-17.7 ms while it dropped 0-10 of 300 frames on
 // screen at 60 with the rate held (DM_ADAPTIVE_FPS=0; work p50 6 ms, GPU 5-11 ms), and the player saw the counter fall into the 30s whenever the pieces moved
 static uint8_t g_late[64]; static int g_nshown; static unsigned g_held_back;
+static int g_read_seen; static unsigned g_no_read, g_held_noread;   // a reading came at least once; presents without one (all time); step-downs held back for want of readings
 // With display times (vk_refresh_ms) the intervals are whole vsyncs, and 1.5 periods sat on a vsync boundary at 60 fps on 120 Hz (25.0 ms against 25.0): the limit
 // moves a quarter refresh past it, so the same frames count as with the hand-over times before. A stricter period + half a refresh counted every one-vsync miss:
 // Unicorn Overlord's opening then showed 70-157 of 300 frames at 25 ms and stepped to 40 fps, where it had held 60 (about 50-54 fps on screen)
@@ -206,7 +207,8 @@ __attribute__((weak)) double vk_refresh_ms(void) { return 0; }
 // the rate down to 40 fps, where the paced frames ran longer still in the game's own measure and it asked for interval 2 more often
 __attribute__((weak)) double dm_nvn_present_hold_ms(void) { return 0; }
 void dm_perf_present(double iv_ms) {
-    if (iv_ms == 0) return;
+    if (iv_ms == 0) { g_no_read++; return; }
+    g_read_seen = 1;
     double r = vk_refresh_ms(), hold = dm_nvn_present_hold_ms(), per = STEPS[g_step] / 1e6, lim = (hold > per ? hold : per) * 1.5 + r / 4;
     g_late[g_nshown++ % 64] = iv_ms < 0 || iv_ms > lim;
 }
@@ -223,7 +225,7 @@ static void adapt_frame(int64_t work, int64_t now) {
     if (g_frame_cost > work) work = g_frame_cost;
     if (!g_adapt) return;
     g_work_hist[g_nwork++ % 64] = work;
-    { static unsigned k; if (++k % 600 == 0) LOG("[perf] adaptive frame rate: %.0f fps, frame work p50 %.1f / p90 %.1f / p95 %.1f ms (last %.1f ms); late on screen %d of 64, step-downs held back %u", 1e9 / STEPS[g_step], work_pct(50) / 1e6, work_pct(90) / 1e6, work_p95() / 1e6, work / 1e6, shown_late(), g_held_back); }
+    { static unsigned k; if (++k % 600 == 0) LOG("[perf] adaptive frame rate: %.0f fps, frame work p50 %.1f / p90 %.1f / p95 %.1f ms (last %.1f ms); late on screen %d of 64, step-downs held back %u (%u for want of readings); presents without a reading %u", 1e9 / STEPS[g_step], work_pct(50) / 1e6, work_pct(90) / 1e6, work_p95() / 1e6, work / 1e6, shown_late(), g_held_back, g_held_noread, g_no_read); }
     int pin = fps_pin(); if (pin >= 0) { if (g_step != pin) { g_step = pin; g_last_change = now; g_nshown = 0; } return; }
     // Judged on the 90th percentile of the last 64 frames' work, from 4 s after a change: the GPU and CPU clocks take a few seconds to rise for a shorter
     // period, and with the 95th percentile against 95% of the period NEO's crowd fell back from 40 to 30 fps within 2 s every time, though pinned at
@@ -234,6 +236,10 @@ static void adapt_frame(int64_t work, int64_t now) {
     if (g_step + 1 < nsteps && p90 > STEPS[g_step] * 105 / 100) {
         // only when the frames miss the display too: at least 1 in 10 of the last 64 on screen (as the 90th percentile), or no readings to tell
         int late = shown_late(); if (late >= 0 && late < 7) g_held_back++;   // veto only the downshift: the chosen upshift percentile may still fit
+        // No readings although the display gave them before: the readings broke (hle_nvn.c looked them up by a window's own count, which restarts when the game initializes
+        // a window again), not a device without them. Judged on work alone, a game whose own limiter paces its frames (DARK SOULS: REMASTERED: p50 16.7, p90 17.5 ms at 60,
+        // the limiter's sleep in the work) stepped down to 40 and back up every few seconds; held back instead, and logged (the first eight times)
+        else if (late < 0 && g_read_seen) { g_held_back++; if (g_held_noread++ < 8) LOG("[perf] adaptive frame rate: a step down held back, too few on-screen readings (%d since the last change) although the display gave them before (%u presents without one so far)", g_nshown, g_no_read); }
         else {
             // back down soon after a step up: the next try waits twice as long (up to a minute), so the rate does not swing between two steps
             if (g_last_up && now - g_last_up < 10000000000ll) { g_up_hold = g_up_hold * 2 > 60000000000ll ? 60000000000ll : g_up_hold * 2; }

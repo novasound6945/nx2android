@@ -44,10 +44,15 @@ static void present_time_reset(void) {   // the old swapchain's pending results 
     memset(g_pres_ids, 0, sizeof g_pres_ids);
     pthread_mutex_lock(&g_pres_mu); memset(g_pres_t, 0, sizeof g_pres_t); pthread_mutex_unlock(&g_pres_mu);
 }
+// Lookups that gave no time, by reason (the display timing line every 600 presents): the slot held another ticket (an older one: never begun, or a newer one: asked for one
+// over PRES_TIMES presents old; hle_nvn.c asked by a window's own count before, which restarts at 0 when the game initializes a window again), or the ticket's display time
+// has not come back (yet). Each present looks up two tickets
+static uint64_t g_ptg_ok, g_ptg_older, g_ptg_newer, g_ptg_pending;
 static double present_time_get(uint64_t ticket) {
     pthread_mutex_lock(&g_pres_mu);
     typeof(g_pres_t[0]) *p = &g_pres_t[ticket % PRES_TIMES];
     double t = ticket && p->ticket == ticket ? p->ns / 1e9 : 0;
+    if (ticket) { if (p->ticket != ticket) { if (p->ticket < ticket) g_ptg_older++; else g_ptg_newer++; } else if (!p->ns) g_ptg_pending++; else g_ptg_ok++; }
     pthread_mutex_unlock(&g_pres_mu);
     return t;
 }
@@ -833,8 +838,10 @@ static uint64_t pace_desired(double period) {   // the frame's desired present t
             if (pt[i].desiredPresentTime && pt[i].actualPresentTime > pt[i].desiredPresentTime + g_refresh_ns) g_pace_slip++;   // went out a vsync or more after its own
         }
     g_pace_n++;
-    if (g_pace_n % 600 == 0) VKLOG("[perf] display timing: %llu frames, %llu resyncs, %llu shown a vsync or more after their time (cumulative)%s",
-                                   (unsigned long long)g_pace_n, (unsigned long long)g_pace_resync, (unsigned long long)g_pace_slip, g_pace_on ? "" : "; off (DM_VK_PACE=0)");
+    if (g_pace_n % 600 == 0) { pthread_mutex_lock(&g_pres_mu); uint64_t ok = g_ptg_ok, ol = g_ptg_older, nw = g_ptg_newer, pd = g_ptg_pending; g_ptg_ok = g_ptg_older = g_ptg_newer = g_ptg_pending = 0; pthread_mutex_unlock(&g_pres_mu);
+        VKLOG("[perf] display timing: %llu frames, %llu resyncs, %llu shown a vsync or more after their time (cumulative)%s; time lookups in the last 600: %llu with a time, %llu not come back, %llu for another present's slot (%llu older, %llu newer)",
+              (unsigned long long)g_pace_n, (unsigned long long)g_pace_resync, (unsigned long long)g_pace_slip, g_pace_on ? "" : "; off (DM_VK_PACE=0)",
+              (unsigned long long)ok, (unsigned long long)pd, (unsigned long long)(ol + nw), (unsigned long long)ol, (unsigned long long)nw); }
     if (!g_pace_on || !g_refresh_ns || !g_pace_anchor || period <= 0) { g_pace_target = 0; return 0; }
     // The earliest vsync this frame can make: its GPU work (submitted just before), the blit, then the latch a vsync before it is shown. When the cadence's next vsync is
     // earlier, the cadence restarts half a vsync further out than that, so the next frames have room for the jitter: restarting at the earliest itself made 31 long frames
@@ -866,6 +873,14 @@ static void present_window(vkimg_t *im, const int crop[4], double period, uint64
     VkClearColorValue black = {{0, 0, 0, 1}}; VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     vkCmdClearColorImage(cb, tgt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &rg);
     int cx = crop ? crop[0] : 0, cy = crop ? crop[1] : 0, cw = crop && crop[2] ? crop[2] : (int)im->w, ch = crop && crop[3] ? crop[3] : (int)im->h;
+    // DM_WINDOW_CROP=<width>x<height> (read once; a profile's env row): the part of the window texture fitted to the screen, from the crop's origin (the texture's corner when the game
+    // sets none), in the window texture's pixels, in place of the game's crop. For a patch that makes the game draw a narrower picture into its window without telling the window:
+    // DARK SOULS: REMASTERED's 4:3 patch draws its picture into the left 3/4 of its 1920x1080 window texture and never calls SetCrop, so the whole texture was shown, the
+    // picture at its left and black at its right (1440x1080 shows that part alone). The touch points follow (vk_pic_set below). Unset: the game's crop, as before
+    { static int ow = -1, oh; if (ow < 0) { const char *e = getenv("DM_WINDOW_CROP"); ow = oh = 0;
+        if (e && sscanf(e, "%dx%d", &ow, &oh) == 2 && ow > 0 && oh > 0) VKLOG("window crop %dx%d from the window texture's crop origin (DM_WINDOW_CROP)", ow, oh);
+        else { if (e && *e) VKLOG("[RED] DM_WINDOW_CROP=%s: must be <width>x<height>, the game's crop is used", e); ow = oh = 0; } }
+      if (ow > 0) { cw = ow < (int)im->w - cx ? ow : (int)im->w - cx; ch = oh < (int)im->h - cy ? oh : (int)im->h - cy; if (cw < 1) cw = 1; if (ch < 1) ch = 1; } }
     double s = fmin((double)g_sext.width / cw, (double)g_sext.height / ch); int dw = (int)(cw * s), dh = (int)(ch * s), dx = ((int)g_sext.width - dw) / 2, dy = ((int)g_sext.height - dh) / 2;
     vk_pic_set((float)dx / g_sext.width, (float)dy / g_sext.height, (float)dw / g_sext.width, (float)dh / g_sext.height);
     VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{cx, cy, 0}, {cx + cw, cy + ch, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
