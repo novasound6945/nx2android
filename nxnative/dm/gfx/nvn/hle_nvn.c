@@ -1259,6 +1259,12 @@ static void pres_ticket_note(uint64_t tk, int hold) { if (tk) { g_hold_ring[tk %
 static void *replay_main(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "nvn replay"); dm_perf_replay_thread();
     for (;;) {
+        // DM_REPLAY_SPIN_US=n (live, read every 64 jobs): before sleeping for the next job, wait for it busily up to n µs. A governor that clocks a core by how
+        // busy it was (Qualcomm's WALT on the Retroid Pocket 6, deaf to the ADPF session) held the replay thread's prime core at 1.84 of 3.19 GHz while that
+        // thread waited a third of each frame for the game's next submission, so the replay itself ran slow (Unicorn Overlord's heavy maps, 2026-11-15)
+        { static int spin_us; static unsigned sk; if (!(sk++ & 63)) { const char *e = getenv("DM_REPLAY_SPIN_US"); spin_us = e ? atoi(e) : 0; }
+          if (spin_us > 0 && !__atomic_load_n(&g_njob, __ATOMIC_ACQUIRE)) { uint64_t end = now_ns() + (uint64_t)spin_us * 1000u;
+              while (!__atomic_load_n(&g_njob, __ATOMIC_ACQUIRE) && now_ns() < end) __asm__ volatile("yield"); } }
         pthread_mutex_lock(&g_job_mu); while (!g_njob) pthread_cond_wait(&g_job_cv, &g_job_mu);
         nvn_job j = g_jobs[0]; pthread_mutex_unlock(&g_job_mu);
         if (j.kind == JOB_SUBMIT) { uint64_t ts = now_ns(); __atomic_store_n(&g_replaying, g_job_done + 1, __ATOMIC_RELAXED); submit_now(j.q, j.n, (const NVNcommandHandle *)j.h); __atomic_store_n(&g_replaying, 0, __ATOMIC_RELAXED);

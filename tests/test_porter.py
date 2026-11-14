@@ -47,6 +47,15 @@ class AndroidProfiles(unittest.TestCase):
         for v in ('10', '85', '42'):
             with self.assertRaises(android_profile.ProfileError, msg=v): android_profile.load(profile_dir([('status', 'boots'), ('setting', f'opacity={v}')]).name)
 
+    def test_rate_setting(self):   # the pause menu's Frame rate limit (front_android.c settings_load rate=): 0 auto, 60, 40, 30
+        self.assertEqual(android_profile.load(profile_dir([('status', 'boots'), ('setting', 'rate=40')]).name).settings, {'rate': '40'})
+        for v in ('45', '120', 'auto', '-1'):
+            with self.assertRaises(android_profile.ProfileError, msg=v): android_profile.load(profile_dir([('status', 'boots'), ('setting', f'rate={v}')]).name)
+        steps = re.search(r'RATE_STEPS\[OVM_RATES\] = \{([^}]*)\}', (REPO / 'nxnative/dm/android/front_android.c').read_text(encoding='utf-8')).group(1)
+        self.assertEqual(sorted(s.strip() for s in steps.split(',')), sorted(android_profile.SETTINGS['rate']))   # the porter takes the values the app reads
+        os.environ.pop('DM_GAMES_DIR', None)
+        self.assertEqual(android_profile.load('010054B01AD92000').settings, {'docked': '0'})   # Unicorn Overlord: the menu left at Auto (the profile's 60 fps pin), the player's choice
+
     def test_default_package(self):
         d = profile_dir([('status', 'boots')])
         self.assertEqual(android_profile.load(d.name).package, 'org.nx2a.t0100000000aaa000')

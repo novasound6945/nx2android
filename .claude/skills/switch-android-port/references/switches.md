@@ -115,7 +115,7 @@ The source of each switch is in `nxnative/dm/android/` unless noted. Check the c
 
 | Switch | When read | Meaning |
 |---|---|---|
-| `DM_FPS_PIN=60/40/30` | live | hold that frame-rate step; any other value lets it adapt again |
+| `DM_FPS_PIN=60/40/30` | live | hold that frame-rate step; any other value lets it adapt again. The pause menu's Frame rate limit (`rate=` in `settings.txt`, a profile's `setting rate=` for new installs) sets it over `env.txt`'s, live; its Auto gives `env.txt`'s value back |
 | `DM_RENDER_SCALE=0.5`-`1.0` | live (every 30 presents) | games with a render-scale stub (Tears of the Kingdom, Breath of the Wild): the 3D views at that fraction of the game's size; 1.0 gives the game's own dynamic resolution back |
 | `DM_DYN_SCALE=<lowest scale>` | live | the host's dynamic resolution through the render-scale stub: every 30 frames held at the cap, GPU p90 over 85% of the frame time lowers the scale 0.05, under 70% raises it; 0 = off (scale 1.0). Tears of the Kingdom's pond: 1.0 -> 0.6 saved only 2.6 ms of GPU p90 |
 | `DM_ADAPTIVE_FPS=0` | start-up | keep the game's own period |

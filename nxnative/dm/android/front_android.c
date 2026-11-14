@@ -86,11 +86,30 @@ static const char *const LAYOUT_NAMES[2] = {"tablet", "phone"};
 static int ctl_named(const char *n) { for (int i = 0; i < OV_N; i++) if (!strcmp(OV_LAYOUTS[0][i].name, n)) return i; return -1; }
 int dm_opmode(void); void dm_set_opmode(int m);   // hle_oe.c: 0 handheld, 1 docked; a change reaches the game as the Switch's operation mode notification
 static char g_set_aspect[16];   // settings.txt's aspect= (auto, 4:3, 16:9): which rewrite of the game runs (aspect_variant); kept as it is when the menu saves
+// The frame rate limit (the Game tab, settings.txt rate=: 0 Auto, 60, 40, 30), held through DM_FPS_PIN, which perf_android.c fps_pin reads every 30 frames: 60, 40
+// or 30 hold that step (40 asks the display for 120 Hz, three vsyncs a frame), any other value lets the adaptive rate decide. Auto gives back DM_FPS_PIN as the env
+// files set it at the start (env.txt, then a variant's env-4x3.txt: a profile's pin), or "auto" (no pin) when they set none. The variable is set from the start on,
+// before the game's threads, so a change in the menu only replaces its value: bionic's setenv adds a variable by reallocating the environment's array, which the
+// present thread may be reading in getenv (replacing a value swaps one pointer, and the old string stays allocated)
+static const int RATE_STEPS[OVM_RATES] = {0, 60, 40, 30};   // as the menu steps through them (overlay_layout.h OVM_RATES)
+static _Atomic int g_set_rate;   // 0 Auto, else the frame rate held
+static char g_rate_env[32]; static int g_rate_env_set;   // DM_FPS_PIN as the env files set it at the start, and whether they set it
+static int rate_step(int v) { for (int i = 0; i < OVM_RATES; i++) if (RATE_STEPS[i] == v) return i; return -1; }   // v's index in RATE_STEPS, -1 a value the menu has not
+static void rate_apply(int start) {   // start: game_start, before the game's threads (the env files' DM_FPS_PIN is kept for Auto); 0: a change in the menu
+    int v = atomic_load(&g_set_rate); char n[8]; snprintf(n, sizeof n, "%d", v);
+    if (start) { const char *e = getenv("DM_FPS_PIN"); g_rate_env_set = e != NULL; snprintf(g_rate_env, sizeof g_rate_env, "%s", e ? e : ""); }
+    setenv("DM_FPS_PIN", v ? n : g_rate_env_set ? g_rate_env : "auto", 1);
+    if (v && start) LOG("[menu] frame rate limit: %d fps (settings.txt rate=%d, over the env files' DM_FPS_PIN %s)", v, v, g_rate_env_set ? g_rate_env : "(none)");
+    else if (v) LOG("[menu] frame rate limit: %d fps (DM_FPS_PIN=%d)", v, v);
+    else if (!start && g_rate_env_set) LOG("[menu] frame rate limit: auto (DM_FPS_PIN=%s, as the env files set it)", g_rate_env);
+    else if (!start) LOG("[menu] frame rate limit: auto (the adaptive rate: the env files set no DM_FPS_PIN)");
+}
 static void settings_load(void) {
     char p[600]; snprintf(p, sizeof p, "%s/settings.txt", g_root); FILE *f = fopen(p, "r"); char line[128];
     if (!f) return;
     while (fgets(line, sizeof line, f)) { int v; if (sscanf(line, "overlay=%d", &v) == 1) atomic_store(&g_set_overlay, v != 0); else if (sscanf(line, "rumble=%d", &v) == 1) atomic_store(&g_set_rumble, v != 0);
         else if (sscanf(line, "fps=%d", &v) == 1) atomic_store(&g_set_fps, v != 0);
+        else if (sscanf(line, "rate=%d", &v) == 1) { if (rate_step(v) >= 0) atomic_store(&g_set_rate, v); else LOG("[RED] settings.txt: rate=%d is not 0 (auto), 60, 40 or 30: auto", v); }   // rate_apply
         else if (sscanf(line, "docked=%d", &v) == 1) setenv("DM_OPMODE", v ? "1" : "0", 1);   // over env.txt's: the host reads it once, at its first query
         else if (sscanf(line, "aspect=%15s", g_set_aspect) == 1) { if (strcmp(g_set_aspect, "auto")) setenv("DM_ASPECT", g_set_aspect, 1); else unsetenv("DM_ASPECT"); }   // aspect_variant
         else if (sscanf(line, "opacity=%d", &v) == 1) atomic_store(&g_set_opacity, v < OV_OPACITY_MIN ? OV_OPACITY_MIN : v > OV_OPACITY_MAX ? OV_OPACITY_MAX : v);
@@ -111,8 +130,8 @@ static void settings_load(void) {
 static void settings_save(void) {
     char p[600], tmp[610]; snprintf(p, sizeof p, "%s/settings.txt", g_root); snprintf(tmp, sizeof tmp, "%s.new", p);
     FILE *f = fopen(tmp, "w"); if (!f) { LOG("[RED] cannot write %s", tmp); return; }
-    fprintf(f, "overlay=%d\nrumble=%d\ndocked=%d\nfps=%d\nopacity=%d\ngrid=%d\n", atomic_load(&g_set_overlay), atomic_load(&g_set_rumble), dm_opmode() != 0, atomic_load(&g_set_fps),
-            atomic_load(&g_set_opacity), atomic_load(&g_set_grid));
+    fprintf(f, "overlay=%d\nrumble=%d\ndocked=%d\nfps=%d\nrate=%d\nopacity=%d\ngrid=%d\n", atomic_load(&g_set_overlay), atomic_load(&g_set_rumble), dm_opmode() != 0, atomic_load(&g_set_fps),
+            atomic_load(&g_set_rate), atomic_load(&g_set_opacity), atomic_load(&g_set_grid));
     if (atomic_load(&g_set_labels) >= 0) fprintf(f, "labels=%d\n", atomic_load(&g_set_labels));   // (only once the player chose: until then env.txt decides)
     if (g_set_aspect[0]) fprintf(f, "aspect=%s\n", g_set_aspect);
     for (int l = 0; l < 2; l++) for (int i = 0; i < OV_N; i++) {
@@ -441,7 +460,8 @@ static void *temp_watch(void *a) {
 }
 
 // ---- the pause menu: the game is held while it is open; touches and a controller's keys go to it. Two tabs (overlay_layout.h OVM_TAB_ITEMS): the gamepad's
-// settings (shown, opacity, the layout editor, rumble, a controller's face buttons) and the game's (the frame rate counter, the mode, exporting and importing the save);
+// settings (shown, opacity, the layout editor, rumble, a controller's face buttons) and the game's (the frame rate counter, the mode, the frame rate limit, exporting
+// and importing the save);
 // Resume under them ----
 static _Atomic int g_menu_hi = -1, g_menu_tab;   // the highlighted row (a controller's selection, or the row a finger is on), -1 none; the open tab
 static int g_menu_ptr = -1, g_menu_row = -2;   // the pointer pressing in the menu, and the row it went down on (-3 the menu button)
@@ -455,7 +475,8 @@ int dm_menu_state(void) {
     if (atomic_load(&g_edit)) return OVE_ST | atomic_load(&g_ed_st);
     if (atomic_load(&g_sp_on)) return OVS_ST | (atomic_load(&g_sp_hi) + 1) << 4 | (atomic_load(&g_sp_ver) & 255) << 20;
     return atomic_load(&g_set_overlay) | atomic_load(&g_set_rumble) << 1 | (dm_opmode() != 0) << 2 | atomic_load(&g_set_fps) << 3 | (atomic_load(&g_menu_hi) + 1) << 4 |
-           atomic_load(&g_menu_tab) << 8 | atomic_load(&g_set_opacity) << 9 | atomic_load(&g_sv_st) << 20 | (atomic_load(&g_sv_n) & 15) << 24 | pad_labels() << 28;
+           atomic_load(&g_menu_tab) << 8 | atomic_load(&g_set_opacity) << 9 | atomic_load(&g_sv_st) << 20 | (atomic_load(&g_sv_n) & 15) << 24 | pad_labels() << 28 |
+           (rate_step(atomic_load(&g_set_rate)) & 3) << 29;
 }
 int dm_overlay_fps(void) { return atomic_load(&g_set_fps) && !atomic_load(&g_menu); }   // gfx_vk_present.c draws the counter (not while the menu holds the game)
 static void menu_open(int hi) {
@@ -478,8 +499,9 @@ static void menu_close(void) {
     if (!atomic_exchange(&g_menu, 0)) return;
     g_menu_ptr = -1; atomic_store(&g_menu_t, 0);
     hold_sync(); dm_haptics_suspend(4, 0); dm_overlay_redraw();
-    LOG("[menu] closed: the game goes on (gamepad %s, opacity %d%%, rumble %s, face buttons by %s, frame rate %s, %s)", atomic_load(&g_set_overlay) ? "on" : "off", atomic_load(&g_set_opacity),
-        atomic_load(&g_set_rumble) ? "on" : "off", pad_labels() ? "label" : "position", atomic_load(&g_set_fps) ? "shown" : "hidden", dm_opmode() ? "docked" : "handheld");
+    char lim[16]; int rate = atomic_load(&g_set_rate); if (rate) snprintf(lim, sizeof lim, "%d fps", rate); else snprintf(lim, sizeof lim, "auto");
+    LOG("[menu] closed: the game goes on (gamepad %s, opacity %d%%, rumble %s, face buttons by %s, frame rate %s, limit %s, %s)", atomic_load(&g_set_overlay) ? "on" : "off", atomic_load(&g_set_opacity),
+        atomic_load(&g_set_rumble) ? "on" : "off", pad_labels() ? "label" : "position", atomic_load(&g_set_fps) ? "shown" : "hidden", lim, dm_opmode() ? "docked" : "handheld");
 }
 static void menu_opacity(int v) {   // the slider: a new value is drawn at once and saved when the finger lifts (menu_touch) or with each controller step
     v = v < OV_OPACITY_MIN ? OV_OPACITY_MIN : v > OV_OPACITY_MAX ? OV_OPACITY_MAX : v;
@@ -492,6 +514,7 @@ static void menu_do(int item) {
     else if (item == OVM_RUMBLE) { int on = !atomic_load(&g_set_rumble); atomic_store(&g_set_rumble, on); dm_haptics_android_set(on); settings_save(); }
     else if (item == OVM_FPS) { atomic_store(&g_set_fps, !atomic_load(&g_set_fps)); settings_save(); }
     else if (item == OVM_MODE) { dm_set_opmode(dm_opmode() ? 0 : 1); settings_save(); }   // the game takes it when it goes on
+    else if (item == OVM_RATE) { atomic_store(&g_set_rate, RATE_STEPS[(rate_step(atomic_load(&g_set_rate)) + 1) % OVM_RATES]); rate_apply(0); settings_save(); }   // Auto, 60, 40, 30, Auto
     else if (item == OVM_PAD) { atomic_store(&g_set_labels, !pad_labels()); settings_save(); }   // at once (pad_labels)
     else if (item == OVM_TAB) { menu_tab(atomic_load(&g_menu_tab) + 1); return; }
     else if (item == OVM_EDIT) { dm_haptics_android_tap(); ed_open(); return; }
@@ -540,7 +563,7 @@ static void menu_key(uint64_t bit) {   // a controller key pressed while the men
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_TAB) menu_tab(tab + (bit == DM_BTN_LEFT ? -1 : 1));
     else if (bit == DM_BTN_L || bit == DM_BTN_ZL || bit == DM_BTN_R || bit == DM_BTN_ZR) {
         menu_tab(tab + (bit == DM_BTN_L || bit == DM_BTN_ZL ? -1 : 1));
-        if (hi > 0 && ov_menu_item(atomic_load(&g_menu_tab), hi) < 0) atomic_store(&g_menu_hi, OVM_ROWS - 1);   // (the other tab has fewer rows)
+        if (hi > 0 && ov_menu_item(atomic_load(&g_menu_tab), hi) < 0) atomic_store(&g_menu_hi, OVM_ROWS - 1);   // (a tab with fewer rows: OVM_TAB_ITEMS' -1)
     }
     else if (bit == DM_BTN_A) menu_do(hi < 0 ? OVM_RESUME : item);
     else if (bit == DM_BTN_B || bit == DM_BTN_PLUS) menu_close();
@@ -1291,7 +1314,8 @@ static void game_start(ANativeActivity *act, int late) {   // late: after onCrea
     // the save manager's requests (saves_android.c), before the host mounts the save: an import chosen in the menu or pushed by porter, an export porter asks for
     if (dm_saves_start(g_root)) { LOG("[saves] the request asked the app to end: the game is not started"); g_quit = 1; if (late) act_finish(act); return; }
     if (!romfs_readable(act, sdk)) { g_quit = 1; if (late) act_finish(act); return; }   // after the save manager's requests, which need no RomFS
-    settings_load(); aspect_variant(act); dm_haptics_android_start(act, atomic_load(&g_set_rumble)); dm_lan_android_start(act);
+    settings_load(); aspect_variant(act); rate_apply(1);   // (after the variant's env-4x3.txt, which comes after env.txt: Auto gives back what both set)
+    dm_haptics_android_start(act, atomic_load(&g_set_rumble)); dm_lan_android_start(act);
     { pthread_t w; if (!pthread_create(&w, NULL, pad_watch, act->vm)) pthread_detach(w); }
     { pthread_t w; if (!pthread_create(&w, NULL, temp_watch, act->vm)) pthread_detach(w); }
     LOG("NX2A host on Android: files %s, RomFS %s, saves %s", g_root, getenv("DM_ROMFS"), act->internalDataPath);

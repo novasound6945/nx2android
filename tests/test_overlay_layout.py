@@ -81,8 +81,16 @@ int main(void) {
     assert(ov_drag_pos(1100, 600, 1013, 50) == 506.5f);
     assert(ov_drag_pos(1100, 505, 1013, 50) == 508);
 
-    // the Gamepad tab's last row is the face buttons' (front_android.c pad_labels); the Game tab has no row there, and the controller's up and down skip it
-    assert(ov_menu_item(0, OVM_ROWS - 2) == OVM_PAD && ov_menu_item(1, OVM_ROWS - 2) < 0 && ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
+    // the Gamepad tab's last row is the face buttons' (front_android.c pad_labels); the Game tab's: the frame rate counter, the mode, the frame rate limit under
+    // it (front_android.c rate_apply), the save's export and import
+    assert(ov_menu_item(0, OVM_ROWS - 2) == OVM_PAD && ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
+    assert(ov_menu_item(1, 1) == OVM_FPS && ov_menu_item(1, 2) == OVM_MODE && ov_menu_item(1, 3) == OVM_RATE && ov_menu_item(1, OVM_ROWS - 2) == OVM_IMPORT);
+    {   // every item has one row in one tab, before Resume (gfx_vk_present.c ov_menu_panel sizes the letters by the items before OVM_RESUME)
+        int seen[OVM_N] = {0};
+        for (int t = 0; t < OVM_TABS; t++) for (int row = 1; row < OVM_ROWS - 1; row++) { int it = ov_menu_item(t, row); if (it >= 0) { assert(it < OVM_RESUME); seen[it]++; } }
+        for (int it = 0; it < OVM_RESUME; it++) assert(seen[it] == 1);
+    }
+    assert(OVM_RATES == 4 && ((OVM_RATES - 1) << 29) > 0 && !(((OVM_RATES - 1) << 29) & (1 << 28)));   // dm_menu_state's bits 29..30: clear of bit 28 and of the sign
     const float screens[][2] = {{915, 412}, {1216, 760}, {2400, 1080}, {1080, 2400}};
     for (unsigned s = 0; s < sizeof screens / sizeof screens[0]; s++) {
         float W = screens[s][0], H = screens[s][1], step = H / OVE_GRID_ROWS, p[4];

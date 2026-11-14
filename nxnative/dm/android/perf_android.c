@@ -30,6 +30,7 @@ static struct {
     int (*update)(APerformanceHintSession *, int64_t);
     int (*report)(APerformanceHintSession *, int64_t);
     int (*set_threads)(APerformanceHintSession *, const int32_t *, size_t);
+    void (*close)(APerformanceHintSession *);   // Android 13 has no setThreads: the session is made again with the threads (hint_threads_scan)
     // Android 15: the frame's GPU time beside its CPU time (the GPU's clock follows it too)
     int (*report2)(APerformanceHintSession *, AWorkDuration *);
     AWorkDuration *(*wd_create)(void);
@@ -65,6 +66,7 @@ static void hint_init(int64_t target) {
     H.get = dlsym(lib, "APerformanceHint_getManager"); H.create = dlsym(lib, "APerformanceHint_createSession");
     H.update = dlsym(lib, "APerformanceHint_updateTargetWorkDuration"); H.report = dlsym(lib, "APerformanceHint_reportActualWorkDuration");
     H.set_threads = dlsym(lib, "APerformanceHint_setThreads");   // Android 14
+    H.close = dlsym(lib, "APerformanceHint_closeSession");
     H.report2 = dlsym(lib, "APerformanceHint_reportActualWorkDuration2");   // Android 15
     H.wd_create = dlsym(lib, "AWorkDuration_create");
     H.wd_start = dlsym(lib, "AWorkDuration_setWorkPeriodStartTimestampNanos"); H.wd_total = dlsym(lib, "AWorkDuration_setActualTotalDurationNanos");
@@ -81,7 +83,7 @@ static void hint_init(int64_t target) {
 // The other threads that do frame work: the presenting thread is the game's render thread, and its main thread (the simulation) and job workers set
 // the pace as much. Every 300 frames the threads that used at least 15% of a core since the last look join the session (up to 5 besides the
 // presenting one), the ones that went idle leave it. Without them NEO's main thread ran on mid cores at 1.9 of 3.5 GHz and its bursts made
-// 45 to 80 ms frames. Needs APerformanceHint_setThreads (Android 14)
+// 45 to 80 ms frames. APerformanceHint_setThreads (Android 14), or the session made again with them (Android 13)
 static uint64_t task_ticks(int tid) {
     char p[64], b[512]; snprintf(p, sizeof p, "/proc/self/task/%d/stat", tid);
     FILE *f = fopen(p, "r"); if (!f) return 0;
@@ -115,19 +117,45 @@ static void hint_threads_scan(int32_t self) {
         }
     }
     np = 0; for (int i = 0; i < nc; i++) { prev[np].tid = cur[i].tid; prev[np].ticks = cur[i].used; np++; }
-    if (!g_hint || !H.set_threads) return;
+    if (!g_hint || !(H.set_threads || H.close)) return;
     int same = npick == g_hint_n; for (int i = 0; same && i < npick; i++) { int in = 0; for (int j = 0; j < g_hint_n; j++) in |= g_hint_tids[j] == pick[i]; same = in; }
     if (same) return;
-    if (H.set_threads(g_hint, pick, (size_t)npick)) { LOG("[perf] ADPF: the session refused threads"); return; }
+    // Android 13 (no setThreads): the session is closed and made again with the threads. Without it the Retroid Pocket 6's session held the presenting thread
+    // alone, and Unicorn Overlord's replay thread (DM_NVN_ASYNC, 14 ms of a 21 ms frame, the rest waiting) ran its prime core at 2.48 of 3.19 GHz: 46-55 fps
+    // in its heavy maps (2026-11-15). Here, on the presenting thread that reports, so no report meets a closed session
+    if (!H.set_threads) {
+        APerformanceHintSession *n = H.create(H.get(), pick, (size_t)npick, g_hint_target);
+        if (!n) { LOG("[perf] ADPF: a session with the threads was refused"); return; }
+        H.close(g_hint); g_hint = n; }
+    else if (H.set_threads(g_hint, pick, (size_t)npick)) { LOG("[perf] ADPF: the session refused threads"); return; }
     memcpy(g_hint_tids, pick, sizeof(int32_t) * (size_t)npick); g_hint_n = npick;
     char l[160]; size_t o = 0; for (int i = 0; i < npick; i++) o += snprintf(l + o, sizeof l - o, " %d", pick[i]);
     LOG("[perf] ADPF session threads:%s", l);
 }
 
+// DM_REPLAY_UCLAMP=<0..1024> (live, read every 60 presents): the replay thread's utilization clamp minimum (sched_setattr SCHED_FLAG_UTIL_CLAMP_MIN), so the
+// governor clocks its core as for a task at least that busy whenever it runs; 0 takes it back. The replay thread waits on the GPU a third of each frame, and
+// Qualcomm's WALT governor on the Retroid Pocket 6 held its prime core at 1.84-2.48 of 3.19 GHz for Unicorn Overlord's 6,800-draw maps (replay 14-17 ms,
+// 46 fps) although the ADPF session held that thread and reported 22 ms frames against 16.7 (2026-11-15)
+static _Atomic int g_replay_tid;
+struct dm_sched_attr { uint32_t size, sched_policy; uint64_t sched_flags; int32_t sched_nice; uint32_t sched_priority; uint64_t sched_runtime, sched_deadline, sched_period;
+                       uint32_t sched_util_min, sched_util_max; };
+static void replay_uclamp(void) {
+    static int cur = -1; int tid = g_replay_tid; if (!tid) return;
+    const char *e = getenv("DM_REPLAY_UCLAMP"); int want = e ? atoi(e) : 0; if (want < 0) want = 0; if (want > 1024) want = 1024;
+    if (want == cur) return;
+    struct dm_sched_attr a; memset(&a, 0, sizeof a); a.size = sizeof a;
+    a.sched_flags = 0x08 | 0x10 | 0x20;   // SCHED_FLAG_KEEP_POLICY | KEEP_PARAMS | UTIL_CLAMP_MIN
+    a.sched_util_min = (uint32_t)want;
+    long r = syscall(__NR_sched_setattr, tid, &a, 0);
+    if (r) { LOG("[RED] [perf] DM_REPLAY_UCLAMP=%d: sched_setattr refused (%s)", want, strerror(errno)); cur = want; return; }
+    cur = want; LOG("[perf] replay thread %d: utilization clamp minimum %d of 1024", tid, want);
+}
 // DM_PIN_REPLAY (start-up): the replay thread (DM_NVN_ASYNC, hle_nvn.c replay_main) kept to the fastest cores. prime: the cores of the highest maximum clock
 // (a Snapdragon 8+ Gen 1's Cortex-X2), big: every core above the lowest maximum clock. Left to the scheduler, Unicorn Overlord's battle map replay took
 // 13 to 20 ms a frame from run to run with the same ~3,500 draws
 void dm_perf_replay_thread(void) {
+    g_replay_tid = (int)gettid();
     const char *e = getenv("DM_PIN_REPLAY"); if (!e || !*e || !strcmp(e, "0")) return;
     int prime = !strcmp(e, "prime"); long n = sysconf(_SC_NPROCESSORS_CONF); if (n > 32) n = 32;
     long mhz[32] = {0}, hi = 0, lo = 0;
@@ -269,8 +297,12 @@ void dm_perf_frame(double period) {
     // the CPU hint's target is the game's own period, not the adaptive one: with the longer target the CPU clocks drop until the work fills it,
     // and the work then never shows the room to step back up (NEO stayed at 30 fps with frames of 31 to 48 ms)
     if (g_game_period && (int64_t)g_game_period < p) p = (int64_t)g_game_period;
+    // DM_ADPF_TARGET_PCT=n (live, read every 60 presents; default 100): the CPU hint's target as n% of the period, a frame that fits it looking late to
+    // the hint (a test of how hard the session can push the clocks)
+    { static int pct = 100; static unsigned k; if (!(k++ % 60)) { const char *e = getenv("DM_ADPF_TARGET_PCT"); pct = e && atoi(e) >= 10 && atoi(e) <= 100 ? atoi(e) : 100; }
+      p = p * pct / 100; }
     hint_init(p);
-    { static unsigned n; if (++n % 60 == 0) gpu_turbo(); }
+    { static unsigned n; if (++n % 60 == 0) { gpu_turbo(); replay_uclamp(); } }
     if (g_work_start) {   // (a longer span: the game was held, by the pause menu or the background)
         int64_t w = g_prev_present ? t - g_prev_present - g_pace : t - g_work_start;
         int64_t pq = g_prev_present ? g_pq : 0, pace = g_step > 0 ? pq : 0;   // (t - g_work_start starts after the wait already)

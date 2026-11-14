@@ -12,6 +12,9 @@ requires	bcn
 # stay on (DM_VK_DYN_UBO=0 would make a descriptor set per draw in a ~3,000-draw battle; see Dark Souls' profile for the flashes it fixes there)
 # The rate is held at 60: the adaptive rate sat at 40 in battle on the Retroid Pocket 6 (with its performance mode at "performance" or above it holds 60)
 env	DM_FPS_PIN=60
+# The pause menu's Frame rate limit (settings.txt rate=) is left at Auto, the pin above: a held 40 fps (120 Hz on the Retroid Pocket 6, whose display runs 60
+# or 120 Hz) shows the heaviest maps (~6,800 draws, GPU-bound at ~17 ms a frame) evenly where 60 wavers between 46 and 60 fps, but the player chose 60 as the
+# default (2026-11-15: the display at 120 Hz for 40 fps judged a waste); 40 or 30 stay one press away in the menu
 # handheld (720p) by default: docked 1080p took 34 ms of GPU a frame in battle on that device (about 22 fps), handheld 11-20 ms
 setting	docked=0
 # the replay on its own thread: in battle it took 17.5 ms of the game thread's 33 ms a frame (about 3,000 draws), which held the adaptive rate at 30 fps

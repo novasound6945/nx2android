@@ -8,7 +8,8 @@
 #   requires     device features, separated by spaces: bcn (BC texture compression)
 #   sysdata      system data titles the game reads from the console's firmware, 16-digit hex title IDs separated by spaces (0100000000000802: MiiModel, the Mii heads Mario Kart 8 Deluxe builds);
 #                porter extracts each from the player's firmware dump (--firmware) into the data pack, and the host mounts it in place of its stand-in
-#   setting      <name>=<value>, one row each: the pause menu's defaults on first launch (overlay, rumble, docked, fps, opacity: 20..80 by 5)
+#   setting      <name>=<value>, one row each: the pause menu's defaults on first launch (overlay, rumble, docked, fps, opacity: 20..80 by 5, rate: the frame rate
+#                limit, 0 auto (env.txt's DM_FPS_PIN, else the adaptive rate) or 60, 40, 30); a device that already has a settings.txt keeps it, so a new row reaches new installs only
 #   env          <KEY>=<VALUE>, one row each: host switches the game needs on Android (the data pack's env.txt)
 #   overlay      <tablet|phone> <control> <x> <y>: moves one control of that layout (dm/android/overlay_default.tsv) to x, y as fractions of the window
 #   variant      <name> [<KEY>=<VALUE> ...]: a second rewrite of the code modules for another screen, one row each; name 4x3 is the only one the app picks (front_android.c
@@ -29,7 +30,8 @@ import game   # noqa: E402  (the profile folders, DM_GAMES_DIR included)
 
 STATUS = ('playable', 'wip', 'boots', 'experimental')
 SETTINGS = {'overlay': ('0', '1'), 'rumble': ('0', '1'), 'docked': ('0', '1'), 'fps': ('0', '1'), 'aspect': ('auto', '4:3', '16:9'),   # the pause menu's settings (front_android.c settings_load)
-            'opacity': tuple(str(v) for v in range(20, 81, 5))}                                    # the gamepad's, percent (overlay_layout.h OV_OPACITY_MIN..MAX)
+            'opacity': tuple(str(v) for v in range(20, 81, 5)),                                    # the gamepad's, percent (overlay_layout.h OV_OPACITY_MIN..MAX)
+            'rate': ('0', '60', '40', '30')}                                                       # the frame rate limit, 0 auto (front_android.c RATE_STEPS)
 REQUIRES = ('bcn',)
 KINDS = {'stick_l': 'OV_STICK_L', 'stick_r': 'OV_STICK_R', 'button': 'OV_BUTTON', 'dpad': 'OV_DPAD', 'menu': 'OV_MENU'}
 SINGLE = ('status', 'tested', 'package', 'orientation', 'requires', 'sysdata')
