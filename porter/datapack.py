@@ -1,5 +1,7 @@
 # The data pack: everything the app reads from its files folder on the device (/sdcard/Android/data/<package>/files, front_android.c), as a folder beside the APK:
 #   mods/          the rewritten code modules (patch_nso.py's outputs)
+#   mods-<v>/      the same modules rewritten for a variant android.tsv declares (DM_PATCH_VARIANT=<v>: 4x3, a 4:3 screen), which the app runs instead of mods/ on such a screen
+#                  (front_android.c aspect_variant); env-<v>.txt beside it: the variant's env rows, applied after env.txt
 #   RomFS/         the game's files (the packed version's merged RomFS)
 #   aoc/<index>/   the DLC the player has
 #   sysdata/<title ID>/  system data from the player's firmware dump that the game reads (android.tsv sysdata, porter --firmware; env.txt's DM_SYSDATA)
@@ -9,7 +11,8 @@
 #   env.txt        host switches: the game language, the DLC folder, the profile's env rows, then the port's (--fps60, --mt-replay); on the device the installer adds its
 #                  DM_ROMFS row after them when the app reads its RomFS from another folder (porter/install.py, --romfs-at): that is a fact of one device, not of the pack
 #   settings.txt   the pause menu's first-launch defaults (the profile's setting rows, then the port's: --touch); the installer never replaces the player's own
-#   nx2a-data.json what the pack is: the game, the package, the version, the device features the profile requires (android.tsv requires), which the installer checks
+#   nx2a-data.json what the pack is: the game, the package, the version, the device features the profile requires (android.tsv requires), which the installer checks;
+#                  its variants. publish.py lists the pack in files.json for an APK that downloads it (porter port --data-url)
 # Big trees are hard links into the extraction when the volume allows, so the pack takes no extra space; the pack is rebuilt whole when anything in it changes.
 import json, os, shutil, time
 from pathlib import Path
@@ -18,6 +21,12 @@ MANIFEST = 'nx2a-data.json'
 KEEP_ON_DEVICE = ('settings.txt',)          # the player's choices win over the pack's defaults
 OWNED = ('mods', 'RomFS', 'aoc', 'sysdata')            # folders the pack owns on the device: files there that the pack lacks are stale (an older version's) and removed
 ROMFS = 'RomFS'
+VARIANT_PREFIX = 'mods-'                    # mods-<variant>/: owned as mods/ is (owned)
+
+
+def owned(rel):   # whether a file (a '/'-separated path in the files folder) is in a folder the pack owns
+    top = rel.split('/', 1)[0]
+    return '/' in rel and (top in OWNED or top.startswith(VARIANT_PREFIX))
 
 
 def link_or_copy(src, dst):
@@ -43,15 +52,17 @@ def romfs_sizes(d):   # {path in the RomFS: size} of the pack in d, '/'-separate
     return {p.relative_to(r).as_posix(): p.stat().st_size for p in r.rglob('*') if p.is_file()} if r.is_dir() else {}
 
 
-def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, sysdata=None, language='en-US', package=None, env=(), settings=None, files=None, progress=None):
+def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, sysdata=None, language='en-US', package=None, env=(), settings=None, files=None, variants=None, progress=None):
     """Write the pack to dst (replacing it). profile: the AndroidProfile; package: the app's, when not the profile's; env: more env.txt rows, after the profile's; settings: settings.txt values over the profile's;
-    files: {name in the pack: source} (the 60 fps memory writes, fpslock.tsv; the button-icon font). Returns the manifest"""
+    files: {name in the pack: source} (the 60 fps memory writes, fpslock.tsv; the button-icon font); variants: {name: (its rewritten modules, [its env rows])}. Returns the manifest"""
     package = package or profile.package
     tmp = dst.with_name(dst.name + '.partial')
     if tmp.exists(): shutil.rmtree(tmp)
     tmp.mkdir(parents=True)
     n = b = 0
-    for what, src, sub in (('the rewritten modules', patched, 'mods'), ('the RomFS', romfs, 'RomFS'), ('the DLC', aoc, 'aoc'), ('the system data', sysdata, 'sysdata')):
+    variants = variants or {}
+    for what, src, sub in (('the rewritten modules', patched, 'mods'), *((f'the rewritten modules of variant {v}', d, VARIANT_PREFIX + v) for v, (d, _) in variants.items()),
+                           ('the RomFS', romfs, 'RomFS'), ('the DLC', aoc, 'aoc'), ('the system data', sysdata, 'sysdata')):
         if not src: continue
         if progress: progress(what)
         dn, db = link_tree(src, tmp / sub); n += dn; b += db
@@ -63,10 +74,12 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
     if sysdata: rows.append(f'DM_SYSDATA={files_folder(package)}/sysdata')
     rows += profile.env + list(env)
     (tmp / 'env.txt').write_text('\n'.join(rows) + '\n', encoding='utf-8', newline='\n')
+    for v, (_, venv) in variants.items():
+        if venv: (tmp / f'env-{v}.txt').write_text(f'# variant {v}: applied after env.txt when the app runs mods-{v}/\n' + '\n'.join(venv) + '\n', encoding='utf-8', newline='\n'); n += 1
     if sets := {**profile.settings, **(settings or {})}: (tmp / 'settings.txt').write_text(''.join(f'{k}={v}\n' for k, v in sets.items()), encoding='utf-8', newline='\n')
     man = dict(title_id=profile.id, name=profile.name, package=package, version=version, display=display, language=language, requires=profile.requires,
                files=n, bytes=b, dlc=sorted(int(p.name) for p in aoc.iterdir() if p.is_dir() and p.name.isdigit()) if aoc else [],
-               sysdata=sorted(p.name for p in sysdata.iterdir() if p.is_dir()) if sysdata else [], made=time.strftime('%Y-%m-%d %H:%M:%S'))
+               sysdata=sorted(p.name for p in sysdata.iterdir() if p.is_dir()) if sysdata else [], variants=list(variants), made=time.strftime('%Y-%m-%d %H:%M:%S'))
     (tmp / MANIFEST).write_text(json.dumps(man, indent=2), encoding='utf-8')
     if dst.exists(): shutil.rmtree(dst)
     for i in range(20):   # Windows: a folder just removed can stay delete-pending while another process (an indexer, a virus scan) holds it, and the rename is refused meanwhile

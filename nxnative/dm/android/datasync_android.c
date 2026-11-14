@@ -1,0 +1,351 @@
+// Android port: the app's data downloaded from a web server at launch (an APK ported with porter --data-url; datasync.h compares and downloads, this is its transport and
+// its screen). The APK's asset nx2a/source.bin (porter/publish.py source_asset) holds the server's folder and the Basic authentication's user:password, masked only so the
+// password does not show as plain text; neither the password nor the Authorization header is ever logged. Without the asset nothing here runs: the app starts as before.
+// HTTP: java.net.HttpURLConnection through JNI (framework classes, no dex of the app's own): the system's DNS, proxy, TLS trust store (a server's Let's Encrypt certificate)
+// and redirects, which a socket of our own would each have to redo; cleartext http:// only with mkapk.py --cleartext (Android 9+ refuses it otherwise).
+// The screen: no game is running yet, so the window gets a small GLES 2 picture (libEGL / libGLESv2 opened here): EGL leaves the window when its surface is destroyed,
+// and the game's Vulkan swapchain can take it after (a window drawn with ANativeWindow_lock stays the CPU's and Vulkan cannot connect to it).
+// The front end (front_android.c) starts the game when the sync ends: done, nothing to do, or no server and a whole pack in the files folder (offline play)
+// The same screen shows the shader preparation (dm_prep_begin: gfx_vk_gpl.inc vk_gpl_prepare), after the sync or without one, before the game starts
+#include "dm.h"
+#include "datasync.h"
+#include "pixel_font.h"
+#include <EGL/egl.h>
+#include <GLES2/gl2.h>
+#include <android/asset_manager.h>
+#include <android/looper.h>
+#include <android/native_activity.h>
+#include <android/native_window.h>
+#include <dlfcn.h>
+#include <jni.h>
+#include <math.h>
+#include <pthread.h>
+#include <sys/statvfs.h>
+#include <time.h>
+#include <unistd.h>
+
+const uint8_t *dm_overlay_font(void);   // overlay_theme.c
+static struct {
+    pthread_mutex_t mu; pthread_cond_t cv;
+    ANativeActivity *act; char root[512], package[256], base[1024], auth[600];
+    ANativeWindow *win; int lost, released;           // the window (on_window_created / destroyed: dm_sync_window), and a destroy waiting for the screen to let it go
+    ds_progress pr; int status, finished, wait_s; char msg[256];   // status: -1 working, else the last error (DS_ERR_*); wait_s: seconds to the next try
+    void (*done)(void); int pipe[2];
+} S = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, .status = -1, .pipe = {-1, -1}};
+static struct { int on, done, total, gl_tried; } P;   // the shader preparation (dm_prep_begin), under S.mu: the screen shows it instead of the sync
+static int64_t now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
+
+// ---- JNI ----
+static int jx(JNIEnv *E, char *why, size_t cap) {   // an exception: cleared, its toString() in why (an IOException's message: "Cleartext HTTP traffic … not permitted", a timeout)
+    if (!(*E)->ExceptionCheck(E)) return 0;
+    jthrowable t = (*E)->ExceptionOccurred(E); (*E)->ExceptionClear(E);
+    if (why && cap) { why[0] = 0;
+        jclass c = t ? (*E)->FindClass(E, "java/lang/Object") : NULL; jmethodID m = c ? (*E)->GetMethodID(E, c, "toString", "()Ljava/lang/String;") : NULL;
+        jstring s = m ? (*E)->CallObjectMethod(E, t, m) : NULL; if ((*E)->ExceptionCheck(E)) { (*E)->ExceptionClear(E); s = NULL; }
+        const char *u = s ? (*E)->GetStringUTFChars(E, s, NULL) : NULL; if (u) { snprintf(why, cap, "%s", u); (*E)->ReleaseStringUTFChars(E, s, u); } }
+    return 1;
+}
+typedef struct { JNIEnv *E; jclass cUrl, cConn; jmethodID mUrl, mOpen, mConnTo, mReadTo, mProp, mCaches, mCode, mHeader, mLen, mIn, mDisc, mRead, mClose; jobject buf; } jhttp;
+static int jhttp_init(jhttp *h) {
+    JNIEnv *E = h->E; char why[256];
+    jclass u = (*E)->FindClass(E, "java/net/URL"), c = (*E)->FindClass(E, "java/net/HttpURLConnection"), is = (*E)->FindClass(E, "java/io/InputStream");
+    if (jx(E, why, sizeof why) || !u || !c || !is) { LOG("[RED] data: no java.net classes (%s)", why); return -1; }
+    h->cUrl = (*E)->NewGlobalRef(E, u); h->cConn = (*E)->NewGlobalRef(E, c);
+    h->mUrl = (*E)->GetMethodID(E, u, "<init>", "(Ljava/lang/String;)V"); h->mOpen = (*E)->GetMethodID(E, u, "openConnection", "()Ljava/net/URLConnection;");
+    h->mConnTo = (*E)->GetMethodID(E, c, "setConnectTimeout", "(I)V"); h->mReadTo = (*E)->GetMethodID(E, c, "setReadTimeout", "(I)V");
+    h->mProp = (*E)->GetMethodID(E, c, "setRequestProperty", "(Ljava/lang/String;Ljava/lang/String;)V"); h->mCaches = (*E)->GetMethodID(E, c, "setUseCaches", "(Z)V");
+    h->mCode = (*E)->GetMethodID(E, c, "getResponseCode", "()I"); h->mHeader = (*E)->GetMethodID(E, c, "getHeaderField", "(Ljava/lang/String;)Ljava/lang/String;");
+    h->mLen = (*E)->GetMethodID(E, c, "getContentLengthLong", "()J"); h->mIn = (*E)->GetMethodID(E, c, "getInputStream", "()Ljava/io/InputStream;");
+    h->mDisc = (*E)->GetMethodID(E, c, "disconnect", "()V"); h->mRead = (*E)->GetMethodID(E, is, "read", "([B)I"); h->mClose = (*E)->GetMethodID(E, is, "close", "()V");
+    jbyteArray b = (*E)->NewByteArray(E, 256 << 10); h->buf = b ? (*E)->NewGlobalRef(E, b) : NULL;
+    if (jx(E, why, sizeof why) || !h->mUrl || !h->mOpen || !h->mCode || !h->mIn || !h->mRead || !h->buf) { LOG("[RED] data: java.net methods missing (%s)", why); return -1; }
+    return 0;
+}
+static int jprop(jhttp *h, jobject c, const char *k, const char *v, char *why, size_t cap) {   // 0, or -1 with the exception's text
+    JNIEnv *E = h->E; jstring a = (*E)->NewStringUTF(E, k), b = a ? (*E)->NewStringUTF(E, v) : NULL; if (b) (*E)->CallVoidMethod(E, c, h->mProp, a, b);
+    return jx(E, why, cap) || !b ? -1 : 0;
+}
+static int http_fetch(void *u, const char *rel, uint64_t from, uint64_t *start, int64_t *total, int *http, ds_sink sink, void *su) {
+    jhttp *h = u; JNIEnv *E = h->E; char url[2048], why[256] = "", rng[48]; static uint8_t chunk[256 << 10];
+    if (ds_url(url, sizeof url, S.base, rel)) { LOG("[RED] data: the address of %s is too long", rel); return DS_ERR_SERVER; }
+    if ((*E)->PushLocalFrame(E, 32)) { jx(E, NULL, 0); return DS_ERR_NET; }
+    int rc = DS_ERR_NET, probe = !strcmp(rel, DS_LIST);   // the list: short timeouts, so an app without the server starts the game soon (offline play)
+    jobject U = (*E)->NewObject(E, h->cUrl, h->mUrl, (*E)->NewStringUTF(E, url)); jobject C = U && !jx(E, why, sizeof why) ? (*E)->CallObjectMethod(E, U, h->mOpen) : NULL;
+    jobject in = NULL;
+    if (!C || jx(E, why, sizeof why) || !(*E)->IsInstanceOf(E, C, h->cConn)) goto out;
+    (*E)->CallVoidMethod(E, C, h->mConnTo, probe ? 4000 : 10000); if (jx(E, why, sizeof why)) goto out;
+    (*E)->CallVoidMethod(E, C, h->mReadTo, probe ? 8000 : 30000); if (jx(E, why, sizeof why)) goto out;
+    (*E)->CallVoidMethod(E, C, h->mCaches, JNI_FALSE); if (jx(E, why, sizeof why)) goto out;
+    if (S.auth[0] && jprop(h, C, "Authorization", S.auth, why, sizeof why)) goto out;
+    if (jprop(h, C, "Accept-Encoding", "identity", why, sizeof why)) goto out;   // the bytes as they are on the server: Range offsets and sizes are the file's
+    if (from) { snprintf(rng, sizeof rng, "bytes=%llu-", (unsigned long long)from); if (jprop(h, C, "Range", rng, why, sizeof why)) goto out; }
+    int code = (*E)->CallIntMethod(E, C, h->mCode); if (jx(E, why, sizeof why)) goto out;
+    *http = code;
+    if (code == 206) {
+        jstring cr = (*E)->CallObjectMethod(E, C, h->mHeader, (*E)->NewStringUTF(E, "Content-Range")); jx(E, NULL, 0);
+        const char *s = cr ? (*E)->GetStringUTFChars(E, cr, NULL) : NULL; unsigned long long a = 0, b = 0, t = 0;
+        int ok = s && sscanf(s, "bytes %llu-%llu/%llu", &a, &b, &t) >= 2; if (s) (*E)->ReleaseStringUTFChars(E, cr, s);
+        if (!ok) { snprintf(why, sizeof why, "HTTP 206 without a Content-Range"); rc = DS_ERR_SERVER; goto out; }
+        *start = a; *total = t ? (int64_t)t : -1;
+    } else if (code == 200) { *start = 0; jlong n = (*E)->CallLongMethod(E, C, h->mLen); jx(E, NULL, 0); *total = n; }
+    else { rc = DS_ERR_SERVER; snprintf(why, sizeof why, "HTTP %d", code); goto out; }
+    in = (*E)->CallObjectMethod(E, C, h->mIn); if (!in || jx(E, why, sizeof why)) goto out;
+    for (;;) {
+        jint n = (*E)->CallIntMethod(E, in, h->mRead, h->buf); if (jx(E, why, sizeof why)) goto out;
+        if (n < 0) break;
+        if (!n) continue;
+        (*E)->GetByteArrayRegion(E, h->buf, 0, n, (jbyte *)chunk);
+        if (sink(su, chunk, (size_t)n)) { snprintf(why, sizeof why, "the download was stopped (more bytes than the list says, or a full disk)"); goto out; }
+    }
+    rc = 0;
+out:
+    if (in) { (*E)->CallVoidMethod(E, in, h->mClose); jx(E, NULL, 0); }
+    if (C && h->mDisc) { (*E)->CallVoidMethod(E, C, h->mDisc); jx(E, NULL, 0); }
+    (*E)->PopLocalFrame(E, NULL);
+    if (rc) LOG("data: %s%s: %s", rel, from ? " (resumed)" : "", why[0] ? why : "failed");   // the address only: the credentials are in a header, never in the log
+    return rc;
+}
+static uint64_t free_bytes(void *u, const char *root) { (void)u; struct statvfs v; return statvfs(root, &v) ? (uint64_t)-1 : (uint64_t)v.f_bavail * v.f_frsize; }
+static void sync_note(void *u, const ds_progress *p) { (void)u; pthread_mutex_lock(&S.mu); S.pr = *p; pthread_mutex_unlock(&S.mu); }
+static void sync_log(void *u, const char *m) { (void)u; LOG("%s", m); }
+
+// ---- the screen: a canvas 640 wide, drawn by the CPU, shown as one texture through GLES 2 ----
+typedef struct { uint32_t *px; int w, h; uint32_t ink; } canvas;
+static void plot(void *u, int x, int y) { canvas *c = u; if (x >= 0 && y >= 0 && x < c->w && y < c->h) c->px[y * c->w + x] = c->ink; }
+static void fill(canvas *c, int x, int y, int w, int h, uint32_t col) { for (int j = y < 0 ? 0 : y; j < y + h && j < c->h; j++) for (int i = x < 0 ? 0 : x; i < x + w && i < c->w; i++) c->px[j * c->w + i] = col; }
+static void text(canvas *c, const char *s, int x, int y, int scale, uint32_t col) { c->ink = col; pf_draw(dm_overlay_font(), s, x, y, scale, plot, c); }
+static void ctext(canvas *c, const char *s, int y, int scale, uint32_t col) { text(c, s, (c->w - pf_width(dm_overlay_font(), s) * scale) / 2, y, scale, col); }
+static void ctext_fit(canvas *c, const char *s, int y, int scale, uint32_t col) {   // centred, at scale or smaller so it fits with 16 px at each side
+    while (scale > 1 && pf_width(dm_overlay_font(), s) * scale > c->w - 32) scale--;
+    ctext(c, s, y, scale, col);
+}
+#define RGB(r, g, b) (0xff000000u | (uint32_t)(b) << 16 | (uint32_t)(g) << 8 | (uint32_t)(r))   // RGBA bytes in memory
+static int korean(void) { const pf_index *g = pf_find(dm_overlay_font(), 0xAC00); return g && (g->cp_adv >> 8) == 0xAC00; }   // the APK's font has Hangul (assets/font/ui.bin)
+static void dur(char *o, size_t n, double s, int ko) {
+    if (s < 0 || s > 359999) { snprintf(o, n, "-"); return; }
+    int m = (int)(s / 60), x = (int)s % 60;
+    if (ko) { if (m >= 60) snprintf(o, n, "%d시간 %d분", m / 60, m % 60); else if (m) snprintf(o, n, "%d분 %d초", m, x); else snprintf(o, n, "%d초", x); }
+    else { if (m >= 60) snprintf(o, n, "%dh %dm", m / 60, m % 60); else if (m) snprintf(o, n, "%dm %ds", m, x); else snprintf(o, n, "%ds", x); }
+}
+static void draw(canvas *c, const ds_progress *p, int status, int wait_s, const char *msg, double speed) {
+    int ko = korean(), y = c->h / 2 - 70; char t[400], a[64];
+    fill(c, 0, 0, c->w, c->h, RGB(18, 20, 26));
+    ctext(c, ko ? "게임 데이터" : "Game data", y, 3, RGB(235, 238, 245)); y += 36;
+    const char *ph = p->phase == DS_PH_CONNECT ? (ko ? "서버에 연결하는 중" : "Connecting to the server") : p->phase == DS_PH_CHECK ? (ko ? "가지고 있는 파일 확인 중" : "Checking the files on the device")
+                   : p->phase == DS_PH_DOWNLOAD ? (ko ? "받는 중" : "Downloading") : (ko ? "마무리하는 중" : "Finishing");
+    ctext(c, ph, y, 2, RGB(170, 180, 200)); y += 26;
+    int bw = c->w - 80, bx = 40; double f = p->total ? (double)p->done / (double)p->total : 0; if (f > 1) f = 1;
+    fill(c, bx, y, bw, 12, RGB(50, 55, 68)); fill(c, bx, y, (int)(bw * f), 12, RGB(90, 160, 255)); y += 34;
+    snprintf(t, sizeof t, "%.0f / %.0f MB  (%d%%)", p->done / 1048576.0, p->total / 1048576.0, (int)(f * 100)); ctext(c, t, y, 2, RGB(235, 238, 245)); y += 24;
+    if (p->phase == DS_PH_DOWNLOAD && speed > 0) { dur(a, sizeof a, (double)(p->total - p->done) / speed, ko); snprintf(t, sizeof t, ko ? "%.1f MB/s, 남은 시간 %s" : "%.1f MB/s, %s left", speed / 1048576.0, a); ctext(c, t, y, 2, RGB(170, 180, 200)); }
+    y += 24;
+    if (p->file[0]) { snprintf(t, sizeof t, "%d/%d  %.60s", p->file_no, p->files, p->file); ctext(c, t, y, 1, RGB(120, 130, 150)); }
+    y += 30;
+    if (status >= 0) {
+        const char *w = status == DS_ERR_NET ? (ko ? "서버에 연결할 수 없습니다 (네트워크를 확인해 주세요)" : "The server cannot be reached (check the network)")
+                      : status == DS_ERR_SPACE ? (ko ? "저장 공간이 부족합니다" : "Not enough storage space")
+                      : status == DS_ERR_PACKAGE ? (ko ? "서버의 데이터가 이 앱의 것이 아닙니다" : "The server's data is not this app's")
+                      : status == DS_ERR_DATA ? (ko ? "받은 파일이 손상되었습니다. 다시 받습니다" : "A downloaded file was damaged; it is downloaded again")
+                      : status == DS_ERR_DISK ? (ko ? "파일을 쓸 수 없습니다" : "A file cannot be written") : (ko ? "서버 오류" : "Server error");
+        ctext(c, w, y, 2, RGB(255, 150, 120)); y += 22;
+        if (msg[0]) { ctext(c, msg, y, 1, RGB(200, 140, 120)); y += 16; }
+        snprintf(t, sizeof t, ko ? "%d초 후 다시 시도합니다" : "Trying again in %d s", wait_s); ctext(c, t, y + 6, 2, RGB(170, 180, 200));
+    }
+}
+static void draw_prep(canvas *c, int done, int total, double el) {   // el: seconds since the parts began
+    int ko = korean(), y = c->h / 2 - 84; char t[200], a[64], b[64];
+    fill(c, 0, 0, c->w, c->h, RGB(18, 20, 26));
+    ctext(c, ko ? "셰이더 준비" : "Preparing shaders", y, 3, RGB(235, 238, 245)); y += 36;
+    // two lines, each made smaller when it would not fit the canvas (one line was cut at both sides of the 640 wide canvas: Retroid Pocket 6)
+    ctext_fit(c, ko ? "처음 한 번만 합니다" : "Done once, at the first start", y, 2, RGB(170, 180, 200)); y += 30;   // the font is 12 px: 24 at scale 2 (22 overlapped the next line)
+    ctext_fit(c, ko ? "(게임 데이터나 드라이버가 바뀌면 다시 합니다)" : "(and again after a data or driver update)", y, 2, RGB(170, 180, 200)); y += 34;
+    int bw = c->w - 80, bx = 40; double f = total ? (double)done / total : 0; if (f > 1) f = 1;
+    fill(c, bx, y, bw, 12, RGB(50, 55, 68)); fill(c, bx, y, (int)(bw * f), 12, RGB(90, 160, 255)); y += 34;
+    snprintf(t, sizeof t, "%d / %d  (%d%%)", done, total, (int)(f * 100)); ctext(c, t, y, 2, RGB(235, 238, 245)); y += 24;
+    dur(a, sizeof a, el, ko); if (done > 16 && done < total) dur(b, sizeof b, el * (total - done) / done, ko); else snprintf(b, sizeof b, "-");
+    snprintf(t, sizeof t, ko ? "%s 지남, 남은 시간 약 %s" : "%s so far, about %s left", a, b); ctext(c, t, y, 2, RGB(170, 180, 200));
+}
+static struct {   // libEGL / libGLESv2, opened here (the host links neither)
+    EGLDisplay (*GetDisplay)(EGLNativeDisplayType); EGLBoolean (*Initialize)(EGLDisplay, EGLint *, EGLint *); EGLBoolean (*ChooseConfig)(EGLDisplay, const EGLint *, EGLConfig *, EGLint, EGLint *);
+    EGLContext (*CreateContext)(EGLDisplay, EGLConfig, EGLContext, const EGLint *); EGLSurface (*CreateWindowSurface)(EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint *);
+    EGLBoolean (*MakeCurrent)(EGLDisplay, EGLSurface, EGLSurface, EGLContext); EGLBoolean (*SwapBuffers)(EGLDisplay, EGLSurface); EGLBoolean (*DestroySurface)(EGLDisplay, EGLSurface);
+    EGLBoolean (*DestroyContext)(EGLDisplay, EGLContext); EGLBoolean (*Terminate)(EGLDisplay);
+    GLuint (*CreateShader)(GLenum); void (*ShaderSource)(GLuint, GLsizei, const GLchar *const *, const GLint *); void (*CompileShader)(GLuint); GLuint (*CreateProgram)(void);
+    void (*AttachShader)(GLuint, GLuint); void (*BindAttribLocation)(GLuint, GLuint, const GLchar *); void (*LinkProgram)(GLuint); void (*UseProgram)(GLuint);
+    void (*GenTextures)(GLsizei, GLuint *); void (*BindTexture)(GLenum, GLuint); void (*TexParameteri)(GLenum, GLenum, GLint);
+    void (*TexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *); void (*VertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void *);
+    void (*EnableVertexAttribArray)(GLuint); void (*DrawArrays)(GLenum, GLint, GLsizei); void (*Viewport)(GLint, GLint, GLsizei, GLsizei);
+    EGLDisplay dpy; EGLConfig cfg; EGLContext ctx; EGLSurface surf; ANativeWindow *on; GLuint prog, tex; int ok;
+} G;
+static int gl_load(void) {
+    void *e = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL), *g = dlopen("libGLESv2.so", RTLD_NOW | RTLD_LOCAL); if (!e || !g) return -1;
+#define LE(n) if (!(*(void **)&G.n = dlsym(e, "egl" #n))) return -1
+#define LG(n) if (!(*(void **)&G.n = dlsym(g, "gl" #n))) return -1
+    LE(GetDisplay); LE(Initialize); LE(ChooseConfig); LE(CreateContext); LE(CreateWindowSurface); LE(MakeCurrent); LE(SwapBuffers); LE(DestroySurface); LE(DestroyContext); LE(Terminate);
+    LG(CreateShader); LG(ShaderSource); LG(CompileShader); LG(CreateProgram); LG(AttachShader); LG(BindAttribLocation); LG(LinkProgram); LG(UseProgram); LG(GenTextures);
+    LG(BindTexture); LG(TexParameteri); LG(TexImage2D); LG(VertexAttribPointer); LG(EnableVertexAttribArray); LG(DrawArrays); LG(Viewport);
+    G.dpy = G.GetDisplay(EGL_DEFAULT_DISPLAY); if (!G.dpy || !G.Initialize(G.dpy, NULL, NULL)) return -1;
+    const EGLint ca[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_NONE}; EGLint n = 0;
+    if (!G.ChooseConfig(G.dpy, ca, &G.cfg, 1, &n) || n < 1) return -1;
+    const EGLint xa[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
+    G.ctx = G.CreateContext(G.dpy, G.cfg, EGL_NO_CONTEXT, xa); return G.ctx ? 0 : -1;
+}
+static void gl_drop(void) { if (G.surf) { G.MakeCurrent(G.dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT); G.DestroySurface(G.dpy, G.surf); G.surf = NULL; G.on = NULL; } }   // the window is free for Vulkan after this
+static int gl_bind(ANativeWindow *w) {
+    if (G.on == w && G.surf) return 0;
+    gl_drop();
+    if (!(G.surf = G.CreateWindowSurface(G.dpy, G.cfg, w, NULL)) || !G.MakeCurrent(G.dpy, G.surf, G.surf, G.ctx)) { G.surf = NULL; return -1; }
+    G.on = w;
+    if (!G.prog) {
+        static const char *vs = "attribute vec2 p; varying vec2 t; void main() { t = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5); gl_Position = vec4(p, 0.0, 1.0); }";
+        static const char *fs = "precision mediump float; varying vec2 t; uniform sampler2D s; void main() { gl_FragColor = texture2D(s, t); }";
+        GLuint a = G.CreateShader(GL_VERTEX_SHADER), b = G.CreateShader(GL_FRAGMENT_SHADER);
+        G.ShaderSource(a, 1, &vs, NULL); G.CompileShader(a); G.ShaderSource(b, 1, &fs, NULL); G.CompileShader(b);
+        G.prog = G.CreateProgram(); G.AttachShader(G.prog, a); G.AttachShader(G.prog, b); G.BindAttribLocation(G.prog, 0, "p"); G.LinkProgram(G.prog);
+        G.GenTextures(1, &G.tex);
+    }
+    return 0;
+}
+static void gl_show(canvas *c, ANativeWindow *w) {
+    if (gl_bind(w)) return;
+    static const float quad[] = {-1, -1, 1, -1, -1, 1, 1, 1};
+    G.Viewport(0, 0, ANativeWindow_getWidth(w), ANativeWindow_getHeight(w)); G.UseProgram(G.prog); G.BindTexture(GL_TEXTURE_2D, G.tex);
+    G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    G.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, c->w, c->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, c->px);
+    G.VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, quad); G.EnableVertexAttribArray(0); G.DrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    G.SwapBuffers(G.dpy, G.surf);
+}
+static void *screen_thread(void *a) {
+    (void)a; pthread_setname_np(pthread_self(), "datascreen");
+    int64_t t0 = now_ms(), last_t = 0; uint64_t last_done = 0; double speed = 0; canvas c = {0};
+    pthread_mutex_lock(&S.mu);
+    for (;;) {
+        if (S.lost) { gl_drop(); S.lost = 0; S.released = 1; pthread_cond_broadcast(&S.cv); }
+        if (S.finished) break;
+        ds_progress p = S.pr; int st = S.status, ws = S.wait_s; char msg[256]; snprintf(msg, sizeof msg, "%s", S.msg); ANativeWindow *w = S.win;
+        int64_t t = now_ms();
+        if (p.phase == DS_PH_DOWNLOAD) {   // MB/s over the last seconds
+            if (last_t && t > last_t && p.net >= last_done) { double v = (double)(p.net - last_done) * 1000.0 / (double)(t - last_t); speed = speed ? speed * 0.85 + v * 0.15 : v; }
+            last_t = t; last_done = p.net;   // network bytes only: a resumed part's bytes join done at once, not the speed
+        }
+        // drawn only once the sync takes a moment: a launch with the data up to date shows no screen at all; the preparation once it makes parts (EGL opened then)
+        int pd = P.done, pt = P.total; if (P.on && pt && !P.gl_tried) { P.gl_tried = 1; G.ok = !gl_load(); if (!G.ok) LOG("[RED] shaders: no EGL / GLES 2: the preparation runs without its screen"); t0 = t; }
+        if (w && G.ok && (P.on ? pt > 0 : t - t0 > 400)) {
+            pthread_mutex_unlock(&S.mu);
+            int ww = ANativeWindow_getWidth(w), wh = ANativeWindow_getHeight(w), cw = 640, ch = ww > 0 && wh > 0 ? 640 * wh / ww : 360;
+            if (ch < 240) ch = 240;
+            if (c.w != cw || c.h != ch) { free(c.px); c.px = malloc((size_t)cw * ch * 4); c.w = cw; c.h = ch; }
+            if (c.px) { if (P.on) draw_prep(&c, pd, pt, (t - t0) / 1000.0); else draw(&c, &p, st, ws, msg, speed); gl_show(&c, w); }
+            pthread_mutex_lock(&S.mu);
+        }
+        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 200 * 1000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        pthread_cond_timedwait(&S.cv, &S.mu, &ts);
+    }
+    pthread_mutex_unlock(&S.mu);
+    gl_drop(); if (G.ok) { G.DestroyContext(G.dpy, G.ctx); G.Terminate(G.dpy); G.ok = 0; }
+    free(c.px);
+    char b = 1; if (write(S.pipe[1], &b, 1) != 1) LOG("[RED] data: cannot wake the main thread");   // the game starts on the main thread (sync_ready)
+    return NULL;
+}
+void dm_sync_window(ANativeWindow *w) {   // on_window_created (w) and on_window_destroyed (NULL): a destroyed window is let go before the callback returns
+    if (!S.act) return;
+    pthread_mutex_lock(&S.mu);
+    if (w) S.win = w;
+    else if (S.win) {
+        S.win = NULL;
+        if (G.on && !S.finished) { S.lost = 1; S.released = 0; pthread_cond_broadcast(&S.cv);
+            struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 2;
+            while (!S.released && !S.finished) if (pthread_cond_timedwait(&S.cv, &S.mu, &ts)) break; }
+    }
+    pthread_mutex_unlock(&S.mu);
+}
+
+// ---- the sync thread ----
+static void *sync_thread(void *a) {
+    (void)a; pthread_setname_np(pthread_self(), "datasync");
+    JavaVM *vm = S.act->vm; jhttp h = {0}; int rc = DS_OFFLINE;
+    if ((*vm)->AttachCurrentThread(vm, &h.E, NULL) != JNI_OK || jhttp_init(&h)) LOG("[RED] data: no Java for the download: the game starts with the data the app has");
+    else {
+        ds_ctx c = {.root = S.root, .package = S.package, .fetch = http_fetch, .fu = &h, .free_bytes = free_bytes, .note = sync_note, .log = sync_log};
+        int delay = 2;
+        for (int round = 1;; round++) {
+            pthread_mutex_lock(&S.mu); S.status = -1; S.msg[0] = 0; pthread_mutex_unlock(&S.mu);
+            rc = ds_sync(&c);
+            if (rc == DS_DONE || rc == DS_UPTODATE || rc == DS_OFFLINE) break;
+            if (c.pr.phase == DS_PH_DOWNLOAD && c.pr.done) delay = 2;   // it moved on: the next break waits from the start again
+            LOG("[RED] data: try %d failed (%d): %s; again in %d s", round, rc, c.err, delay);
+            for (int s = delay; s > 0; s--) { pthread_mutex_lock(&S.mu); S.status = rc; S.wait_s = s; snprintf(S.msg, sizeof S.msg, "%s", c.err); pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); sleep(1); }
+            delay = rc == DS_ERR_PACKAGE || rc == DS_ERR_SPACE ? 30 : delay * 2 > 60 ? 60 : delay * 2;
+        }
+        LOG("%s", rc == DS_DONE ? "data: downloaded, the files folder holds the server's pack" : rc == DS_UPTODATE ? "data: the files folder holds the server's pack already"
+            : "data: no server, the files folder holds a whole pack: the game starts with it");
+        if (h.buf) (*h.E)->DeleteGlobalRef(h.E, h.buf);
+        (*vm)->DetachCurrentThread(vm);
+    }
+    pthread_mutex_lock(&S.mu); S.finished = rc ? rc : 1; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+    return NULL;
+}
+static int sync_ready(int fd, int events, void *data) {   // the main thread's looper: the screen let the window go, the game starts
+    (void)events; (void)data; char b; if (read(fd, &b, 1) != 1) return 1;
+    void (*d)(void) = S.done; S.done = NULL; if (d) d();
+    return 0;   // the fd is removed
+}
+static int package_name(ANativeActivity *act, char *out, size_t cap) {
+    JNIEnv *E = act->env; jclass c = (*E)->GetObjectClass(E, act->clazz); jmethodID m = c ? (*E)->GetMethodID(E, c, "getPackageName", "()Ljava/lang/String;") : NULL;
+    jstring s = m ? (*E)->CallObjectMethod(E, act->clazz, m) : NULL; if (jx(E, NULL, 0) || !s) return -1;
+    const char *u = (*E)->GetStringUTFChars(E, s, NULL); if (!u) return -1;
+    snprintf(out, cap, "%s", u); (*E)->ReleaseStringUTFChars(E, s, u); return 0;
+}
+// 1: the APK has a data server, the sync runs and done() is called on the main thread once the game may start; 0: none, start the game now
+int dm_sync_begin(ANativeActivity *act, const char *root, void (*done)(void)) {
+    AAsset *as = act->assetManager ? AAssetManager_open(act->assetManager, "nx2a/source.bin", AASSET_MODE_BUFFER) : NULL;
+    if (!as) return 0;
+    char cred[512]; const void *b = AAsset_getBuffer(as); int bad = !b || ds_source(b, (size_t)AAsset_getLength(as), S.base, sizeof S.base, cred, sizeof cred);
+    AAsset_close(as);
+    if (bad) { LOG("[RED] data: the APK's nx2a/source.bin cannot be read: the game starts with the data the app has"); return 0; }
+    if (cred[0]) { char b64[sizeof S.auth - 8]; if (strlen(cred) * 4 / 3 + 8 < sizeof b64) { ds_base64(b64, cred, strlen(cred)); snprintf(S.auth, sizeof S.auth, "Basic %s", b64); memset(b64, 0, sizeof b64); } }
+    memset(cred, 0, sizeof cred);
+    if (package_name(act, S.package, sizeof S.package)) { LOG("[RED] data: the app's package is not known: the game starts with the data the app has"); return 0; }
+    snprintf(S.root, sizeof S.root, "%s", root);
+    S.done = done;
+    ALooper *lp = ALooper_forThread();
+    if (!lp || pipe(S.pipe) || ALooper_addFd(lp, S.pipe[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, sync_ready, NULL) != 1) { LOG("[RED] data: no looper on the main thread: the game starts with the data the app has"); return 0; }
+    LOG("data: the app's data comes from %s%s", S.base, S.auth[0] ? " (Basic authentication)" : "");
+    G.ok = !gl_load(); if (!G.ok) LOG("[RED] data: no EGL / GLES 2: the download runs without its screen");
+    pthread_mutex_lock(&S.mu); S.act = act; pthread_mutex_unlock(&S.mu);
+    pthread_t t;
+    if (pthread_create(&t, NULL, screen_thread, NULL)) { LOG("[RED] data: cannot start the screen thread"); return 0; }
+    pthread_detach(t);
+    if (pthread_create(&t, NULL, sync_thread, NULL)) { LOG("[RED] data: cannot start the download thread"); pthread_mutex_lock(&S.mu); S.finished = 1; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); return 1; }
+    pthread_detach(t);
+    return 1;
+}
+
+// ---- the shader preparation: gfx_vk_gpl.inc vk_gpl_prepare on a thread of its own, this screen while it makes parts (none when there is nothing to make) ----
+__attribute__((weak)) int vk_gpl_prepare(void (*note)(void *u, int done, int total), void *u);   // (a build without the Vulkan backend has none)
+static void prep_note(void *u, int done, int total) { (void)u; pthread_mutex_lock(&S.mu); P.done = done; P.total = total; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); }
+static void *prep_thread(void *a) {
+    (void)a; pthread_setname_np(pthread_self(), "shaderprep");
+    int r = vk_gpl_prepare(prep_note, NULL);
+    pthread_mutex_lock(&S.mu); S.finished = 1; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+    LOG("shaders: %s", r ? "prepared: the game starts" : "nothing to prepare: the game starts");
+    return NULL;
+}
+// 1: the preparation runs and done() is called on the main thread once the game may start; 0: start the game now. w: the window if there is one already
+int dm_prep_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(void)) {
+    if (!vk_gpl_prepare) return 0;
+    ALooper *lp = ALooper_forThread();
+    int np[2];   // a pipe of its own: called from the sync's sync_ready, whose fd the looper removes when it returns
+    if (!lp || pipe(np) || ALooper_addFd(lp, np[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, sync_ready, NULL) != 1) { LOG("[RED] shaders: no looper on the main thread: the game starts without the preparation"); return 0; }
+    pthread_mutex_lock(&S.mu);
+    S.pipe[0] = np[0]; S.pipe[1] = np[1]; S.act = act; if (w && !S.win) S.win = w; S.done = done; S.finished = 0; S.lost = 0; S.released = 0; P.on = 1; P.done = P.total = P.gl_tried = 0;
+    G.ok = 0; G.prog = 0; G.tex = 0; G.surf = NULL; G.on = NULL;   // (the sync's context is gone with its screen)
+    pthread_mutex_unlock(&S.mu);
+    pthread_t t;
+    if (pthread_create(&t, NULL, screen_thread, NULL)) { LOG("[RED] shaders: cannot start the screen thread: the game starts without the preparation"); ALooper_removeFd(lp, S.pipe[0]); return 0; }
+    pthread_detach(t);
+    if (pthread_create(&t, NULL, prep_thread, NULL)) { LOG("[RED] shaders: cannot start the preparation thread"); pthread_mutex_lock(&S.mu); S.finished = 1; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); return 1; }
+    pthread_detach(t);
+    return 1;
+}

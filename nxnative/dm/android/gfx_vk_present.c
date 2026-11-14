@@ -953,7 +953,7 @@ static int shot_wanted(uint64_t n) {
     for (const char *p = e; *p;) { char *end; unsigned long long v = strtoull(p, &end, 10); if (end == p) break; if (v == n) return 1; p = *end == ',' ? end + 1 : end; }
     return 0;
 }
-static void shot(vkimg_t *im, uint64_t n) {
+static void shot_to(vkimg_t *im, uint64_t n, const char *prefix) {
     void mtl_sub_begin(void); uint64_t mtl_sub_commit(void); int mtl_wait(uint64_t, uint64_t);
     uint32_t w = im->w, h = im->h; VkBuffer sb; VkDeviceSize so;
     mtl_sub_begin();
@@ -963,7 +963,7 @@ static void shot(vkimg_t *im, uint64_t n) {
     vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, sb, 1, &c);
     mtl_wait(mtl_sub_commit(), ~0ull);
     const char *dir = getenv("DM_VK_SHOT_DIR"); if (!dir) dir = getenv("DM_ROOT"); if (!dir) dir = ".";
-    char path[1024]; snprintf(path, sizeof path, "%s/frame_%06llu.ppm", dir, (unsigned long long)n);
+    char path[1024]; snprintf(path, sizeof path, "%s/%s_%06llu.ppm", dir, prefix, (unsigned long long)n);
     FILE *f = fopen(path, "wb");
     if (!f) { VKLOG("[RED] cannot write %s", path); return; }
     fprintf(f, "P6\n%u %u\n255\n", w, h);
@@ -972,6 +972,27 @@ static void shot(vkimg_t *im, uint64_t n) {
     for (uint32_t y = 0; y < h; y++) { const uint8_t *s = p + (size_t)y * w * 4; for (uint32_t x = 0; x < w; x++) { row[3 * x] = s[4 * x + (bgra ? 2 : 0)]; row[3 * x + 1] = s[4 * x + 1]; row[3 * x + 2] = s[4 * x + (bgra ? 0 : 2)]; } fwrite(row, 1, (size_t)w * 3, f); }
     free(row); fclose(f);
     VKLOG("frame %llu written to %s (%ux%u)", (unsigned long long)n, path, w, h);
+}
+static void shot(vkimg_t *im, uint64_t n) { shot_to(im, n, "frame"); }
+// DM_VK_SHOTS_FAST=N (a DM_CTL "env" line, like DM_VK_SHOTS): the next N presented frames in which a draw used a linked (fast) pipeline are written as fast_<present>.ppm
+// with a log line naming those pipelines' shader keys; the frame right after each, if it had none, as fastnext_<present>.ppm (also at most N). Counting in gfx_vk_exec.c is off otherwise
+static void fastshot_frame(vkimg_t *im, uint64_t n) {
+    extern int g_fastshot_on; void vk_fast_take(uint32_t *, uint32_t *, void *, size_t);
+    static int left, nextleft, pending;
+    const char *k = getenv("DM_VK_SHOTS_FAST");
+    if (k && atoi(k) > 0) { left = nextleft = atoi(k); pending = 0; setenv("DM_VK_SHOTS_FAST", "0", 1); VKLOG("fast-pipeline shots armed: %d frames (present %llu on)", left, (unsigned long long)n); }
+    if (!g_fastshot_on) { if (left > 0) g_fastshot_on = 1; return; }   // (armed now: draws are counted from the next frame on)
+    struct { uint64_t vs, fs; uint32_t samples, atest; } l[16]; uint32_t draws, nl;
+    vk_fast_take(&draws, &nl, l, sizeof l);
+    if (draws && left > 0) {
+        left--; shot_to(im, n, "fast");
+        char b[16 * 48 + 8]; int o = 0; b[0] = 0;
+        for (uint32_t i = 0; i < nl && o < (int)sizeof b - 48; i++) o += snprintf(b + o, sizeof b - (size_t)o, "%s%016llx/%016llx %u %u", i ? ", " : "", (unsigned long long)l[i].vs, (unsigned long long)l[i].fs, l[i].samples, l[i].atest);
+        VKLOG("fastshot %llu: %u fast draws, pipelines: %s", (unsigned long long)n, draws, b);
+        pending = 1;
+    } else if (!draws && pending) { pending = 0; if (nextleft > 0) { nextleft--; shot_to(im, n, "fastnext"); } }
+    else if (draws) pending = 0;
+    if (left <= 0 && !pending) g_fastshot_on = 0;
 }
 static pthread_mutex_t g_present_mu = PTHREAD_MUTEX_INITIALIZER;   // the swapchain against the window going away (vk_window_lost, on the main thread)
 void vk_window_lost(void) { pthread_mutex_lock(&g_present_mu); swap_destroy(); g_win = NULL; pthread_mutex_unlock(&g_present_mu); }
@@ -1055,13 +1076,14 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         { extern uint64_t g_order_kept, g_order_ended; static uint64_t pk, pn;   // gfx_vk_exec.c g_order_keep
           if (g_order_kept + g_order_ended > pk + pn) VKLOG("order-only barriers per frame (last 600): %.1f kept inside their pass, %.1f ended it", (g_order_kept - pk) / 600.0, (g_order_ended - pn) / 600.0);
           pk = g_order_kept; pn = g_order_ended; }
-        void vk_pass_report(void); vk_pass_report();
+        void vk_pass_report(void); vk_pass_report(); void vk_gpl_report(void); vk_gpl_report();
         pe = g_vkst.ns_exec; pd = g_vkst.ns_desc; pp = g_vkst.ns_pipe; ps = g_ns_submit; pb = g_ubd_bytes; pdr = g_vkst.draws; pg = g_gpu_ns; pkn = g_pkg_n; pkb = g_pkg_bytes; pkt = g_pkg_ns; psb = g_ns_set_build; psh = g_ns_set_hash; psn = g_ns_set_new; psm = g_set_memo;
     }
     if (!im) { no_img++; return present_enqueue(NULL, NULL, n, period); }
     if (im->layout != VK_IMAGE_LAYOUT_GENERAL) { undrawn++; return present_enqueue(NULL, NULL, n, period); }   // never drawn into: nothing to show yet
     shown++; atomic_fetch_add(&g_fps_frames, 1);
     if (shot_wanted(n)) shot(im, n);
+    fastshot_frame(im, n);
     { void vk_pass_dump_poll(uint64_t done); uint64_t vk_fence_done(void); vk_pass_dump_poll(vk_fence_done()); void vk_pass_frame(void); vk_pass_frame(); void vk_tex_sweep(void); vk_tex_sweep(); }
     if (n % 1800 == 0) {   // every ~30 s: the pipeline cache to disk on a thread of its own (an Android app can be killed without any exit path)
         void vk_pipeline_cache_save(void); pthread_t th; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
@@ -1097,6 +1119,7 @@ uint64_t vk_present_vkimg(vkimg_t *im, double period) {
       present_time_begin(n, disp ? 0 : (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec); }
     atomic_fetch_add(&g_fps_frames, 1);
     if (shot_wanted(n) && im->layout == VK_IMAGE_LAYOUT_GENERAL) shot(im, n);
+    if (im->layout == VK_IMAGE_LAYOUT_GENERAL) fastshot_frame(im, n);
     return present_enqueue(im, NULL, n, period);
 }
 void mtl_present_wait(uint64_t tk) {   // NVN acquire: the window texture's last present has been blitted (the game may draw into it again)

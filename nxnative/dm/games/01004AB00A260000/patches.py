@@ -28,8 +28,13 @@ from nso_asm import ADRP, B
 # (main+0x883980 holds a 16/9 constant), keeps 16:9 while the main picture is 4:3. The passes then project with different aspects, and the reflection and water passes, whose screen space
 # coordinates are looked up from the main picture, are off (seen in another port of this game as reflections that do not sit on their object). The stub makes every pass use W/H.
 # The docked display mode (main+0x711ee0, 1920 -> 1440) is not cut: untested. Not verified on a device (static analysis only; design in tools/dsr-aspect/REPORT.md).
-# A switch in this file rather than an environment variable: the porter keys its reuse of a rewrite on the content of the patch files, so changing it rewrites again.
-ASPECT_4_3 = True   # 4:3 screens (Retroid Pocket Nova): the game renders 960x720 with an undistorted UI and one aspect for every projection; False = the game's own 1280x720
+# The switch is the rewrite's variant (DM_PATCH_VARIANT, set by the porter for each variant android.tsv declares: '' the game's own 16:9, '4x3' this): the porter rewrites main
+# once per variant into mods/ and mods-4x3/ of one data pack, and the app picks one by the screen (front_android.c aspect_variant). The variant is part of the rewrite's
+# reuse key (build_ipa_from_nsp.py rewrite), so one variant's output is never reused as another's.
+import os as _os
+_VARIANT = _os.environ.get('DM_PATCH_VARIANT', '')
+if _VARIANT not in ('', '4x3'): raise ValueError(f'DM_PATCH_VARIANT={_VARIANT!r}: DARK SOULS: REMASTERED has the variants "" (16:9) and "4x3"')
+ASPECT_4_3 = _VARIANT == '4x3'   # 4:3 screens (Retroid Pocket Nova): the game renders 960x720 with an undistorted UI and one aspect for every projection; else the game's own 1280x720
 CUTS = {'df3766a2bb651a3e822828abf10b6f7b': [
     (0x69c608, '02a08052', '02788052', 'settings Normal.Resolution.Width default 1280 -> 960 (0x69c5ac: W, float W, W/2, W/1280 UI scale)'),
     (0x69c7f4, '02a08052', '02788052', 'width getter default 1280 -> 960 (RenderTargetMan 0xfb72c sizes Resolve/Half/Quarter/Bloom/AO from it)'),

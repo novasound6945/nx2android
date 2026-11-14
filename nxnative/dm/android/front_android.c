@@ -59,8 +59,10 @@ ANativeWindow *dm_front_window(void) { pthread_mutex_lock(&g_win_mu); ANativeWin
 static ANativeWindow *phone_window(void) { pthread_mutex_lock(&g_win_mu); ANativeWindow *w = g_win; pthread_mutex_unlock(&g_win_mu); return w; }
 int dm_external_active(void) { return atomic_load(&g_external_active); }
 __attribute__((weak)) void vk_window_lost(void) {}   // the backend lets go of the window's swapchain before the window goes
-static void on_window_created(ANativeActivity *a, ANativeWindow *w) { (void)a; pthread_mutex_lock(&g_win_mu); g_win = w; pthread_mutex_unlock(&g_win_mu); }
-static void on_window_destroyed(ANativeActivity *a, ANativeWindow *w) { (void)a; (void)w; pthread_mutex_lock(&g_win_mu); g_win = NULL; pthread_mutex_unlock(&g_win_mu); vk_window_lost(); }
+void dm_sync_window(ANativeWindow *w); int dm_sync_begin(ANativeActivity *act, const char *root, void (*done)(void));   // datasync_android.c: the data from a server (porter --data-url)
+int dm_prep_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(void));   // datasync_android.c: the shader preparation (gfx_vk_gpl.inc vk_gpl_prepare), on the same screen
+static void on_window_created(ANativeActivity *a, ANativeWindow *w) { (void)a; pthread_mutex_lock(&g_win_mu); g_win = w; pthread_mutex_unlock(&g_win_mu); dm_sync_window(w); }
+static void on_window_destroyed(ANativeActivity *a, ANativeWindow *w) { (void)a; (void)w; pthread_mutex_lock(&g_win_mu); g_win = NULL; pthread_mutex_unlock(&g_win_mu); dm_sync_window(NULL); vk_window_lost(); }
 JNIEXPORT void JNICALL Java_org_nx2a_ExternalActivity_externalSurface(JNIEnv *env, jclass cls, jobject surface) {
     (void)cls;
     ANativeWindow *next = surface ? ANativeWindow_fromSurface(env, surface) : NULL;
@@ -72,7 +74,7 @@ JNIEXPORT void JNICALL Java_org_nx2a_ExternalActivity_externalSurface(JNIEnv *en
 
 void dm_focus_set(int st); void dm_audio_suspend(int on); void guest_clock_freeze_for(int reason, int on); void dm_gfx_suspend(int on);
 // ---- settings (the pause menu's), kept in the files folder as KEY=VALUE lines ----
-static char g_root[512];
+static char g_root[512], g_mods[600];   // the files folder; the modules folder the host runs (aspect_variant)
 static _Atomic int g_set_overlay = 1, g_set_rumble = 1, g_set_fps;   // the gamepad shown; rumble and tap vibration; the frame rate counter (top left)
 static _Atomic int g_set_opacity = 60;   // the gamepad's opacity, percent (OV_OPACITY_MIN..MAX: the menu's Opacity slider)
 static _Atomic int g_set_grid;   // the layout editor's Snap to grid
@@ -83,12 +85,14 @@ static _Atomic int g_cust[2][2][DM_AOV_N][3], g_cust_ver, g_edit;
 static const char *const LAYOUT_NAMES[2] = {"tablet", "phone"};
 static int ctl_named(const char *n) { for (int i = 0; i < OV_N; i++) if (!strcmp(OV_LAYOUTS[0][i].name, n)) return i; return -1; }
 int dm_opmode(void); void dm_set_opmode(int m);   // hle_oe.c: 0 handheld, 1 docked; a change reaches the game as the Switch's operation mode notification
+static char g_set_aspect[16];   // settings.txt's aspect= (auto, 4:3, 16:9): which rewrite of the game runs (aspect_variant); kept as it is when the menu saves
 static void settings_load(void) {
     char p[600]; snprintf(p, sizeof p, "%s/settings.txt", g_root); FILE *f = fopen(p, "r"); char line[128];
     if (!f) return;
     while (fgets(line, sizeof line, f)) { int v; if (sscanf(line, "overlay=%d", &v) == 1) atomic_store(&g_set_overlay, v != 0); else if (sscanf(line, "rumble=%d", &v) == 1) atomic_store(&g_set_rumble, v != 0);
         else if (sscanf(line, "fps=%d", &v) == 1) atomic_store(&g_set_fps, v != 0);
         else if (sscanf(line, "docked=%d", &v) == 1) setenv("DM_OPMODE", v ? "1" : "0", 1);   // over env.txt's: the host reads it once, at its first query
+        else if (sscanf(line, "aspect=%15s", g_set_aspect) == 1) { if (strcmp(g_set_aspect, "auto")) setenv("DM_ASPECT", g_set_aspect, 1); else unsetenv("DM_ASPECT"); }   // aspect_variant
         else if (sscanf(line, "opacity=%d", &v) == 1) atomic_store(&g_set_opacity, v < OV_OPACITY_MIN ? OV_OPACITY_MIN : v > OV_OPACITY_MAX ? OV_OPACITY_MAX : v);
         else if (sscanf(line, "grid=%d", &v) == 1) atomic_store(&g_set_grid, v != 0);
         else if (sscanf(line, "labels=%d", &v) == 1) atomic_store(&g_set_labels, v != 0);
@@ -110,6 +114,7 @@ static void settings_save(void) {
     fprintf(f, "overlay=%d\nrumble=%d\ndocked=%d\nfps=%d\nopacity=%d\ngrid=%d\n", atomic_load(&g_set_overlay), atomic_load(&g_set_rumble), dm_opmode() != 0, atomic_load(&g_set_fps),
             atomic_load(&g_set_opacity), atomic_load(&g_set_grid));
     if (atomic_load(&g_set_labels) >= 0) fprintf(f, "labels=%d\n", atomic_load(&g_set_labels));   // (only once the player chose: until then env.txt decides)
+    if (g_set_aspect[0]) fprintf(f, "aspect=%s\n", g_set_aspect);
     for (int l = 0; l < 2; l++) for (int i = 0; i < OV_N; i++) {
         _Atomic int *c = g_cust[0][l][i]; int x = atomic_load(&c[0]), y = atomic_load(&c[1]), z = atomic_load(&c[2]);
         if ((x && y) || z) fprintf(f, "ui=%s,%s,%d,%d,%d\n", LAYOUT_NAMES[l], OV_LAYOUTS[0][i].name, x && y ? x - 1 : -1, x && y ? y - 1 : -1, z ? z : 1000);
@@ -1133,15 +1138,25 @@ static void *input_thread(void *a) {
     }
     return NULL;
 }
-static void on_queue_created(ANativeActivity *a, AInputQueue *q) { (void)a; g_queue = q; while (!g_ilooper) usleep(1000); AInputQueue_attachLooper(q, g_ilooper, 1, on_input, NULL); }
+static _Atomic int g_syncing;   // the data download runs (dm_sync_begin): the game, its input thread with it, starts when it ends (game_start)
+static int on_input_early(int fd, int events, void *data) {   // the main thread's looper: events before the game, none of them handled
+    (void)fd; (void)events; (void)data; AInputEvent *e;
+    while (g_queue && AInputQueue_getEvent(g_queue, &e) >= 0) { if (AInputQueue_preDispatchEvent(g_queue, e)) continue; AInputQueue_finishEvent(g_queue, e, 0); }
+    return 1;
+}
+static void on_queue_created(ANativeActivity *a, AInputQueue *q) {
+    (void)a; g_queue = q;
+    if (atomic_load(&g_syncing)) { AInputQueue_attachLooper(q, ALooper_forThread(), 2, on_input_early, NULL); return; }
+    while (!g_ilooper) usleep(1000);
+    AInputQueue_attachLooper(q, g_ilooper, 1, on_input, NULL);
+}
 static void on_queue_destroyed(ANativeActivity *a, AInputQueue *q) { (void)a; AInputQueue_detachLooper(q); g_queue = NULL; }
 
 // ---- the host ----
 int main(int argc, char **argv);   // dm/host/main.c
 static void *host_thread(void *a) {
     (void)a;
-    char mods[600]; snprintf(mods, sizeof mods, "%s/mods", g_root);
-    char *argv[] = {"dmhost", mods, NULL};
+    char *argv[] = {"dmhost", g_mods, NULL};
     atomic_store(&g_running, 1);
     int rc = main(2, argv);
     LOG("host returned %d", rc);
@@ -1156,6 +1171,32 @@ static void env_file(const char *path) {   // KEY=VALUE per line (# comments): s
         char *eq = strchr(line, '='); if (!eq) continue; *eq = 0; setenv(line, eq + 1, 1);
     }
     fclose(f);
+}
+// ---- which rewrite of the game's code: mods/, or mods-4x3/ (a data pack with the variant, android.tsv variant 4x3: the game rendering 4:3) on a screen narrower than
+// 3:2 (Retroid Pocket Nova, 1280x960). DM_ASPECT (env.txt, or settings.txt's aspect=) = 4:3 or 16:9 chooses by hand; auto or none goes by the screen. The screen's size is the
+// display's real size (the app is landscape, so the long side is its width whatever the rotation at launch); env-4x3.txt, the variant's own env rows, comes after env.txt ----
+static float screen_aspect(ANativeActivity *act, int *w, int *h) {   // long side / short side of the display, 0 when not known
+    JNIEnv *E = act->env; *w = *h = 0;
+    jclass cA = (*E)->GetObjectClass(E, act->clazz); jmethodID mWm = cA ? (*E)->GetMethodID(E, cA, "getWindowManager", "()Landroid/view/WindowManager;") : NULL;
+    jobject wm = mWm ? (*E)->CallObjectMethod(E, act->clazz, mWm) : NULL; if (jx(E) || !wm) return 0;
+    jclass cWm = (*E)->FindClass(E, "android/view/WindowManager"), cD = (*E)->FindClass(E, "android/view/Display"), cM = (*E)->FindClass(E, "android/util/DisplayMetrics"); if (jx(E) || !cWm || !cD || !cM) return 0;
+    jmethodID mDisp = (*E)->GetMethodID(E, cWm, "getDefaultDisplay", "()Landroid/view/Display;"), mReal = (*E)->GetMethodID(E, cD, "getRealMetrics", "(Landroid/util/DisplayMetrics;)V"),
+              mNew = (*E)->GetMethodID(E, cM, "<init>", "()V"); if (jx(E) || !mDisp || !mReal || !mNew) return 0;
+    jobject d = (*E)->CallObjectMethod(E, wm, mDisp), m = (*E)->NewObject(E, cM, mNew); if (jx(E) || !d || !m) return 0;
+    (*E)->CallVoidMethod(E, d, mReal, m); if (jx(E)) return 0;
+    jfieldID fw = (*E)->GetFieldID(E, cM, "widthPixels", "I"), fh = (*E)->GetFieldID(E, cM, "heightPixels", "I"); if (jx(E) || !fw || !fh) return 0;
+    *w = (*E)->GetIntField(E, m, fw); *h = (*E)->GetIntField(E, m, fh);
+    int lo = *w < *h ? *w : *h, hi = *w < *h ? *h : *w;
+    return lo > 0 ? (float)hi / (float)lo : 0;
+}
+static void aspect_variant(ANativeActivity *act) {
+    char v[600]; struct stat st; snprintf(g_mods, sizeof g_mods, "%s/mods", g_root); snprintf(v, sizeof v, "%s/mods-4x3", g_root);
+    if (stat(v, &st) || !S_ISDIR(st.st_mode)) return;   // a pack without variants: as before
+    const char *want = getenv("DM_ASPECT"); int w, h; float r = screen_aspect(act, &w, &h);
+    int four = want && !strcmp(want, "4:3") ? 1 : want && !strcmp(want, "16:9") ? 0 : r > 0 && r < 1.5f;
+    if (four) { snprintf(g_mods, sizeof g_mods, "%s", v); snprintf(v, sizeof v, "%s/env-4x3.txt", g_root); env_file(v); }
+    LOG("modules: %s (screen %dx%d, %.3f:1; DM_ASPECT=%s: %s)", four ? "mods-4x3, the 4:3 variant" : "mods, the game's own 16:9", w, h, r, want ? want : "auto",
+        want && (!strcmp(want, "4:3") || !strcmp(want, "16:9")) ? "chosen by hand" : "by the screen, 4:3 below 1.5:1");
 }
 // ---- a RomFS outside the app's files folder (env.txt's DM_ROMFS, written by porter install --romfs-at: a game dump another app also reads, a folder on the SD card). The app
 // reads it only with All files access (the appop MANAGE_EXTERNAL_STORAGE, Android 11 on) or, on Android 10, READ_EXTERNAL_STORAGE in the legacy storage view: mkapk.py asks
@@ -1203,6 +1244,8 @@ static int romfs_readable(ANativeActivity *act, int sdk) {   // 0: the game cann
     LOG("RomFS: %s, outside the app's files folder (%s granted)", r, what);
     return 1;
 }
+static int g_sdk;
+static void game_start(ANativeActivity *act, int late); static void game_start_late(void); static int prep_start(void); static void prep_late(void);
 __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActivity *act, void *saved, size_t saved_size) {
     (void)saved; (void)saved_size;
     g_act = act;
@@ -1222,14 +1265,33 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
     snprintf(p, sizeof p, "%s/save", act->internalDataPath); mkdir(p, 0700); setenv("DM_SAVE", p, 0);
     snprintf(p, sizeof p, "%s/temp", act->internalDataPath); mkdir(p, 0700); setenv("DM_TEMP", p, 0);
     snprintf(p, sizeof p, "%s/shaders.dmsv", g_root); setenv("DM_VK_SHADERS", p, 0);
+    g_sdk = sdk; snprintf(g_mods, sizeof g_mods, "%s/mods", g_root);
+    // an APK ported with --data-url downloads its data first (datasync_android.c), on threads of its own; the game starts on this thread when that ends
+    atomic_store(&g_syncing, 1);
+    if (dm_sync_begin(act, g_root, prep_late)) return;
+    if (prep_start()) return;
+    atomic_store(&g_syncing, 0);
+    game_start(act, 0);
+}
+// The shader preparation (datasync_android.c dm_prep_begin) between the download and the game: with env.txt's switches read (the Vulkan driver, DM_VK_GPL), as game_start reads them again
+static int prep_start(void) { char p[700]; snprintf(p, sizeof p, "%s/env.txt", g_root); env_file(p); return dm_prep_begin(g_act, phone_window(), game_start_late); }
+static void prep_late(void) { if (!prep_start()) game_start_late(); }   // the main thread, once the data download ended
+static void game_start_late(void) {   // the main thread, once the data download ended: its input queue goes to the input thread, as at a start without the download
+    if (g_queue) AInputQueue_detachLooper(g_queue);
+    atomic_store(&g_syncing, 0);
+    game_start(g_act, 1);
+    if (g_queue && !g_quit) { while (!g_ilooper) usleep(1000); AInputQueue_attachLooper(g_queue, g_ilooper, 1, on_input, NULL); }   // (no input thread when the game was not started)
+}
+static void game_start(ANativeActivity *act, int late) {   // late: after onCreate returned (the data download), so an end asked for here finishes the activity at once
+    int sdk = g_sdk; char p[700];
     snprintf(p, sizeof p, "%s/env.txt", g_root); env_file(p);
 #ifdef DM_RELEASE
     unsetenv("DM_CTL");   // a release build takes no remote key presses (the control file is a development tool)
 #endif
     // the save manager's requests (saves_android.c), before the host mounts the save: an import chosen in the menu or pushed by porter, an export porter asks for
-    if (dm_saves_start(g_root)) { LOG("[saves] the request asked the app to end: the game is not started"); g_quit = 1; return; }
-    if (!romfs_readable(act, sdk)) { g_quit = 1; return; }   // after the save manager's requests, which need no RomFS
-    settings_load(); dm_haptics_android_start(act, atomic_load(&g_set_rumble)); dm_lan_android_start(act);
+    if (dm_saves_start(g_root)) { LOG("[saves] the request asked the app to end: the game is not started"); g_quit = 1; if (late) act_finish(act); return; }
+    if (!romfs_readable(act, sdk)) { g_quit = 1; if (late) act_finish(act); return; }   // after the save manager's requests, which need no RomFS
+    settings_load(); aspect_variant(act); dm_haptics_android_start(act, atomic_load(&g_set_rumble)); dm_lan_android_start(act);
     { pthread_t w; if (!pthread_create(&w, NULL, pad_watch, act->vm)) pthread_detach(w); }
     { pthread_t w; if (!pthread_create(&w, NULL, temp_watch, act->vm)) pthread_detach(w); }
     LOG("NX2A host on Android: files %s, RomFS %s, saves %s", g_root, getenv("DM_ROMFS"), act->internalDataPath);

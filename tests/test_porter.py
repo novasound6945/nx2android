@@ -163,6 +163,54 @@ class DataPack(unittest.TestCase):
         finally:
             shutil.rmtree(t, ignore_errors=True)
 
+    def test_variants(self):   # android.tsv variant rows: checked; the pack's mods-<v>/ beside mods/, env-<v>.txt for a variant's env rows, the manifest's list; owned like mods/
+        try:
+            p = android_profile.load(profile_dir([('status', 'experimental'), ('variant', '4x3 DM_X=1')]).name)
+            self.assertEqual(p.variants, {'4x3': ['DM_X=1']})
+            for bad in ('16x10', '4x3 lower=1'):
+                with self.assertRaises(android_profile.ProfileError): android_profile.load(profile_dir([('status', 'experimental'), ('variant', bad)]).name)
+        finally: os.environ.pop('DM_GAMES_DIR', None)
+        self.assertEqual(android_profile.load('01004AB00A260000').variants, {'4x3': []})   # DARK SOULS: REMASTERED's 4:3 rewrite (its patches.py reads DM_PATCH_VARIANT)
+        t = Path(tempfile.mkdtemp(prefix='nx2a_test_pack_'))
+        try:
+            for d, b in (('patched', b'a'), ('patched-4x3', b'b')): (t / d).mkdir(); (t / d / 'main.patched.bin').write_bytes(b * 10)
+            (t / 'romfs').mkdir(); (t / 'romfs/a.bin').write_bytes(b'y')
+            man = datapack.build(t / 'out-data', profile=p, version='v0', display='1.0', patched=t / 'patched', romfs=t / 'romfs', shaders=None,
+                                 variants={'4x3': (t / 'patched-4x3', ['DM_X=1'])})
+            o = t / 'out-data'
+            self.assertEqual(((o / 'mods/main.patched.bin').read_bytes(), (o / 'mods-4x3/main.patched.bin').read_bytes()), (b'a' * 10, b'b' * 10))
+            self.assertIn('DM_X=1\n', (o / 'env-4x3.txt').read_text()); self.assertNotIn('DM_X', (o / 'env.txt').read_text())
+            self.assertEqual(man['variants'], ['4x3'])
+            self.assertEqual(datapack.build(t / 'plain-data', profile=p, version='v0', display='1.0', patched=t / 'patched', romfs=t / 'romfs', shaders=None)['variants'], [])
+            self.assertTrue(datapack.owned('mods-4x3/main.patched.bin') and datapack.owned('RomFS/a.bin') and not datapack.owned('settings.txt') and not datapack.owned('modsx'))
+        finally:
+            shutil.rmtree(t, ignore_errors=True)
+
+    def test_publish(self):   # files.json: every file with its size and SHA-256, the pack's facts and an id; hashes reused for files of the same size and mtime
+        from porter import publish
+        from porter.upstream import BuildError
+        t = Path(tempfile.mkdtemp(prefix='nx2a_test_pub_'))
+        try:
+            (t / 'mods').mkdir(); (t / 'mods/main.patched.bin').write_bytes(b'm' * 100); (t / 'env.txt').write_text('DM_LANG=ko\n')
+            (t / datapack.MANIFEST).write_text(json.dumps(dict(package='org.nx2a.test', version='v1', display='1.0', variants=['4x3'])))
+            fj = publish.manifest(t)
+            self.assertEqual(sorted(f['path'] for f in fj['files']), ['env.txt', 'mods/main.patched.bin', datapack.MANIFEST])
+            self.assertEqual(next(f['sha256'] for f in fj['files'] if f['path'] == 'mods/main.patched.bin'), hashlib.sha256(b'm' * 100).hexdigest())
+            self.assertEqual((fj['package'], fj['variants'], fj['hashed']), ('org.nx2a.test', ['4x3'], 3))
+            again = publish.manifest(t); self.assertEqual((again['hashed'], again['id']), (0, fj['id']))
+            (t / 'env.txt').write_text('DM_LANG=en\n'); self.assertNotEqual(publish.manifest(t)['id'], fj['id'])
+            self.assertEqual(publish.check_url('https://h:5006/port/darksouls/1.0.0'), 'https://h:5006/port/darksouls/1.0.0/')
+            for bad in ('ftp://h/', 'h/x', 'http://h/a b'):
+                with self.assertRaises(BuildError): publish.check_url(bad)
+            (t / 'cred').write_text('reader:secret\n'); self.assertEqual(publish.read_cred(t / 'cred'), 'reader:secret')
+            (t / 'bad').write_text('nocolon')
+            with self.assertRaises(BuildError) as e: publish.read_cred(t / 'bad')
+            self.assertNotIn('nocolon', str(e.exception))   # never the file's content in a message
+            a = publish.source_asset('https://h:5006/port/x/', 'reader:secret')
+            self.assertTrue(a.startswith(b'NX2S\x01')); self.assertNotIn(b'secret', a); self.assertNotIn(b'h:5006', a)
+        finally:
+            shutil.rmtree(t, ignore_errors=True)
+
     @unittest.skipUnless(any(Path(p).is_file() for p in pipeline.LETTER_FONTS), 'no letter font on this machine')
     def test_button_font(self):   # the Nintendo extension stand-in: made once, in the pack, named in env.txt (Super Mario Bros. Wonder's "Press L+R" drew '?' without it)
         try: from fontTools.ttLib import TTFont

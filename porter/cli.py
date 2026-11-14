@@ -49,11 +49,17 @@ def _parser():
                          '"AllocateAddressRegion refused (0x1803)" before it crashes; it uses no memory (default: 8 for a game version the profile was not '
                          'brought up on, none for one it was)')
     _romfs_at(po, 'with --install: ')
+    po.add_argument('--data-url', default='', metavar='URL',
+                    help='the folder on a web server (http:// or https://, GET with Range) where the data pack is put as it is: the APK downloads its data from there at launch, '
+                         'only the files that changed, and the pack gets the files.json the app compares (porter publish)')
+    po.add_argument('--data-cred', default=None, metavar='FILE', help='with --data-url: a file of one line, user:password, for the server\'s Basic authentication (masked in the APK, never printed)')
     po.add_argument('--jobs', type=int, default=os.cpu_count() or 8)
     po.add_argument('--progress', default='auto', choices=('auto', 'bar', 'lines', 'json', 'off'), help='json: one JSON event per line, for the GUI')
     ins = sub.add_parser('install', help='install a port made earlier'); ins.add_argument('data', help='the data pack folder (<App>-data)'); ins.add_argument('--apk', help='the APK (default: <App>.apk beside the pack)')
     ins.add_argument('--device', default=''); ins.add_argument('--replace-signer', action='store_true'); ins.add_argument('--progress', default='auto', choices=('auto', 'bar', 'lines', 'json', 'off'))
     _romfs_at(ins)
+    pb = sub.add_parser('publish', help='write the data pack\'s files.json (paths, sizes, SHA-256), which an APK ported with --data-url compares and downloads by')
+    pb.add_argument('data', help='the data pack folder (<App>-data)'); pb.add_argument('--progress', default='auto', choices=('auto', 'bar', 'lines', 'json', 'off'))
     dv = sub.add_parser('devices', help='the devices adb sees'); dv.add_argument('--json', action='store_true')
     t = sub.add_parser('tools', help='list, or download, the missing tools (Android NDK, .NET SDK, platform-tools) from Google and Microsoft')
     t.add_argument('--download', action='store_true', help='download and unpack them into the nx2android folder (you accept their licenses)')
@@ -165,7 +171,8 @@ def cmd_port(a):
     except BuildError as e: print(e, file=sys.stderr); return 2
     opts = pipeline.Options(folder=Path(a.folder), keys=Path(a.keys) if a.keys else None, firmware=Path(a.firmware) if a.firmware else None, out=Path(a.out) if a.out else None, version=a.version, language=a.language,
                             app_name=a.app_name, install=a.install, device=a.device, replace_signer=a.replace_signer, debug=a.debug, experimental=a.experimental, package=a.package, fps60=a.fps60, touch=a.touch, mt_replay=a.mt_replay, vulkan_driver=a.vulkan_driver, shared_font=a.shared_font,
-                            vercode_offset=offset, alias_headroom=a.alias_headroom, romfs_at=a.romfs_at, romfs_push=a.romfs_push, external_display=a.external_display, jobs=a.jobs)
+                            vercode_offset=offset, alias_headroom=a.alias_headroom, romfs_at=a.romfs_at, romfs_push=a.romfs_push, external_display=a.external_display,
+                            data_url=a.data_url, data_cred=a.data_cred, jobs=a.jobs)
     return _with_progress(a.progress, lambda: pipeline.emit_result(pipeline.Port(opts).run()))
 
 
@@ -178,6 +185,17 @@ def cmd_install(a):
         PROG.plan(1)
         cfg = config.load()
         install.install(apk, data, toolchain.find_adb(cfg), a.device or cfg.get('device'), replace_signer=a.replace_signer, romfs_at=a.romfs_at, romfs_push=a.romfs_push)
+    return _with_progress(a.progress, go)
+
+
+def cmd_publish(a):
+    from porter import publish
+    from porter.upstream import PROG, say
+    def go():
+        PROG.plan(1); PROG.stage('publish', step='hashing the files')
+        fj = publish.manifest(Path(a.data), progress=lambda d, t: PROG.set(done=d, total=t, unit='B'))
+        PROG.end(f'{publish.FILES}: {len(fj["files"]):,} files, {fj["bytes"] / 2**30:.2f} GB, {fj["hashed"]:,} hashed, id {fj["id"][:16]}')
+        say(f'upload {Path(a.data).resolve()} as it is (files.json last) to the folder the APK was ported with (--data-url)')
     return _with_progress(a.progress, go)
 
 
@@ -269,4 +287,4 @@ def cmd_driver(a):
 def main(argv):
     if hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8', errors='replace')   # game names and progress bars on a Windows console
     a = _parser().parse_args(argv)
-    return {'doctor': cmd_doctor, 'profiles': cmd_profiles, 'inspect': cmd_inspect, 'port': cmd_port, 'install': cmd_install, 'devices': cmd_devices, 'tools': cmd_tools, 'config': cmd_config, 'saves': cmd_saves, 'driver': cmd_driver}[a.cmd](a)
+    return {'doctor': cmd_doctor, 'profiles': cmd_profiles, 'inspect': cmd_inspect, 'port': cmd_port, 'install': cmd_install, 'publish': cmd_publish, 'devices': cmd_devices, 'tools': cmd_tools, 'config': cmd_config, 'saves': cmd_saves, 'driver': cmd_driver}[a.cmd](a)

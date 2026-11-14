@@ -41,7 +41,9 @@
     X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdWriteTimestamp) X(vkGetQueryPoolResults) X(vkCmdBeginQuery) X(vkCmdEndQuery) X(vkResetQueryPool) \
     X(vkCreateSwapchainKHR) X(vkDestroySwapchainKHR) X(vkGetSwapchainImagesKHR) X(vkAcquireNextImageKHR) X(vkQueuePresentKHR) \
     X(vkCmdBindTransformFeedbackBuffersEXT) X(vkCmdBeginTransformFeedbackEXT) X(vkCmdEndTransformFeedbackEXT) X(vkCmdDrawIndirectByteCountEXT) X(vkCmdDrawIndirectCount) X(vkCmdDrawIndexedIndirectCount) \
-    X(vkGetRefreshCycleDurationGOOGLE) X(vkGetPastPresentationTimingGOOGLE)
+    X(vkGetRefreshCycleDurationGOOGLE) X(vkGetPastPresentationTimingGOOGLE) \
+    X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) \
+    X(vkCmdSetDepthBiasEnable) X(vkCmdSetDepthClampEnableEXT) X(vkCmdSetPolygonModeEXT) X(vkCmdSetDepthClipNegativeOneToOneEXT)
 #define VK_DECL(f) extern PFN_##f f;
 VK_FNS(VK_DECL) VK_DEV_FNS(VK_DECL)
 
@@ -51,6 +53,10 @@ typedef struct {
     VkPhysicalDeviceProperties props; VkPhysicalDeviceMemoryProperties mem;
     VkPipelineCache pcache;
     int has_bc, has_astc, has_gs, has_depth_clip_ctl, has_custom_border, has_robust2, has_xfb, has_imageless, has_dtiming, has_dynrender, has_timeline, has_draw_count;
+    // DM_VK_GPL (vk_init; gfx_vk_exec.c gpl_*): pipelines from VK_EXT_graphics_pipeline_library parts, fast-linked at a draw (no draw left out, no driver compile of a whole pipeline
+    // on the replay thread); gpl_eds3: the VK_EXT_extended_dynamic_state3 states its pre-rasterization parts leave dynamic (1 depth clamp, 2 polygon mode, 4 depth clip -1..1), the
+    // others go into their key; gpl_interp: graphicsPipelineLibraryIndependentInterpolationDecoration
+    int gpl, gpl_eds3, gpl_interp;
     int has_oq_precise, has_hqr;   // occlusionQueryPrecise; hostQueryReset with vkResetQueryPool loaded (gfx_vk_core.c occlusion queries)
     float max_aniso;
     // subgroups (vk_init): VkPhysicalDeviceSubgroupProperties' size, stages, operations and quadOperationsInAllStages; VkPhysicalDeviceSubgroupSizeControlProperties'
@@ -166,8 +172,10 @@ typedef struct {
 vkshader_t *vk_shader(uint64_t key, int stage);   // NULL when the bundle has no such shader
 vkshader_t *vk_shader_gs_topo(vkshader_t *gs, VkPrimitiveTopology topo);   // the geometry shader translated for the draw's input primitive (shader_vk.py gs_variant_key); gs when there is none
 VkShaderModule vk_shader_module(vkshader_t *s, uint64_t um, uint64_t im, uint32_t xo, int fd);   // the module, or its variant (integer views; extra outputs; fd: bit 0 fragment depth written,
-                                                                                                 // bit 1 dual source, bits 4-7 the NVN alpha function tested, its reference the specialization constant below)
-#define VK_ALPHA_SPEC_ID 0x0a17u   // SpecId of an alpha test variant's reference (a float; spv_alpha_test)
+                                                                                                 // bit 1 dual source, bits 4-7 the NVN alpha function tested, its reference the push constant below)
+#define VK_ALPHA_PC_OFF 0u          // an alpha test variant's reference: the float at this offset of the fragment stage's push constants (spv_alpha_test)
+#define VK_GFX_PC_SIZE 4u           // every graphics pipeline layout's push constant range (fragment stage, offset 0: the alpha reference)
+int vk_shader_alpha_ok(vkshader_t *s);   // a fragment shader that takes the alpha test variant (the preparation's GREATER parts)
 void vk_shaders_open(const char *path);
 VkBuffer vk_support_buffer(void);
 VkBuffer vk_zero_buffer(void);

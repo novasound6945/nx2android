@@ -21,3 +21,12 @@ env	DM_VK_ASYNC_PIPE=0
 # and 40 for the rest of the session (this game's own limiter keeps its frame work at the period). Retroid Pocket Nova, 2026-11-14: pinned, the movies play at their speed
 # with sound (29 underruns in 2,000 callbacks) and play stays at 60; the float frame step keeps the game's speed when a frame is late
 env	DM_FPS_PIN=60
+# No dynamic uniform buffers: with graphics pipeline libraries (independent-set layouts, the vertex stage's set 0 and the fragment stage's set 1 both holding dynamic
+# uniform buffers) Turnip's fast-linked pipelines read the fragment stage's constant buffers from the wrong dynamic offsets, the vertex stage's: whole objects (the
+# player, trees, shields) drew magenta / fluorescent / grey for the frames before the whole pipeline took over, and new areas flashed. Found with DM_VK_SHOTS_FAST
+# (the frames a linked pipeline drew, and its shaders): the same pipelines drawn linked in the same scene drew right with this. Retroid Pocket 6 (Adreno 740, Turnip T30),
+# 2026-11-15: from empty caches, 60 fps held, no flashes, no pop-in
+env	DM_VK_DYN_UBO=0
+# 4:3 screens (Retroid Pocket Nova, 1280x960): a second rewrite of main, patches.py's ASPECT_4_3 (960x720 render, the UI in a 16:9 band), in the data pack's mods-4x3/;
+# the app runs it on a screen narrower than 3:2 (DM_ASPECT=4:3 / 16:9 or the settings' aspect= chooses by hand)
+variant	4x3

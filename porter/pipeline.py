@@ -45,6 +45,8 @@ class Options:
     alias_headroom: int = None         # GB more alias region (alias_headroom); None: ALIAS_HEADROOM for a version the profile was not brought up on, none for one it was
     romfs_at: str = None               # with install: the folder on the device the app reads the RomFS from (porter/install.py), 'app' for its files folder; None: as the device has it
     romfs_push: bool = False           # with romfs_at: push the pack's RomFS into that folder first
+    data_url: str = ''                 # the folder on a web server (http/https) the published data pack is in: the app downloads it itself (porter/publish.py, dm/android/datasync.h)
+    data_cred: Path = None             # a file of one line, user:password, for the server's Basic authentication (masked in the APK, never printed)
     jobs: int = field(default_factory=lambda: os.cpu_count() or 8)
 
 
@@ -186,6 +188,10 @@ class Port:
         if o.shared_font:
             o.shared_font = Path(o.shared_font).expanduser().resolve()
             if not o.shared_font.is_file() or o.shared_font.suffix.lower() != '.ttf': raise BuildError(f'--shared-font: not a .ttf font: {o.shared_font}')
+        if o.data_url or o.data_cred:
+            from porter import publish
+            o.data_url = publish.check_url(o.data_url)
+            if o.data_cred: o.data_cred = Path(o.data_cred).expanduser().resolve(); publish.read_cred(o.data_cred)   # a bad file fails now, not after the shaders
         if fw := o.firmware or self.cfg.get('firmware'):
             o.firmware = Path(fw).expanduser().resolve()
             if not o.firmware.is_dir(): raise BuildError(f'--firmware: not a folder: {o.firmware}')
@@ -627,6 +633,14 @@ class Port:
     def rewrite(self):
         self.patched = self.aw / f'patched_{self.pkg_ver}'   # beside, not over, an iOS build's patched_<version>: the rewrite's reuse key does not include the target
         nsp.rewrite(PY, NXNATIVE, self.game / 'ExeFS', self.patched, dict(self.env, DM_TARGET='android'), self.logs, self.g)
+        # android.tsv variant rows: the modules rewritten again for another screen (DM_PATCH_VARIANT, which the profile's patches.py reads and the rewrite's reuse key includes),
+        # into patched_<version>-<variant>, the data pack's mods-<variant>/ (the app picks one: front_android.c aspect_variant)
+        self.variants = {}
+        for v in self.ap.variants:
+            self.variants[v] = self.aw / f'patched_{self.pkg_ver}-{v}'
+            PROG.add(1)
+            nsp.rewrite(PY, NXNATIVE, self.game / 'ExeFS', self.variants[v], dict(self.env, DM_TARGET='android', DM_PATCH_VARIANT=v), self.logs / f'variant-{v}', self.g)
+            say(f"rewrite variant {v}: {self.variants[v].name} (the data pack's mods-{v}/)")
         if self.derived or self.provisional:   # the keys that need the rewritten modules (upstream's provisional steps)
             nsp.provisional_prep(PY, NXNATIVE, self.env, self.logs, self.g)
             self.g = nsp.refine_after_rewrite(self.g, self.game, self.patched)
@@ -720,7 +734,7 @@ class Port:
             say(f'--vulkan-driver: {self.o.vulkan_driver.name} is packed as {driver.name} (Android extracts only lib*.so libraries)')
         nsp.run([PY, DM / 'android/apk/mkapk.py', self.so, self.apk_path, paths.signing_key(), '--package', self.package, '--label', self.app_name, '--lib', 'dmhost',
                  '--version-code', str(code), '--version-name', self.display]
-                + (['--landscape'] if self.ap.landscape else []) + icon + self.theme() + self.ui_font() + external + ([] if self.o.debug else ['--release'])
+                + (['--landscape'] if self.ap.landscape else []) + icon + self.theme() + self.ui_font() + self.data_source() + external + ([] if self.o.debug else ['--release'])
                 + [a for f in ([driver] + [self.so.parent / n for n in ADRENOTOOLS_LIBS] if driver else []) for a in ('--extra-so', str(f))],
                 self.logs / 'android_apk.log', env=self.env)
         self.result['apk'] = str(self.apk_path)
@@ -741,6 +755,16 @@ class Port:
         nsp.run([javac, '-source', '8', '-target', '8', '-classpath', platform, '-d', classes, *sources], self.logs / 'android_external_java.log', env=self.env)
         nsp.run([d8, '--min-api', '29', '--lib', platform, '--output', dex, *sorted(classes.rglob('*.class'))], self.logs / 'android_external_dex.log', env=self.env)
         return ['--dex', dex / 'classes.dex', '--activity', 'org.nx2a.ExternalActivity']
+
+    def data_source(self):
+        """--data-url: mkapk's arguments for the asset the app downloads its data with (publish.source_asset: the address and the masked credentials), and cleartext HTTP for an
+        http:// address (Android 9+ refuses it by default). [] without --data-url: the app runs as before"""
+        if not self.o.data_url: return []
+        from porter import publish
+        f = self.aw / 'data_source.bin'
+        f.write_bytes(publish.source_asset(self.o.data_url, publish.read_cred(self.o.data_cred) if self.o.data_cred else ''))
+        say(f'data server: {self.o.data_url}' + (' (with credentials)' if self.o.data_cred else ''))   # the credentials themselves are never printed
+        return ['--asset', f'{publish.SOURCE_ASSET}={f}'] + (['--cleartext'] if self.o.data_url.lower().startswith('http://') else [])
 
     def theme(self):
         """The on-screen gamepad's theme: only the game's own pack goes in the APK (dm/android/themes/themes.tsv maps title IDs to packs; a game with no row
@@ -782,10 +806,17 @@ class Port:
         man = datapack.build(dst, profile=self.ap, version=self.pkg_ver, display=self.display, patched=self.patched, romfs=self.game / 'RomFS', shaders=self.dmsv,
                              aoc=self.aoc, sysdata=self.sysdata, language=self.lang, package=self.package, env=self.fps_env + font_env + (['DM_VK_MT_REPLAY=1'] if self.o.mt_replay else [])
                              + ([f'DM_VK_DRIVER={driver_lib_name(self.o.vulkan_driver)}'] if self.o.vulkan_driver else []), settings=TOUCH_SETTINGS if self.o.touch else None,
-                             files={**self.fps_files, **font_files},
+                             files={**self.fps_files, **font_files}, variants={v: (d, self.ap.variants[v]) for v, d in getattr(self, 'variants', {}).items()},
                              progress=lambda what: PROG.set(step=f'linking {what}'))
         self.data_path = dst; self.result['data'] = str(dst)
-        PROG.end(f'{man["files"]:,} files, {man["bytes"] / 2**30:.1f} GB')
+        PROG.end(f'{man["files"]:,} files, {man["bytes"] / 2**30:.1f} GB' + (f', variants {", ".join(man["variants"])}' if man.get('variants') else ''))
+        if self.o.data_url:   # --data-url: the pack's files.json, which the app compares with its own (porter/publish.py); the folder goes to the server as it is
+            from porter import publish
+            PROG.add(1); PROG.stage('publish', step='hashing the files')
+            fj = publish.manifest(dst, progress=lambda d, t: PROG.set(done=d, total=t, unit='B'))
+            self.result['files_json'] = str(dst / publish.FILES)
+            say(f'upload {dst} as it is to {self.o.data_url} (the app downloads it from there)')
+            PROG.end(f'{publish.FILES}: {len(fj["files"]):,} files, {fj["bytes"] / 2**30:.1f} GB')
 
     def button_font(self):
         """The stand-in for the system's Nintendo extension shared font: the controller-button icons in game text (U+E0E0 = A; Super Mario Bros. Wonder's menus showed '?' without it), which

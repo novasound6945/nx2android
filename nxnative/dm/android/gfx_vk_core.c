@@ -255,6 +255,32 @@ void vk_init(void) {
     vkGetPhysicalDeviceFeatures2(V.pd, &fx);
     // transform feedback (NVN BeginTransformFeedback; gfx_vk_exec.c xfb_*): Xenoblade Chronicles 3 captures particle state with it
     V.has_xfb = fxf.transformFeedback && has_ext(ex, ne, "VK_EXT_transform_feedback"); fxf.geometryStreams = 0;
+    // Graphics pipeline libraries (gfx_vk_exec.c gpl_*): a pipeline met for the first time is linked at the draw from four parts, its two shader parts made beforehand
+    // (gfx_vk_exec.c vk_gpl_prepare), and the whole pipeline is compiled in the background to take its place. They need Vulkan 1.3 (extended dynamic state 1 and 2,
+    // dynamic rendering), fast linking, and pass with dynamic rendering (a library's render pass would tie its shaders to the pass's formats). DM_VK_GPL=0 (start-up):
+    // off, as before; so does DM_VK_RP=1 (render pass objects asked for) and DM_VK_MT_REPLAY (its recorder does not wrap the dynamic-state calls the libraries need)
+    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gplf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT e3f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
+    VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT gplp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT};
+    int has_gpl = has_ext(ex, ne, "VK_EXT_graphics_pipeline_library") && has_ext(ex, ne, "VK_KHR_pipeline_library"), has_e3 = has_ext(ex, ne, "VK_EXT_extended_dynamic_state3");
+    { if (has_gpl) gplf.pNext = has_e3 ? (void *)&e3f : NULL;
+      VkPhysicalDeviceFeatures2 fg = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = has_gpl ? (void *)&gplf : has_e3 ? (void *)&e3f : NULL};
+      if (has_gpl || has_e3) vkGetPhysicalDeviceFeatures2(V.pd, &fg);
+      VkPhysicalDeviceProperties2 pg = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &gplp}; if (has_gpl) vkGetPhysicalDeviceProperties2(V.pd, &pg); }
+    { const char *e = getenv("DM_VK_GPL"), *rp = getenv("DM_VK_RP"), *mt = getenv("DM_VK_MT_REPLAY");
+      int want = !(e && !atoi(e)), ok = has_gpl && gplf.graphicsPipelineLibrary && gplp.graphicsPipelineLibraryFastLinking && v13 && V.has_dynrender;
+      V.gpl_eds3 = has_e3 ? (e3f.extendedDynamicState3DepthClampEnable ? 1 : 0) | (e3f.extendedDynamicState3PolygonMode ? 2 : 0) | (e3f.extendedDynamicState3DepthClipNegativeOneToOne && fdc.depthClipControl && has_ext(ex, ne, "VK_EXT_depth_clip_control") ? 4 : 0) : 0;
+      V.gpl_interp = gplp.graphicsPipelineLibraryIndependentInterpolationDecoration;
+      const char *why = !want ? "off (DM_VK_GPL=0)" : !has_gpl ? "off (no VK_EXT_graphics_pipeline_library)" : !gplf.graphicsPipelineLibrary ? "off (feature graphicsPipelineLibrary not offered)"
+                      : !gplp.graphicsPipelineLibraryFastLinking ? "off (no fast linking)" : !v13 ? "off (not a Vulkan 1.3 device: no extended dynamic state 1 / 2)" : !V.has_dynrender ? "off (no dynamic rendering)"
+                      : rp && atoi(rp) ? "off (DM_VK_RP=1: render pass objects)" : mt && atoi(mt) > 0 ? "off (DM_VK_MT_REPLAY)" : "on";
+      V.gpl = want && ok && !(rp && atoi(rp)) && !(mt && atoi(mt) > 0);
+      if (!V.gpl) V.gpl_eds3 = 0;
+      VKLOG("GPL: graphics pipeline library %s, fast linking %s, independent interpolation %s; extended dynamic state 1+2 %s, 3 %s (depth clamp %s, polygon mode %s, depth clip -1..1 %s): %s",
+            has_gpl && gplf.graphicsPipelineLibrary ? "yes" : "no", gplp.graphicsPipelineLibraryFastLinking ? "yes" : "no", gplp.graphicsPipelineLibraryIndependentInterpolationDecoration ? "yes" : "no",
+            v13 ? "yes (Vulkan 1.3)" : "no", has_e3 ? "yes" : "no", e3f.extendedDynamicState3DepthClampEnable ? "yes" : "no", e3f.extendedDynamicState3PolygonMode ? "yes" : "no",
+            e3f.extendedDynamicState3DepthClipNegativeOneToOne ? "yes" : "no", why); }
+    if (V.gpl) { on[non++] = "VK_KHR_pipeline_library"; on[non++] = "VK_EXT_graphics_pipeline_library"; if (V.gpl_eds3) on[non++] = "VK_EXT_extended_dynamic_state3"; }
     fr2.robustBufferAccess2 = 0; fr2.robustImageAccess2 = 0;   // nullDescriptor only: unbound slots read 0 without a dummy
     V.has_custom_border = fcb.customBorderColors && has_ext(ex, ne, "VK_EXT_custom_border_color");
     V.has_robust2 = fr2.nullDescriptor && has_ext(ex, ne, "VK_EXT_robustness2");
@@ -292,6 +318,11 @@ void vk_init(void) {
     VkBaseOutStructure *t = ff.pNext; while (t->pNext) t = t->pNext;   // the queried chain (core / promoted features), then the extensions'
     t->pNext = V.has_xfb ? (VkBaseOutStructure *)&fxf : (VkBaseOutStructure *)&fu8;
     VkPhysicalDeviceFeatures2 enf = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, ff.pNext, en};
+    if (V.gpl) {   // (in front of the chain) the library feature, and only the dynamic states the libraries use
+        VkBool32 c = (V.gpl_eds3 & 1) != 0, pm = (V.gpl_eds3 & 2) != 0, cn = (V.gpl_eds3 & 4) != 0;
+        memset((uint8_t *)&e3f + offsetof(VkPhysicalDeviceExtendedDynamicState3FeaturesEXT, extendedDynamicState3TessellationDomainOrigin), 0, sizeof e3f - offsetof(VkPhysicalDeviceExtendedDynamicState3FeaturesEXT, extendedDynamicState3TessellationDomainOrigin));
+        e3f.extendedDynamicState3DepthClampEnable = c; e3f.extendedDynamicState3PolygonMode = pm; e3f.extendedDynamicState3DepthClipNegativeOneToOne = cn;
+        gplf.graphicsPipelineLibrary = VK_TRUE; e3f.pNext = enf.pNext; gplf.pNext = V.gpl_eds3 ? (void *)&e3f : enf.pNext; enf.pNext = &gplf; }
     float prio = 1;
     VkDeviceQueueCreateInfo qci = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, V.qf, 1, &prio};
     VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &enf, 0, 1, &qci, 0, NULL, non, on, NULL};
@@ -301,6 +332,9 @@ void vk_init(void) {
     VK_DEV_FNS(VK_LOADD)
     if (!vkResetQueryPool) vkResetQueryPool = (PFN_vkResetQueryPool)vkGetDeviceProcAddr(V.dev, "vkResetQueryPoolEXT");   // (VK_EXT_host_query_reset on a 1.1 device)
     V.has_hqr = V.has_hqr && vkResetQueryPool;
+    if (V.gpl && (!vkCmdSetCullMode || !vkCmdSetFrontFace || !vkCmdSetDepthTestEnable || !vkCmdSetDepthWriteEnable || !vkCmdSetDepthCompareOp || !vkCmdSetStencilTestEnable || !vkCmdSetStencilOp || !vkCmdSetDepthBiasEnable)) {
+        VKLOG("[RED] GPL: the extended dynamic state 1 / 2 entry points did not load: off"); V.gpl = 0; V.gpl_eds3 = 0; }
+    if (!vkCmdSetDepthClampEnableEXT) V.gpl_eds3 &= ~1; if (!vkCmdSetPolygonModeEXT) V.gpl_eds3 &= ~2; if (!vkCmdSetDepthClipNegativeOneToOneEXT) V.gpl_eds3 &= ~4;
     // A driver can report the timeline-semaphore feature (and Vulkan 1.3) and still export no vkWaitSemaphores: the emulator's ranchu / gfxstream driver does
     // (both the device and the instance dispatcher return null for it and for vkGetSemaphoreCounterValue), and the first wait then called address 0
     // (SIGSEGV pc=0, lr=wait_fence+0x70, thread 'dm-vk-complete', South Park: The Stick of Truth). The feature query is not proof the entry points load:
@@ -319,7 +353,7 @@ void vk_init(void) {
         en.shaderStorageImageExtendedFormats ? "yes" : "no", en.shaderStorageImageReadWithoutFormat ? "yes" : "no", en.shaderStorageImageWriteWithoutFormat ? "yes" : "no");
     slots_init();
     completion_start();
-    { void crash_handlers_check(const char *when); crash_handlers_check("after the Vulkan device was made"); }   // (again at present 600, gfx_vk_present.c: the shader compiler loads with the first pipelines)
+    { extern int g_vk_early; void crash_handlers_check(const char *when); if (!g_vk_early) crash_handlers_check("after the Vulkan device was made"); }   // (g_vk_early: made for the shader preparation, before the host installs them)   // (again at present 600, gfx_vk_present.c: the shader compiler loads with the first pipelines)
 }
 const void *vk_sg_pin(VkShaderStageFlagBits stage, const uint32_t *local) {
     if (!(V.sg_pin_stages & stage)) return NULL;

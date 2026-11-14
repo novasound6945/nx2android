@@ -11,6 +11,10 @@
 #   setting      <name>=<value>, one row each: the pause menu's defaults on first launch (overlay, rumble, docked, fps, opacity: 20..80 by 5)
 #   env          <KEY>=<VALUE>, one row each: host switches the game needs on Android (the data pack's env.txt)
 #   overlay      <tablet|phone> <control> <x> <y>: moves one control of that layout (dm/android/overlay_default.tsv) to x, y as fractions of the window
+#   variant      <name> [<KEY>=<VALUE> ...]: a second rewrite of the code modules for another screen, one row each; name 4x3 is the only one the app picks (front_android.c
+#                aspect_variant: a screen narrower than 3:2, or DM_ASPECT / settings aspect=4:3). porter rewrites the modules once more with DM_PATCH_VARIANT=<name> (the
+#                profile's patches.py reads it) into the data pack's mods-<name>/ beside mods/ (no variant), and writes the row's env rows to env-<name>.txt, which the app
+#                applies after env.txt when it runs that variant
 # Usage: android_profile.py header <id> <out.h> (android_profile.h for the host: the gamepad layouts, written only when it changes); android_profile.py list;
 #   android_profile.py <id> [<key>] (the profile's keys, or one key's value); android_profile.py theme <id> (the gamepad theme pack porter puts in the APK)
 # From Python: import android_profile; p = android_profile.load(<id>) (None without android.tsv); p.status, p.package, p.settings, p.env, p.overlay_table();
@@ -24,12 +28,13 @@ sys.path.insert(0, str(ANDROID.parent / 'games'))
 import game   # noqa: E402  (the profile folders, DM_GAMES_DIR included)
 
 STATUS = ('playable', 'wip', 'boots', 'experimental')
-SETTINGS = {'overlay': ('0', '1'), 'rumble': ('0', '1'), 'docked': ('0', '1'), 'fps': ('0', '1'),   # the pause menu's settings (front_android.c settings_load)
+SETTINGS = {'overlay': ('0', '1'), 'rumble': ('0', '1'), 'docked': ('0', '1'), 'fps': ('0', '1'), 'aspect': ('auto', '4:3', '16:9'),   # the pause menu's settings (front_android.c settings_load)
             'opacity': tuple(str(v) for v in range(20, 81, 5))}                                    # the gamepad's, percent (overlay_layout.h OV_OPACITY_MIN..MAX)
 REQUIRES = ('bcn',)
 KINDS = {'stick_l': 'OV_STICK_L', 'stick_r': 'OV_STICK_R', 'button': 'OV_BUTTON', 'dpad': 'OV_DPAD', 'menu': 'OV_MENU'}
 SINGLE = ('status', 'tested', 'package', 'orientation', 'requires', 'sysdata')
-REPEAT = ('setting', 'env', 'overlay')
+REPEAT = ('setting', 'env', 'overlay', 'variant')
+VARIANTS = ('4x3',)   # the variants the app knows how to pick (front_android.c aspect_variant)
 
 
 class ProfileError(Exception):
@@ -103,6 +108,10 @@ class AndroidProfile:
     def env(self):   # ['KEY=VALUE', ...]
         return self.values('env')
 
+    @property
+    def variants(self):   # {name: ['KEY=VALUE', ...]} in the order of the rows; {} for a game with one rewrite
+        return {v.split()[0]: v.split()[1:] for v in self.values('variant')}
+
     def overlay_table(self):
         """The gamepad layouts: the default ones with this profile's moves (a moved control's x is a fraction of the window's width: its anchor, no offset)"""
         rows = default_layout(); by = {(r['layout'], r['name']): r for r in rows}
@@ -122,6 +131,12 @@ class AndroidProfile:
             k, eq, val = v.partition('=')
             if not eq or k not in SETTINGS or val not in SETTINGS[k]: bad.append(f'setting {v!r}: ' + ', '.join(f'{n}={"|".join(vs)}' for n, vs in SETTINGS.items()))
         bad += [f'env {v!r}: KEY=VALUE' for v in self.values('env') if not re.fullmatch(r'[A-Z_][A-Z0-9_]*=.*', v)]
+        seen = set()
+        for v in self.values('variant'):
+            c = v.split()
+            if not c or c[0] not in VARIANTS or c[0] in seen or not all(re.fullmatch(r'[A-Z_][A-Z0-9_]*=\S*', x) for x in c[1:]):
+                bad.append(f'variant {v!r}: <{"|".join(VARIANTS)}> [KEY=VALUE ...], each variant once')
+            if c: seen.add(c[0])
         names = {r['name'] for r in default_layout()}
         for v in self.values('overlay'):
             c = v.split()

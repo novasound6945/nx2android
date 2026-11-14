@@ -6,6 +6,7 @@
 #include "gfx_vk.h"
 #include "gfx_vk_slot.h"
 #include "vk_occ.h"
+#include "vk_gpl.h"
 #include "nvn_hmap.h"
 #include "game_profile.h"
 #include <math.h>
@@ -14,6 +15,7 @@
 #include <unistd.h>
 
 VkPipelineLayout vk_pipeline_layout(VkDescriptorSetLayout sets[5], int nsets);
+VkPipelineLayout vk_pipeline_layout_gfx(VkDescriptorSetLayout sets[5], int nsets);   // a graphics pipeline's (with V.gpl: independent sets, gfx_vk_gpl.inc)
 void vk_shader_c1(vkshader_t *s, VkBuffer *buf, VkDeviceSize *off, VkDeviceSize *len);
 VkBufferView vk_tbuf_view(const tex_t *t, int storage);
 void vk_sub_update(uint64_t dst, const void *data, uint64_t n);
@@ -93,6 +95,7 @@ static int g_vbound = 1;   // DM_VK_VBOUND (see vbuf_bound)
 // packaged uploads, the latter also apart), the copied pools' sync before it, shader modules, and the rest
 int g_prof_on; uint64_t g_prof_ns[8]; static uint64_t g_prof_t0, g_prof_pkg0, g_prof_npkg0, g_prof_pipes0;
 static int g_async_pipe = 1;   // DM_VK_ASYNC_PIPE (see async_pipe)
+int g_vk_early;   // vk_init runs for the shader preparation (vk_gpl_prepare), before the host started
 static int g_lin_back = 1;   // DM_VK_LIN_BACK (see lin_back)
 static int g_samp_snap = 1;   // DM_NVN_SAMP_SNAP=0 (live): samplers as registered now, not as the bind saw them (gfx_vk_tex.c vk_samp_at)
 static uint64_t g_x_flat[8]; static int g_x_flat_mode[8], g_x_nflat;   // DM_VK_X_FLAT_VS=<vertex shader key>[:mode][,...] (debugging; pipelines made after it is set): mode bits 1 solid magenta pixel shader, 2 no depth test, 4 no blending (7 when left out)
@@ -357,7 +360,8 @@ typedef struct { uint32_t ncol, cfmt[8], cload[8], dfmt, dload, sload, dstore, s
 typedef struct { VkRenderPass rp; uint32_t w, h, layers, n; struct { uint32_t usage, flags, w, h, layers, fmt, fmt2, fmt3, fmt4; } a[9]; } fbkey;   // fmt2..fmt4: a format-listed image's other formats (an imageless framebuffer names the image's whole list)
 static nvn_hmap g_rps = {.klen = sizeof(rpkey)}, g_fbs = {.klen = sizeof(fbkey)}; static pthread_mutex_t g_rp_mu = PTHREAD_MUTEX_INITIALIZER;
 // Without dynamic rendering (a Vulkan 1.1 / 1.2 device, V.has_dynrender) passes must be render pass objects, whatever DM_VK_RP says (vk_init refuses a device with neither)
-static int rp_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_RP"); on = V.has_imageless && (!V.has_dynrender || !(e && !atoi(e))); VKLOG("passes: %s", on ? "render pass objects with imageless framebuffers" : "dynamic rendering"); } return on; }
+// With graphics pipeline libraries (V.gpl) passes use dynamic rendering: a library made against a render pass is tied to its formats (gpl_* below)
+static int rp_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_RP"); on = !V.gpl && V.has_imageless && (!V.has_dynrender || !(e && !atoi(e))); VKLOG("passes: %s", on ? "render pass objects with imageless framebuffers" : "dynamic rendering"); } return on; }
 static int fmt_has_depth(uint32_t f) { return f && f != VK_FORMAT_S8_UINT; }
 static int fmt_has_stencil(uint32_t f) { return f == VK_FORMAT_D24_UNORM_S8_UINT || f == VK_FORMAT_D32_SFLOAT_S8_UINT || f == VK_FORMAT_S8_UINT || f == VK_FORMAT_D16_UNORM_S8_UINT; }
 static VkRenderPass rp_get(const rpkey *k) {
@@ -984,7 +988,7 @@ typedef struct {
     uint32_t ncol, cfmt[8], dfmt, samples, a2c, blend_en, logic_en, logic_op, wmask[8];
     struct { uint32_t src, dst, srca, dsta, eq, eqa; } bl[8];
     uint32_t clip_neg1, alt, fdz, dual;   // fdz: the fragment shader's variant that writes gl_FragDepth = gl_FragCoord.z (fdz below); dual: its dual-source variant (below)
-    uint32_t atest, aref;   // the alpha test (below): its NVN function (0 = none: ALWAYS, off, no fragment stage), the reference in 1/65535 (0 unless the function compares)
+    uint32_t atest, atest_pad;   // the alpha test (below): its NVN function (0 = none: ALWAYS, off, no fragment stage); the reference is a push constant, not in the key (pad: 0)
     uint64_t um[3], im[3];   // each stage's sampled bindings given integer views (vk_shader_module)
 } pkey;
 static nvn_hmap g_pipes = {.klen = sizeof(pkey)}; static pthread_mutex_t g_pipe_mu = PTHREAD_MUTEX_INITIALIZER;   // the replay thread and the prewarm threads
@@ -1015,7 +1019,7 @@ static void *async_pipe_thread(void *arg) {
         for (int s = 0; s < 3; s++) if (k.key[s] && !(s == 1 && k.raster_discard)) stg[s] = vk_shader(k.key[s], s);
         if (stg[0]) { VkDescriptorSetLayout dsl[5] = {0}; int nsets = 0;
             for (int s = 0; s < 3; s++) if (stg[s]) { dsl[stg[s]->set] = stg[s]->dsl; if (stg[s]->set + 1 > nsets) nsets = stg[s]->set + 1; }
-            uint64_t t0 = tick(); p = build_pipeline(&k, vk_pipeline_layout(dsl, nsets), stg);
+            uint64_t t0 = tick(); p = build_pipeline(&k, vk_pipeline_layout_gfx(dsl, nsets), stg);
             { static int n; if (n++ < 6) VKLOG("pipeline built in the background in %.1f ms (shaders %016llx %016llx)", (tick() - t0) / 1e6, (unsigned long long)k.key[0], (unsigned long long)k.key[1]); } }
         pthread_mutex_lock(&g_pipe_mu);
         VkPipeline had = nvn_hm_get(&g_pipes, &k);
@@ -1039,14 +1043,41 @@ static int async_pipe(const pkey *k) {   // 1: queued (the draw is left out); un
     if (ok) { pthread_mutex_lock(&g_pipe_mu); if (!nvn_hm_get(&g_pipes, k)) nvn_hm_put(&g_pipes, k, PIPE_PENDING); pthread_mutex_unlock(&g_pipe_mu); }
     return ok;
 }
+// Graphics pipeline libraries (gfx_vk_gpl.inc): a draw that can take a linked pipeline does until its whole one is built (vk_gpl.h gpl_route), and none is left out
+static nvn_hmap g_gfast = {.klen = sizeof(pkey)};   // linked pipelines by key (the replay thread's only; (VkPipeline)1: the link failed), kept after the whole one took over (command buffers may hold them)
+static _Atomic uint64_t g_gpl_swaps;   // whole pipelines finished in the background (graphics_pipeline looks again at a memoized linked one when it moves)
+static int g_pipe_fast, g_last_fast; static uint64_t g_last_swaps, g_gpl_dyn_gen;   // graphics_pipeline returned a linked pipeline (its dynamic state: gpl_dyn); the memo's; the command buffer gpl_dyn last set it in
+// DM_VK_SHOTS_FAST (gfx_vk_present.c fastshot_frame): while it is armed, each draw that took a linked pipeline is counted here, by shader keys, until the next present takes the tally
+int g_fastshot_on; uint32_t g_fast_draws, g_fast_nlist; struct { uint64_t vs, fs; uint32_t samples, atest; } g_fast_list[16];
+void vk_fast_take(uint32_t *draws, uint32_t *n, void *list, size_t lsz) { *draws = g_fast_draws; *n = g_fast_nlist; memcpy(list, g_fast_list, lsz < sizeof g_fast_list ? lsz : sizeof g_fast_list); g_fast_draws = 0; g_fast_nlist = 0; }
+static void fast_note(const pkey *k) {
+    g_fast_draws++;
+    for (uint32_t i = 0; i < g_fast_nlist; i++) if (g_fast_list[i].vs == k->key[0] && g_fast_list[i].fs == k->key[1] && g_fast_list[i].samples == k->samples && g_fast_list[i].atest == k->atest) return;
+    if (g_fast_nlist < 16) { g_fast_list[g_fast_nlist].vs = k->key[0]; g_fast_list[g_fast_nlist].fs = k->key[1]; g_fast_list[g_fast_nlist].samples = k->samples; g_fast_list[g_fast_nlist].atest = k->atest; g_fast_nlist++; }
+}
+static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout); static int gpl_eligible(const pkey *k); static void gpl_opt_queue(const pkey *k); static void gpl_old_built(uint64_t ns);
 static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
-    if (g_last_p && !memcmp(k, &g_last_k, sizeof *k)) return g_last_p == (void *)1 ? VK_NULL_HANDLE : g_last_p;
+    uint64_t swaps = atomic_load(&g_gpl_swaps);
+    if (g_last_p && !memcmp(k, &g_last_k, sizeof *k) && (!g_last_fast || g_last_swaps == swaps)) { g_pipe_fast = g_last_fast; return g_last_p == (void *)1 ? VK_NULL_HANDLE : g_last_p; }
+    g_pipe_fast = 0;
     pthread_mutex_lock(&g_pipe_mu); VkPipeline p = nvn_hm_get(&g_pipes, k); pthread_mutex_unlock(&g_pipe_mu);
+    int opt = !p ? GPL_OPT_NONE : p == PIPE_PENDING ? GPL_OPT_PENDING : p == (void *)1 ? GPL_OPT_FAILED : GPL_OPT_OK;
+    // DM_VK_GPL_LINK=0 (live, debugging: a DM_CTL env line): no linked pipelines, each new pipeline is built whole where it is drawn as without libraries,
+    // while the rest of the library setup (dynamic rendering, independent-set layouts, the alpha reference as a push constant) stays: tells their artefacts apart
+    // DM_VK_GPL_LINK_MS=0 (live, the same for multisampled draws only): tells a multisample-state cause from the rest
+    static int link_on = 1, link_ms = 1; static unsigned lk; if (!(lk++ & 255)) { const char *e = getenv("DM_VK_GPL_LINK"); link_on = !(e && !atoi(e));
+        e = getenv("DM_VK_GPL_LINK_MS"); link_ms = !(e && !atoi(e)); }
+    if (V.gpl && link_on && (link_ms || k->samples <= 1) && gpl_route(V.gpl, gpl_eligible(k), opt) == GPL_USE_FAST) {
+        VkPipeline f = nvn_hm_get(&g_gfast, k);
+        if (!f) { f = gpl_link(k, layout); nvn_hm_put(&g_gfast, k, f ? f : (VkPipeline)1); if (f && opt == GPL_OPT_NONE) { gpl_opt_queue(k); opt = GPL_OPT_PENDING; } }
+        else if (f != (void *)1 && opt == GPL_OPT_NONE) gpl_opt_queue(k);   // (its queue was full before)
+        if (f && f != (void *)1) { g_last_k = *k; g_last_p = f; g_last_fast = 1; g_last_swaps = swaps; g_pipe_fast = 1; return f; }
+    }   // (no linked pipeline: as without libraries)
     if (p == PIPE_PENDING) return VK_NULL_HANDLE;
-    if (p) { g_last_k = *k; g_last_p = p; return p == (void *)1 ? VK_NULL_HANDLE : p; }
+    if (p) { g_last_k = *k; g_last_p = p; g_last_fast = 0; return p == (void *)1 ? VK_NULL_HANDLE : p; }
     if (async_pipe(k)) return VK_NULL_HANDLE;
     vkshader_t *stg[3] = {S.sh[0], S.sh[1], S.sh[2]};
-    uint64_t tb = g_prof_on ? tick() : 0; p = build_pipeline(k, layout, stg); if (g_prof_on) g_prof_ns[0] += tick() - tb; g_vkst.pipes_built++;
+    uint64_t tb = tick(); p = build_pipeline(k, layout, stg); uint64_t tbn = tick() - tb; if (g_prof_on) g_prof_ns[0] += tbn; g_vkst.pipes_built++; if (V.gpl) gpl_old_built(tbn);
     pthread_mutex_lock(&g_pipe_mu);
     VkPipeline had = nvn_hm_get(&g_pipes, k);
     if (had) { if (p != (void *)1) vkDestroyPipeline(V.dev, p, NULL); p = had; }   // a prewarm thread made it meanwhile
@@ -1057,7 +1088,7 @@ static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
 // ---- pipeline prewarm: every pipeline the game needed is recorded (DM_ROOT/vk_pipelines.bin) and made again at the next boot on background
 // threads, before the game reaches it, so a scene seen once never stalls a frame on a pipeline compile again (the driver's compile, not the
 // pipeline cache's lookup, is the cost: tens of milliseconds per pipeline on Adreno). DM_VK_NOPREWARM=1 turns it off.
-#define PIPE_MAGIC 0x33455050u   // "PPE3" (atest / aref added); the header also holds sizeof(pkey), so a changed key layout starts a new file
+#define PIPE_MAGIC 0x34455050u   // "PPE4" (the alpha reference out of the key: a push constant); the header also holds sizeof(pkey), so a changed key layout starts a new file
 // debug_mode shifted the key's fields without changing its padded size; PPE1 prewarm records otherwise decoded as 76 colour targets and crashed Adreno at startup.
 static FILE *g_prec;
 // The records are written by a thread of their own: a flush to the app's files folder (FUSE) took tens of milliseconds, and made under g_pipe_mu it held up the replay's
@@ -1094,7 +1125,7 @@ static void *prewarm_thread(void *arg) {
         if (!ok || !stg[0]) continue;
         VkDescriptorSetLayout dsl[5] = {0}; int nsets = 0;
         for (int s = 0; s < 3; s++) if (stg[s]) { dsl[stg[s]->set] = stg[s]->dsl; if (stg[s]->set + 1 > nsets) nsets = stg[s]->set + 1; }
-        VkPipeline p = build_pipeline(k, vk_pipeline_layout(dsl, nsets), stg);
+        VkPipeline p = build_pipeline(k, vk_pipeline_layout_gfx(dsl, nsets), stg);
         pthread_mutex_lock(&g_pipe_mu);
         if (!nvn_hm_get(&g_pipes, k)) nvn_hm_put(&g_pipes, k, p); else if (p != (void *)1) vkDestroyPipeline(V.dev, p, NULL);
         pthread_mutex_unlock(&g_pipe_mu);
@@ -1142,10 +1173,10 @@ static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshade
     VkPipeline p; vkshader_t *stg[3] = {stg_in[0], stg_in[1], stg_in[2] ? vk_shader_gs_topo(stg_in[2], (VkPrimitiveTopology)k->topo) : NULL};
     int bs = build_begin();
     if (bs >= 0) { snprintf(g_build[bs].what, sizeof g_build[bs].what, "graphics pipeline, shaders %016llx %016llx %016llx; topology %u, polygon mode %u, samples %u, "
-            "%u colour targets (formats %u %u %u %u), depth format %u; raster discard %u, fragment depth variant %u, dual source %u, alpha test %u ref %u/65535, transform feedback %d, logic op %u, "
+            "%u colour targets (formats %u %u %u %u), depth format %u; raster discard %u, fragment depth variant %u, dual source %u, alpha test %u, transform feedback %d, logic op %u, "
             "vertex attributes %u in %u bindings, integer-texel views %#llx/%#llx %#llx/%#llx, alternative code %u",
             (unsigned long long)k->key[0], (unsigned long long)k->key[1], (unsigned long long)k->key[2], k->topo, k->mode, k->samples, k->ncol, k->cfmt[0], k->cfmt[1], k->cfmt[2], k->cfmt[3],
-            k->dfmt, k->raster_discard, k->fdz, k->dual, k->atest, k->aref, stg[0] ? stg[0]->xfb : 0, k->logic_en ? k->logic_op : 0, k->nattr, k->nbind,
+            k->dfmt, k->raster_discard, k->fdz, k->dual, k->atest, stg[0] ? stg[0]->xfb : 0, k->logic_en ? k->logic_op : 0, k->nattr, k->nbind,
             (unsigned long long)k->um[0], (unsigned long long)k->im[0], (unsigned long long)k->um[1], (unsigned long long)k->im[1], k->alt); g_build[bs].phase = 1; }
     VkPipelineShaderStageCreateInfo ss[3]; uint32_t ns = 0;
     VkShaderStageFlagBits fl[3] = {VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT, VK_SHADER_STAGE_GEOMETRY_BIT};
@@ -1153,9 +1184,8 @@ static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshade
     const vkshader_t *fs = stg[1] && !k->raster_discard ? stg[1] : NULL; uint32_t xo[3] = {0};
     if (stg[0]) xo[0] = (stg[2] ? stg[2]->in_locs : fs ? fs->in_locs : 0) & ~stg[0]->out_locs;
     if (stg[2]) xo[2] = (fs ? fs->in_locs : 0) & ~stg[2]->out_locs;
-    // the alpha test's reference: the specialization constant of the fragment shader's variant (gfx_vk_shader.c spv_alpha_test; a module without it ignores the entry)
-    float aref = (float)k->aref / 65535.0f; VkSpecializationMapEntry ame = {VK_ALPHA_SPEC_ID, 0, sizeof aref}; VkSpecializationInfo asi = {1, &ame, sizeof aref, &aref};
-    for (int i = 0; i < 3; i++) if (stg[i] && !(i == 1 && k->raster_discard)) ss[ns++] = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(fl[i], NULL), 0, fl[i], vk_shader_module(stg[i], k->um[i], k->im[i], k->alt && !k->um[i] && !k->im[i] && !xo[i] ? 1u << 31 : xo[i], i == 1 ? (k->fdz ? 1 : 0) | (k->dual ? 2 : 0) | (int)(k->atest & 15) << 4 : 0), "main", i == 1 && k->atest > 1 ? &asi : NULL};   // (pNext: DM_VK_SUBGROUP_PIN)
+    // (the alpha test's reference: a push constant of the fragment shader's variant, gfx_vk_shader.c spv_alpha_test; prepare_draw pushes it)
+    for (int i = 0; i < 3; i++) if (stg[i] && !(i == 1 && k->raster_discard)) ss[ns++] = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(fl[i], NULL), 0, fl[i], vk_shader_module(stg[i], k->um[i], k->im[i], k->alt && !k->um[i] && !k->im[i] && !xo[i] ? 1u << 31 : xo[i], i == 1 ? (k->fdz ? 1 : 0) | (k->dual ? 2 : 0) | (int)(k->atest & 15) << 4 : 0), "main", NULL};   // (pNext: DM_VK_SUBGROUP_PIN)
     int flat = (int)k->debug_mode;
     if (!fs) flat = 0;
     if (flat & 1) {   // DM_VK_X_FLAT_VS: the fragment stage becomes flatdbg.frag
@@ -1209,6 +1239,7 @@ static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshade
     __atomic_add_fetch(&g_vkst.pipes_built, 1, __ATOMIC_RELAXED);
     return p;   // (VkPipeline)1 = failed
 }
+#include "gfx_vk_gpl.inc"
 
 // ---------------- descriptors ----------------
 static uint64_t c2_handle(int st, int off) {   // the driver's handle table c2, as dmsh_build.py lays it out
@@ -1610,7 +1641,8 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
 // its binds, most the same as the draw before; the driver's time grows with what is recorded (vkEndCommandBuffer too). DM_VK_X_NOBC=1: everything every draw
 extern uint64_t g_cmd_gen;
 static struct { uint64_t gen; VkViewport vp; VkRect2D sc; float bc[4]; int sm[2], sw[2], sr[2], line; p_poly_offset po; VkPipelineLayout lay; uint32_t nsets, ndofs;
-                VkDescriptorSet sets[5]; uint32_t dofs[3 * 96]; VkBuffer vb[17]; VkDeviceSize vo[17]; VkBuffer ib; VkDeviceSize io; VkIndexType it; } g_bc;
+                VkDescriptorSet sets[5]; uint32_t dofs[3 * 96]; VkBuffer vb[17]; VkDeviceSize vo[17]; VkBuffer ib; VkDeviceSize io; VkIndexType it;
+                int apc; float aref; } g_bc;   // apc: aref, the alpha test's reference, was pushed (prepare_draw)
 
 static int bc_fresh(void) { if (g_bc.gen != g_cmd_gen || g_x_nobc || g_bc_stale) { g_bc_stale = 0; memset(&g_bc, 0, sizeof g_bc); g_bc.gen = g_cmd_gen; g_bc.it = (VkIndexType)-1; return 1; } return 0; }
 #define BC_SAME(field, val) (!fresh && !memcmp(&g_bc.field, &(val), sizeof g_bc.field))
@@ -1798,15 +1830,15 @@ static int prepare_draw(int prim, int indexed) {
     k.dual = (k.blend_en & 1) && S.sh[1] && !k.raster_discard && (SRC1F(k.bl[0].src) || SRC1F(k.bl[0].dst) || SRC1F(k.bl[0].srca) || SRC1F(k.bl[0].dsta));
     #undef SRC1F
     // NVN's alpha test (ColorStateSetAlphaTest, SetAlphaRef): Maxwell drops fragments whose colour output 0 alpha fails it, Vulkan has no such state; the fragment shader's
-    // variant does it (gfx_vk_shader.c spv_alpha_test), with the reference as a specialization constant. The reference goes into the key in steps of 1/65535, which keeps
-    // every k/255 exact (65535 = 255 * 257: an 8-bit texel alpha on the edge compares as on the Switch) while a game that fades its reference does not make a pipeline
-    // per float. Dark Souls Remastered cuts its grass and leaves out of cards this way (drawn whole: solid rectangles). DM_VK_ALPHA_TEST=0 (live, A/B): never
+    // variant does it (gfx_vk_shader.c spv_alpha_test), with the reference as a fragment push constant (pushed below, after the bind): one pipeline per function serves
+    // every reference, and with pipeline libraries the preparation's GREATER part serves every draw that tests GREATER (a specialization constant made a part per
+    // reference at the draw: 27 in Dark Souls Remastered's first scene, 5-25 ms each). The reference is the game's float, clamped to [0, 1]. Dark Souls Remastered
+    // cuts its grass and leaves out of cards this way (drawn whole: solid rectangles). DM_VK_ALPHA_TEST=0 (live, A/B): never
+    float aref = 0;
     { uint32_t af = S.color.alpha_func; if (!g_atest || !S.sh[1] || k.raster_discard || af < NVN_ALPHA_FUNC_NEVER || af >= NVN_ALPHA_FUNC_ALWAYS) af = 0;
       k.atest = af;
-      if (af > NVN_ALPHA_FUNC_NEVER) { float r = S.alpha_ref; r = r > 0 ? (r < 1 ? r : 1) : 0; k.aref = (uint32_t)lrintf(r * 65535.0f); }   // (NaN: 0)
-      if (af) { static uint8_t seen[8][8192]; static int nseen, warned; uint32_t q = k.aref; if (!(seen[af][q >> 3] >> (q & 7) & 1)) { seen[af][q >> 3] |= (uint8_t)(1u << (q & 7));
-            if (++nseen == 1) VKLOG("alpha test: first draw with it (NVN function %u, reference %.4f)", af, k.aref / 65535.0);
-            if (nseen > 64 && !warned++) VKLOG("[RED] alpha test: over 64 different (function, reference) pairs drawn (now function %u reference %.4f): the game may vary its reference smoothly, each pair is a pipeline of its own", af, k.aref / 65535.0); } } }
+      if (af > NVN_ALPHA_FUNC_NEVER) { float r = S.alpha_ref; aref = r > 0 ? (r < 1 ? r : 1) : 0; }   // (NaN: 0)
+      if (af) { static uint8_t seen[8]; if (!seen[af]) { seen[af] = 1; VKLOG("alpha test: first draw with NVN function %u (reference %.4f)", af, aref); } } }
     k.clip_neg1 = !g_depth_zero;
     // layout and pipeline
     VkDescriptorSetLayout dsl[5] = {0}; int nsets = 0;
@@ -1815,7 +1847,7 @@ static int prepare_draw(int prim, int indexed) {
     // replay thread on Unicorn Overlord's battle map. Pipeline layouts are never destroyed
     static VkDescriptorSetLayout l_in[5], l_out[5]; static int l_n = -1; static VkPipelineLayout l_lay; VkPipelineLayout layout;
     if (nsets == l_n && !memcmp(dsl, l_in, sizeof l_in)) { memcpy(dsl, l_out, sizeof l_out); layout = l_lay; }
-    else { memcpy(l_in, dsl, sizeof l_in); l_n = nsets; layout = l_lay = vk_pipeline_layout(dsl, nsets); memcpy(l_out, dsl, sizeof l_out); }
+    else { memcpy(l_in, dsl, sizeof l_in); l_n = nsets; layout = l_lay = vk_pipeline_layout_gfx(dsl, nsets); memcpy(l_out, dsl, sizeof l_out); }
     // descriptor sets first: the views they are given decide which shader variants the pipeline takes (integer texels, vk_shader_module)
     g_var_now = var;
     VkDescriptorSet sets[5] = {0};
@@ -1838,7 +1870,7 @@ static int prepare_draw(int prim, int indexed) {
     if (g_tracing) {
         VKLOG("  pipeline: topology %u restart %u discard %u cull %u front %u mode %u clamp %u bias %u; depth test %u write %u func %u stencil %u; attributes %u bindings %u; colour %u (format %u) samples %u a2c %u; blend enable %#x logic %u/%u; alpha test %u ref %.4f; fragment depth variant %u (depth written by a shader at present %llu, now %llu)",
               k.topo, k.restart, k.raster_discard, k.cull, k.front, k.mode, k.depth_clamp, k.bias_en, k.dt, k.dw, k.df, k.st, k.nattr, k.nbind, k.ncol, k.cfmt[0], k.samples, k.a2c, k.blend_en, k.logic_en, k.logic_op,
-              k.atest, k.aref / 65535.0, k.fdz, has_depth && P_att[8].im ? (unsigned long long)P_att[8].im->fdz_frame : 0ull, (unsigned long long)g_tex_frame + 1);
+              k.atest, aref, k.fdz, has_depth && P_att[8].im ? (unsigned long long)P_att[8].im->fdz_frame : 0ull, (unsigned long long)g_tex_frame + 1);
         if (k.st) VKLOG("  stencil: func %u/%u fail %u/%u zfail %u/%u pass %u/%u; compare mask %#x/%#x write mask %#x/%#x reference %#x/%#x", k.sf[0], k.sf[1], k.sfail[0], k.sfail[1], k.szfail[0], k.szfail[1], k.szpass[0], k.szpass[1],
                         (unsigned)S.smask[0], (unsigned)S.smask[1], (unsigned)S.swmask[0], (unsigned)S.swmask[1], (unsigned)S.sref[0], (unsigned)S.sref[1]);
         for (uint32_t i = 0; i < k.ncol; i++) VKLOG("  blend %u: src %#x dst %#x eq %u, alpha src %#x dst %#x eq %u, write mask %#x", i, k.bl[i].src, k.bl[i].dst, k.bl[i].eq, k.bl[i].srca, k.bl[i].dsta, k.bl[i].eqa, k.wmask[i]);
@@ -1853,8 +1885,17 @@ static int prepare_draw(int prim, int indexed) {
         uint64_t kh = fnv(1469598103934665603ull, &k, sizeof k); VKLOG("ubo: present %llu pipeline %p key %016llx um %llx/%llx im %llx/%llx", (unsigned long long)g_tex_frame, (void *)p, (unsigned long long)kh,
               (unsigned long long)k.um[0], (unsigned long long)k.um[1], (unsigned long long)k.im[0], (unsigned long long)k.im[1]); }
     g_vkst.draws++; if (++g_pass_draws > g_vkst.max_pass_draws) g_vkst.max_pass_draws = g_pass_draws;
-    if (p != S.bound_pipe) { uint64_t tb = g_prof_on ? tick() : 0; vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); S.bound_pipe = p; if (g_prof_on) g_prof_ns[4] += tick() - tb; }
+    if (g_fastshot_on && g_pipe_fast) fast_note(&k);
+    int rebound = p != S.bound_pipe;
+    if (rebound) { uint64_t tb = g_prof_on ? tick() : 0; vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); S.bound_pipe = p; if (g_prof_on) g_prof_ns[4] += tick() - tb; }
+    // DM_VK_GPL_DYN=1 (live, diagnosis): set them at every draw of a linked pipeline, not only at its bind and in each new command buffer or pass
+    static int dyn_all; static unsigned dk; if (!(dk++ & 255)) { const char *e = getenv("DM_VK_GPL_DYN"); dyn_all = e && atoi(e); }
+    if (g_pipe_fast && (rebound || g_gpl_dyn_gen != g_cmd_gen || dyn_all)) { gpl_dyn(cb, &k); g_gpl_dyn_gen = g_cmd_gen; }   // a linked pipeline: the states its libraries left dynamic
     set_dynamic(cb);
+    // the alpha test's reference (spv_alpha_test reads it at VK_ALPHA_PC_OFF): every graphics layout has the range, so a value pushed stays for later draws of the
+    // command buffer under any of them; pushed again when it changes, and with the bind cache's reset (a new command buffer or pass, a clear's own push: bc_fresh)
+    if (k.atest > NVN_ALPHA_FUNC_NEVER && (bc_fresh() || !g_bc.apc || g_bc.aref != aref)) {
+        vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_FRAGMENT_BIT, VK_ALPHA_PC_OFF, sizeof aref, &aref); g_bc.apc = 1; g_bc.aref = aref; }
     if (var == 1) { vkCmdSetDepthBias(cb, 0, 0, 0); memset(&g_bc.po, 0xff, sizeof g_bc.po); }
     uint32_t at[6] = {0};   // where each set's dynamic offsets start in dall
     for (int i = 0; i < nsets; i++) { at[i] = ndofs; for (int st = 0; st < 3; st++)   // the dynamic offsets: by set, then binding
