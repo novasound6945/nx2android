@@ -18,6 +18,10 @@ python -m porter port "<game folder>" --debug --install --package $PKG --device 
 $ADB shell "am force-stop $PKG; echo DM_CTL=$F/ctl.txt >> $F/env.txt; : > $F/ctl.txt; am start -n $PKG/android.app.NativeActivity"
 ```
 
+Before installing or force-stopping, check `$ADB shell pidof $PKG` and the screen: if the app is running and someone may be playing, ask first. Never send `ctl.txt` keys into someone else's session.
+
+**Graphics pipeline libraries and the caches.** On a driver with `VK_EXT_graphics_pipeline_library` (Turnip), the first launch of a new bundle, driver or SPIR-V transform version shows a "shader preparation" progress screen (Dark Souls: Remastered: 3,099 shaders, about 17 s on a Retroid Pocket 6); a later launch re-checks in about 0.5 s. To test from a first-start state, stop the game and delete `files/vk_gpl.id`, `vk_pipeline_cache.bin` and `vk_pipelines.bin` (switches.md's `DM_VK_NOPCACHE=1` notes that app-owned files cannot always be deleted over adb: if `rm` is refused, use that switch for the pipeline cache).
+
 ## Read what happened
 
 - Log: `$F/log.txt` (stderr of the host; the previous run is `log.prev.txt`). Start with `grep -a '\[RED\]' log.txt` and the last lines before a crash; `[perf]` lines give the frame rate.
@@ -39,11 +43,20 @@ DM_CTL presses go to the game's pad, not to the front end: to test the overlay, 
 
 Before concluding a game is soft-locked, read the screen: Viractal's "Hey! Not that way!" was the game rejecting a wrong choice.
 
+For a glitch that shows only for a frame or two (colour flashes while a pipeline is still being built), `env DM_VK_SHOTS_FAST=N` dumps only the presented frames in which a fast-linked pipeline drew and logs the shader keys of those pipelines (`fastshot <frame>: …`); the switch-android-port skill has the method. A capture left armed with its quota unused keeps dumping synchronously and drops the game to about 8-20 fps.
+
 For finding what is wrong once it runs (validation layer, LRZ flicker, frame shots, pass dumps, performance and soak checks, the device scripts that boot a game to gameplay), use the switch-android-port skill.
 
 ## Helpers in devtools/
 
 `device.py` (ADB / PKG / FILES from device.json or `NX2A_DEVICE` / `NX2A_PACKAGE`), `push_chunked.py` (resumable big pushes), `rec_flicker.py`, `burst.py`, `soak.sh <minutes>` (moves without pressing A, so a save's story does not advance), `trace_pass.sh <pass>`, `dmsv_extract.py` / `spv_support_use.py` (inspect the shader bundle, either version; `nxnative/dm/android/tools/dmsv.py info` shows its version and sizes, `dmsv.py pack <in> <out> [--level N]` writes it again compressed or, with `--level 0`, uncompressed), `nso_image.py`, `ppm2png.py`.
+
+## Uploading a data pack to a server
+
+For a pack served with `--data-url` (docs/ARCHITECTURE.md, "The data from a web server"), uploading over SFTP with Posh-SSH has traps:
+- `Get-SFTPItem` downloads; use `Get-SFTPPathAttribute` to read a size.
+- The default operation timeout cut a 2.9 GB file off mid-upload while the script reported success.
+- So after every upload compare each file's size with `files.json`, and hash-check the large files on the server against `files.json` (SHA-256) before announcing a pack. Upload `files.json` last.
 
 ## Finish
 

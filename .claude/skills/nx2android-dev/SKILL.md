@@ -25,6 +25,7 @@ A fix that only one game needs today is still a core fix when it follows the sem
 ## Rules that always hold
 
 - **Ask before installing on the user's device.** Name the package and size; install test builds under another package (`--package org.nx2a.<name>.test`) beside the user's own app, and uninstall them afterwards. Someone at the tablet once removed an unannounced test app by hand. Never uninstall or overwrite the user's own install (`org.nx2a.neo` etc.) without being told to.
+- **The device may have someone at it.** Before installing or force-stopping, check `pidof <package>` and whether a person is playing; never send `ctl.txt` keys into someone's session.
 - **Keys and game files never enter the repository or the chat.** Print key names, never values.
 - **Game files go only in `.gamedump/<App>/`** (the main checkout's, git-ignored), as hard links to the downloads, for every port, test or check: never a folder elsewhere on the PC (`C:\nx2a-test` once kept 263 GB that nobody deleted). Delete the folder when the work is done: references/new-game-profile.md §0 and §5.
 - **Measure, then change.** Every fix starts from evidence (a log line, a crash address, a census, a screen recording), and the evidence goes in the comment beside the fix, as the existing code does.

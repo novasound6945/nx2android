@@ -60,6 +60,7 @@ When the game boots on the device:
    overlay      <control> <x> <y> [<r>]    (moves one control of dm/android/overlay_default.tsv)
    ```
    `android.tsv` is not part of the shader keys: editing it re-translates nothing.
+   On Turnip (graphics pipeline libraries on), a game whose vertex and fragment sets both hold dynamic uniform buffers draws objects in wrong colours for a few frames while a pipeline is built: give it `env DM_VK_DYN_UBO=0` (Dark Souls: Remastered), and check from empty caches (`switch-android-port`'s playbook). The first launch also shows a shader preparation screen (see device-loop.md).
 4. Port again without `--experimental`; it must reuse or rebuild cleanly from the repository profile.
 
 **Shader tables after a reader or translator fix.** For a profile in `dm/games`, the split refuses when the tables it makes differ from the profile's ("the split shader tables differ from game profile …"), so a change that finds more shaders stops the next port. The new tables are left in `<id>_build/shader/pkg.partial/tables/`: diff them against the profile's (more rows, none lost, the shaders that were missing now present), copy the three tables in, port again. Check the same for every other profile the change could touch (port NEO too).
