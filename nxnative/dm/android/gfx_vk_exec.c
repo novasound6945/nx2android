@@ -5,6 +5,7 @@
 // Version 1 orders everything with whole-pipeline barriers around passes, copies and dispatches.
 #include "gfx_vk.h"
 #include "gfx_vk_slot.h"
+#include "vk_occ.h"
 #include "nvn_hmap.h"
 #include "game_profile.h"
 #include <math.h>
@@ -183,23 +184,69 @@ static void x_read(void) { const char *c = getenv("DM_VK_CB_DRAWS"); g_x_cbdraws
 // anyway, its levels were black under the HUD
 static int g_rc_skip;   // a render-enable block evaluated false is active
 #define RC_PEND 256
-static struct { uint64_t addr; int kind; } g_rc_pend[RC_PEND]; static int g_rc_npend;   // reports replayed in this submission: kind 1 = timestamp (counter 0), 2 = another counter (unknown)
-static uint64_t g_rc_occ[4096];   // addresses ever written by a non-timestamp report (open addressing): conditions on them keep drawing
+static struct { uint64_t addr; int kind; } g_rc_pend[RC_PEND]; static int g_rc_npend;   // reports replayed in this submission: kind 1 = timestamp (counter 0), 2 = another counter (unknown),
+                                                                                       // 3 = samples passed, counted (DM_VK_OCCLUSION: its address's entry decides)
+static uint64_t g_rc_occ[4096];   // addresses ever written by a report not known on the CPU (open addressing): conditions on them keep drawing
 static void rc_occ_add(uint64_t a) { for (uint32_t i = (uint32_t)(a >> 4) & 4095, k = 0; k < 4096; k++, i = (i + 1) & 4095) { if (g_rc_occ[i] == a) return; if (!g_rc_occ[i]) { g_rc_occ[i] = a; return; } } }
 static int rc_occ_has(uint64_t a) { for (uint32_t i = (uint32_t)(a >> 4) & 4095, k = 0; k < 4096; k++, i = (i + 1) & 4095) { if (g_rc_occ[i] == a) return 1; if (!g_rc_occ[i]) return 0; } return 0; }
+
+// ---------------- occlusion queries (DM_VK_OCCLUSION) ----------------
+// NVN's samples-passed counter is counted with Vulkan occlusion queries (vk_occ.h: one query per stretch of draws in a pass, summed in command order by the completion
+// thread, gfx_vk_core.c), and a report writes the real count where it used to write 1 << 20, when its submission completes. A condition on such a report is judged on the
+// CPU at replay from its address's last completed result (occ_ent): exact when the last report recorded there has completed; when it has not (replayed earlier in
+// this submission, or in one the GPU has not finished), DM_VK_OCCLUSION=2 (the default) uses the result before it, a frame or more late, if it was recorded at most
+// DM_VK_OCCLUSION_AGE presents ago (6), and DM_VK_OCCLUSION=1 draws. DM_VK_OCCLUSION=0: as before (1 << 20, no queries, such conditions draw). Read at each submission.
+// Only for games with the profile key render_cond (the only ones that record conditions): other games kept getting 1 << 20 and would now see real counts, which
+// may make them cull on the CPU; DM_VK_OCCLUSION_ANY=1 gives them the real counts too (tests). Without a judgement (pending, too old, lost draws in between) a block draws.
+// Counting begins at a samples-passed reset and stops after 240 presents with no reset or report (each pass with draws while counting holds a query)
+static int g_occ_mode, g_occ_age = 6;
+static occ_rec g_occ = {0, -1, 0, 0, 0}; static uint64_t g_occ_used;   // g_occ_used: the present of the last reset or report while counting
+enum { OCC_NENT = 4096 };
+occ_ent g_occ_ent[OCC_NENT];   // report addresses (open addressing; the replay thread inserts, gfx_vk_core.c's completion thread writes results by index)
+static int g_occ_nent;
+int vk_oq_begin(void); void vk_oq_end(int q); void vk_oq_post(int kind, int q); void vk_oq_report(uint64_t addr, int ent, uint32_t seq, uint64_t frame); extern int g_oq_want; extern uint64_t g_occ_done[6];
+static occ_ent *occ_find(uint64_t a, int add, int *idx) {
+    for (uint32_t i = (uint32_t)(a >> 4) & (OCC_NENT - 1), k = 0; k < OCC_NENT; k++, i = (i + 1) & (OCC_NENT - 1)) {
+        if (g_occ_ent[i].addr == a) { if (idx) *idx = (int)i; return &g_occ_ent[i]; }
+        if (!g_occ_ent[i].addr) { if (!add || g_occ_nent >= OCC_NENT * 3 / 4) return NULL; g_occ_ent[i].addr = a; g_occ_nent++; if (idx) *idx = (int)i; return &g_occ_ent[i]; }
+    }
+    return NULL;
+}
+static int occ_io_begin(void *u) { (void)u; return vk_oq_begin(); }
+static void occ_io_end(void *u, int q) { (void)u; vk_oq_end(q); }
+static void occ_io_post(void *u, int kind, int q) { (void)u; vk_oq_post(kind, q); }
+static const occ_io g_occ_io = {occ_io_begin, occ_io_end, occ_io_post, NULL};
+static void occ_draw(int made) { if (g_occ.counting) occ_rec_draw(&g_occ, &g_occ_io, made && S.pass_open == 1); }   // every draw at its place, made or not
+
 static void rc_note(uint64_t a, int kind) {
     if (kind == 2) rc_occ_add(a);
+    if (kind != 3 && g_occ_mode) { occ_ent *e = occ_find(a, 0, NULL); if (e) e->dead = 1; }   // another type's report over a samples-passed one: its entry no longer says
     for (int i = 0; i < g_rc_npend; i++) if (g_rc_pend[i].addr == a) { g_rc_pend[i].kind = kind; return; }
     if (g_rc_npend < RC_PEND) { g_rc_pend[g_rc_npend].addr = a; g_rc_pend[g_rc_npend++].kind = kind; }
 }
-static int rc_value(uint64_t a, uint64_t *v) {   // 0 = unknown at replay time
-    if (rc_occ_has(a)) return 0;
-    for (int i = g_rc_npend - 1; i >= 0; i--) if (g_rc_pend[i].addr == a) { if (g_rc_pend[i].kind != 1) return 0; *v = 0; return 1; }
-    *v = *(const volatile uint64_t *)(uintptr_t)a; return 1;
+// A condition's side at replay time (vk_occ.h occ_side); *from: where a samples-passed result came from (OCC_FROM_*, -1 not one), *age its presents
+static occ_side rc_side(uint64_t a, int *from, uint64_t *age) {
+    occ_side s = {OCC_S_NONE, 0, {0}}; *from = -1; *age = 0;
+    if (rc_occ_has(a)) return s;
+    int k = 0; for (int i = g_rc_npend - 1; i >= 0; i--) if (g_rc_pend[i].addr == a) { k = g_rc_pend[i].kind; break; }
+    if (k == 1) { s.kind = OCC_S_MEM; return s; }   // a timestamp report: its counter 0
+    if (k == 2) return s;
+    occ_ent *e = g_occ_mode ? occ_find(a, 0, NULL) : NULL;
+    if (e && !e->dead) {
+        uint32_t ds = 0; occ_val v; uint64_t fr = 0; int has = occ_ent_get(e, &ds, &v, &fr);
+        *from = occ_pick(e->rec_seq, has, ds, fr, g_tex_frame, g_occ_mode == 1, (uint32_t)g_occ_age);
+        if (*from == OCC_FROM_EXACT || *from == OCC_FROM_LAG) { s.kind = OCC_S_REP; s.r = v; *age = g_tex_frame > fr ? g_tex_frame - fr : 0; }
+        return s;
+    }
+    if (k == 3) return s;
+    s.kind = OCC_S_MEM; s.mem = *(const volatile uint64_t *)(uintptr_t)a; return s;
 }
 // Diagnostics (no effect on the replay): which conditions a game uses, logged every 600 presents while it evaluates any. Counts since the last line: conditions by mode, known /
-// unknown at replay, judged false (skipped); SetRenderEnable(false); the counter reports by type (NVN_COUNTER_TYPE_*: TIMESTAMP 0 / TIMESTAMP_TOP 0x10, SAMPLES_PASSED 1, any other)
-static struct { uint64_t cond[2], known, unknown, unk_occ, skip, off, rep_ts, rep_sp, rep_other, last; uint32_t other_types; } g_rcs;
+// unknown at replay, judged false (skipped); SetRenderEnable(false); the counter reports by type (NVN_COUNTER_TYPE_*: TIMESTAMP 0 / TIMESTAMP_TOP 0x10, SAMPLES_PASSED 1, any other).
+// With DM_VK_OCCLUSION a second line: the samples-passed reports and their results, the conditions on them by where the result came from (completed / the one before
+// and how late / drawn: pending, too old, not comparable), what false blocks skipped, and the queries
+static struct { uint64_t cond[2], known, unknown, unk_occ, skip, off, rep_ts, rep_sp, rep_other, last; uint32_t other_types;
+                uint64_t oc, oc_exact, oc_lag, oc_pend, oc_old, oc_unk, oc_skip, lag_age[4], skip_draws, skip_clears, rep_occ, rep_idle, rep_noent; } g_rcs;
 static void rc_count_report(uint64_t t) {
     if (t == 0 || t == 0x10) g_rcs.rep_ts++; else if (t == 1) g_rcs.rep_sp++; else { g_rcs.rep_other++; if (t < 32) g_rcs.other_types |= 1u << t; }
 }
@@ -211,6 +258,20 @@ static void rc_stats_log(void) {
               (unsigned long long)(g_rcs.cond[0] + g_rcs.cond[1]), (unsigned long long)g_rcs.cond[0], (unsigned long long)g_rcs.cond[1], (unsigned long long)(g_tex_frame - g_rcs.last),
               (unsigned long long)g_rcs.known, (unsigned long long)g_rcs.unknown, (unsigned long long)g_rcs.unk_occ, (unsigned long long)g_rcs.skip, (unsigned long long)g_rcs.off,
               (unsigned long long)g_rcs.rep_ts, (unsigned long long)g_rcs.rep_sp, (unsigned long long)g_rcs.rep_other, g_rcs.other_types);
+        static uint64_t d0[6], f0, l0, n0;   // the completion thread's and the queries' counts at the last line
+        uint64_t d[6]; for (int i = 0; i < 6; i++) d[i] = __atomic_load_n(&g_occ_done[i], __ATOMIC_RELAXED);
+        if (g_occ_mode || g_rcs.rep_occ || d[0] != d0[0])
+            VKLOG("render_cond occlusion (DM_VK_OCCLUSION=%d, age limit %d, queries %s): %llu samples-passed reports recorded (%llu while not counting, %llu with no entry left); completed %llu: "
+                  "%llu zero, %llu not zero, %llu known up to lost draws, %llu unknown; conditions on them %llu: %llu on completed results, %llu on the result before (%llu / %llu / %llu / %llu "
+                  "1 / 2 / 3 / 4+ presents late), drawn: %llu pending, %llu too old, %llu not comparable; %llu judged false; false blocks skipped %llu draws, %llu clears; "
+                  "%llu query fragments, %llu draws not counted (%llu with no query left), %llu query results missing",
+                  g_occ_mode, g_occ_age, V.has_oq_precise ? "precise" : "not precise", (unsigned long long)g_rcs.rep_occ, (unsigned long long)g_rcs.rep_idle, (unsigned long long)g_rcs.rep_noent,
+                  (unsigned long long)(d[0] - d0[0]), (unsigned long long)(d[1] - d0[1]), (unsigned long long)(d[2] - d0[2]), (unsigned long long)(d[5] - d0[5]), (unsigned long long)(d[3] - d0[3]),
+                  (unsigned long long)g_rcs.oc, (unsigned long long)g_rcs.oc_exact, (unsigned long long)g_rcs.oc_lag, (unsigned long long)g_rcs.lag_age[0], (unsigned long long)g_rcs.lag_age[1],
+                  (unsigned long long)g_rcs.lag_age[2], (unsigned long long)g_rcs.lag_age[3], (unsigned long long)g_rcs.oc_pend, (unsigned long long)g_rcs.oc_old, (unsigned long long)g_rcs.oc_unk,
+                  (unsigned long long)g_rcs.oc_skip, (unsigned long long)g_rcs.skip_draws, (unsigned long long)g_rcs.skip_clears, (unsigned long long)(g_occ.frags - f0),
+                  (unsigned long long)(g_occ.lost - l0), (unsigned long long)(g_occ.nopool - n0), (unsigned long long)(d[4] - d0[4]));
+        memcpy(d0, d, sizeof d0); f0 = g_occ.frags; l0 = g_occ.lost; n0 = g_occ.nopool;
         memset(&g_rcs, 0, sizeof g_rcs);
     }
     g_rcs.last = g_tex_frame;
@@ -218,17 +279,45 @@ static void rc_stats_log(void) {
 static void render_cond(const p_render_cond *rc) {
     rc_stats_log();
     if (rc->mode >= 2) { g_rc_skip = rc->mode == 3; g_rcs.off += rc->mode == 3; return; }
-    uint64_t x = 0, y = 0; int known = rc_value(rc->addr, &x) & rc_value(rc->addr + 16, &y);
-    g_rc_skip = known && (rc->mode ? x == y : x != y);
+    int fa, fb; uint64_t aa, ab; occ_side x = rc_side(rc->addr, &fa, &aa), y = rc_side(rc->addr + 16, &fb, &ab);
+    int eq = 0, known = occ_eq(&x, &y, &eq);
+    g_rc_skip = known && (rc->mode ? eq : !eq);
     g_rcs.cond[rc->mode != 0]++; if (known) g_rcs.known++; else { g_rcs.unknown++; g_rcs.unk_occ += rc_occ_has(rc->addr) || rc_occ_has(rc->addr + 16); }
     g_rcs.skip += g_rc_skip;
+    if (fa >= 0 || fb >= 0) {   // on a samples-passed result: from where (the worse side)
+        int f = fa == OCC_FROM_PENDING || fb == OCC_FROM_PENDING ? OCC_FROM_PENDING : fa == OCC_FROM_OLD || fb == OCC_FROM_OLD ? OCC_FROM_OLD : fa == OCC_FROM_LAG || fb == OCC_FROM_LAG ? OCC_FROM_LAG : OCC_FROM_EXACT;
+        g_rcs.oc++; g_rcs.oc_skip += g_rc_skip;
+        if (f == OCC_FROM_PENDING) g_rcs.oc_pend++; else if (f == OCC_FROM_OLD) g_rcs.oc_old++; else if (!known) g_rcs.oc_unk++;
+        else if (f == OCC_FROM_EXACT) g_rcs.oc_exact++; else { uint64_t age = aa > ab ? aa : ab; g_rcs.oc_lag++; g_rcs.lag_age[age >= 4 ? 3 : age ? age - 1 : 0]++; }
+    }
+}
+// a samples-passed report while DM_VK_OCCLUSION is on: the stretch so far ends here; its address's entry (render_cond games) counts it as recorded, not completed
+static void occ_report(uint64_t a) {
+    occ_rec_close(&g_occ, &g_occ_io);
+    int idx = -1; uint32_t seq = 0; occ_ent *e = DM_GAME_RENDER_COND ? occ_find(a, 1, &idx) : NULL;
+    if (e) { seq = ++e->rec_seq; if (!seq) seq = e->rec_seq = 1; e->dead = 0; }   // (0: none completed)
+    else if (DM_GAME_RENDER_COND) { g_rcs.rep_noent++; VKRED_ONCE(120, "occlusion queries: more report addresses than entries (%d): conditions on the rest are drawn", OCC_NENT * 3 / 4); }
+    if (DM_GAME_RENDER_COND) { rc_note(a, e ? 3 : 2); rc_count_report(NVN_COUNTER_TYPE_SAMPLES_PASSED); }
+    g_rcs.rep_occ++; if (!g_occ.counting) g_rcs.rep_idle++; else g_occ_used = g_tex_frame;
+    vk_oq_report(a, idx, seq, g_tex_frame);
+}
+static void occ_live(void) {   // each submission (vk_exec_reset; no pass is open): DM_VK_OCCLUSION, DM_VK_OCCLUSION_AGE, DM_VK_OCCLUSION_ANY; counting idle
+    const char *e = getenv("DM_VK_OCCLUSION"); int m = e && *e ? atoi(e) : 2; if (m < 0 || m > 2) m = 2;
+    if (!DM_GAME_RENDER_COND && !((e = getenv("DM_VK_OCCLUSION_ANY")) && atoi(e))) m = 0;
+    g_occ_age = (e = getenv("DM_VK_OCCLUSION_AGE")) && atoi(e) > 0 ? atoi(e) : 6;
+    g_occ.q = -1;   // (the last submission's end closed its pass and query)
+    if (m != g_occ_mode) { VKLOG("occlusion queries: DM_VK_OCCLUSION %d -> %d (%s)", g_occ_mode, m, m == 2 ? "real counts, conditions on the result before when pending" : m ? "real counts, conditions only on completed results" : "off: reports 1 << 20, conditions on them drawn");
+        if (!m) occ_rec_stop(&g_occ, &g_occ_io); else if (!g_occ_mode) memset(g_rc_occ, 0, sizeof g_rc_occ);   // (on again: the samples-passed addresses mode 0 made unknown, as the others, until reported again)
+        g_occ_mode = m; }
+    if (g_occ.counting && g_tex_frame > g_occ_used + 240) { occ_rec_stop(&g_occ, &g_occ_io); static int n; if (n++ < 4) VKLOG("occlusion queries: no samples-passed reset or report for 240 presents: counting stops until the next reset"); }
+    __atomic_store_n(&g_oq_want, m != 0, __ATOMIC_RELAXED);
 }
 
 void vk_exec_reset(void) {   // a new submission: NVN state does not carry over between command buffers, the replay starts from the defaults
     static int inited; if (!inited) { inited = 1; state_reset(); crash_add_note_hook(build_dump); prewarm_start(); compute_warm_start(); }
     g_rc_npend = 0; g_rc_skip = 0;
     { void vk_tex_release_drain(void); vk_tex_release_drain(); }   // Finalized textures' CPU-written marks that no queued job needs any more (gfx_vk_tex.c)
-    S.pass_open = 0; S.bound_pipe = VK_NULL_HANDLE; g_cb_draws = 0; g_ord_parts = 0; g_psplit_now = 0; g_set_epoch++; x_read();
+    S.pass_open = 0; S.bound_pipe = VK_NULL_HANDLE; g_cb_draws = 0; g_ord_parts = 0; g_psplit_now = 0; g_set_epoch++; x_read(); occ_live();
     if (g_prof_on) { extern uint64_t g_pkg_ns, g_pkg_n; memset(g_prof_ns, 0, sizeof g_prof_ns); g_prof_t0 = tick(); g_prof_pkg0 = g_pkg_ns; g_prof_npkg0 = g_pkg_n; g_prof_pipes0 = g_vkst.pipes_built; }
     { extern volatile int g_vk_samp_log; if (g_vk_samp_log > 0) VKLOG("submission begins (present %llu, thread %d)", (unsigned long long)g_tex_frame, (int)gettid()); }
 }
@@ -599,6 +688,7 @@ static void lin_back(void) {
 void vk_end_pass(void) {
     if (g_x_listpasses && S.pass_open == 1) { Dl_info di; void *ra = __builtin_return_address(0); uintptr_t base = dladdr((void *)vk_end_pass, &di) ? (uintptr_t)di.dli_fbase : 0; VKLOG("    ended from %#llx (%llu draws)", (unsigned long long)((uintptr_t)ra - base), (unsigned long long)g_pass_draws); list_reads("it"); }   // (DM_VK_TRACE_PASS=-2: who ends each pass)
     if (S.pass_open == 2 && P_cleared) (void)pass_commit();   // only clears: the pass still runs, for its load ops
+    if (S.pass_open == 1 && g_occ.q >= 0) occ_rec_close(&g_occ, &g_occ_io);   // its occlusion query ends inside it
     if (S.pass_open == 1) { if (S.rp_pass) vkCmdEndRenderPass(vk_cmd()); else vkCmdEndRendering(vk_cmd()); void vk_pass_ts(int end, uint32_t w, uint32_t h, uint32_t fmt, uint32_t draws); vk_pass_ts(1, S.pass_w, S.pass_h, (uint32_t)S.cfmt[0], (uint32_t)g_pass_draws | (g_pass_draws ? (uint32_t)((g_pass_bb[2] - g_pass_bb[0]) & 0xffff) << 16 : 0));  pass_dump(); if (g_x_tracepass >= 0 && g_sub_pass - 1 == g_x_tracepass) { setenv("DM_VK_TRACE_PASS", "-1", 1); g_x_tracepass = -1; } }
     if (S.pass_open == 1 && g_lin_back && g_pass_draws) lin_back();
     if (S.pass_open == 1) crumb_mark(0);
@@ -2014,7 +2104,7 @@ static void draw(const p_draw *d) {
     int prim = d->prim;
     // before prepare_draw, whose driver segment carries it (c0 + 0x644): set after it, each draw's segment had the draw before's. An indirect draw's is in GPU memory: 0
     g_draw_binst = d->ind ? 0 : (uint32_t)d->base_instance;
-    if (!prepare_draw(prim == 7 ? 4 : prim, prim == 7)) return;
+    if (!prepare_draw(prim == 7 ? 4 : prim, prim == 7)) { occ_draw(0); return; }
     VkCommandBuffer cb = vk_cmd();
     int g_ok = draw_allowed(); if (g_ok == 2 || (g_tracing && g_x_tracepass >= 0)) trace_draw("draw", d->prim, (uint32_t)d->count, (uint32_t)d->instances, -1);
     if (g_tracing && g_x_tracepass >= 0 && !d->ind && S.vbuf[0].address) {   // the first vertices stream 0 gives the draw (with the deferred updates), every word as a float
@@ -2023,6 +2113,7 @@ static void draw(const p_draw *d) {
             float w[16]; vk_ubd_read(S.vbuf[0].address + o, nw * 4, (uint8_t *)w); char t[400]; int k = 0; for (uint32_t i = 0; i < nw; i++) k += snprintf(t + k, sizeof t - k, " %g", w[i]);
             VKLOG("  vertex %u of stream 0 (+%llu):%s", (uint32_t)d->first + v, (unsigned long long)o, t); } }
     if (g_var_now == 10 && prim == 7) g_ok = 0; if (g_var_now == 11 && prim != 7) g_ok = 0;   // bisection: quads from the found draw on, or the rest
+    occ_draw(g_ok && !(dbg_draw() & 1));
     { static int nq, nn; if (g_var_now) { if (prim == 7) nq++; else nn++; if ((nq + nn) % 50 == 1) VKLOG("draws from the found one on: %d quads, %d others", nq, nn); } }
     uint32_t inst = d->instances ? (uint32_t)d->instances : 1;
     { static int n; if (n < 12 && (d->ind || (uint32_t)d->count > (1u << 20) || inst > (1u << 16))) { n++;
@@ -2058,7 +2149,7 @@ static void draw_idx(const p_draw_idx *d) {
     VkBuffer mcb = VK_NULL_HANDLE; VkDeviceSize mco = 0; if (mdi_group(d->mdi_cnt, d->ind, d->mdi_i, d->mdi_max, d->mdi_stride, 20, &mcb, &mco)) return;
     int prim = d->prim;
     g_draw_binst = d->ind ? 0 : (uint32_t)d->base_instance;   // before prepare_draw (see draw)
-    if (!prepare_draw(prim == 7 ? 4 : prim, 1)) return;
+    if (!prepare_draw(prim == 7 ? 4 : prim, 1)) { occ_draw(0); return; }
     VkCommandBuffer cb = vk_cmd();
     int g_ok = draw_allowed(); if (g_ok == 2 || (g_tracing && g_x_tracepass >= 0)) trace_draw("indexed draw", d->prim, (uint32_t)d->count, (uint32_t)d->instances, d->itype);
     if (d->ind && g_tracing && g_x_tracepass >= 0) { uint32_t w[5]; vk_ubd_read(d->ind, 20, (uint8_t *)w);   // the arguments as the CPU sees them now (a GPU writer's last merged copy)
@@ -2067,7 +2158,8 @@ static void draw_idx(const p_draw_idx *d) {
     VkIndexType it = d->itype == 0 ? VK_INDEX_TYPE_UINT8_EXT : d->itype == 1 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
     uint32_t isz = d->itype == 0 ? 1 : d->itype == 1 ? 2 : 4;
     VkBuffer ib; VkDeviceSize io;
-    if (!vk_buf_at(d->ibuf, 1, &ib, &io)) { VKRED_ONCE(56, "index buffer outside the memory pools"); return; }
+    if (!vk_buf_at(d->ibuf, 1, &ib, &io)) { VKRED_ONCE(56, "index buffer outside the memory pools"); occ_draw(0); return; }
+    occ_draw(g_ok && !(dbg_draw() & 1));
     if (!d->ind) { vkpool_t *ip = vk_pool_of(d->ibuf, 1); uint64_t in = (uint64_t)d->count * isz; if (ip && d->ibuf + in > ip->hi && ip->hi < ip->end) vk_cross(3, d->ibuf, in, ip); }
     if (g_ubolog_key && S.sh[0] && S.sh[0]->key == g_ubolog_key && g_ubolog_n > 0) {   // DM_VK_UBO_LOG: the index data the draw reads (CPU view at replay)
         const uint8_t *ix = (const uint8_t *)(uintptr_t)d->ibuf; uint64_t h = 1469598103934665603ull; uint32_t mn = ~0u, mx = 0;
@@ -2460,8 +2552,9 @@ static void exec_ops(const uint8_t *p) {
         case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
         case OP_CALL: { uint64_t t; memcpy(&t, a, 8); exec_ops((const uint8_t *)(uintptr_t)t); break; }
         case OP_SIGNAL_EVENT: { volatile uint32_t *val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, a + 8, 4); memcpy(&v, a + 12, 4); mtl_sub_event(val, m, v); break; }
-        case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, a + 8, 8); if (DM_GAME_RENDER_COND) { rc_note(ad, t == 0 || t == 0x10 ? 1 : 2); rc_count_report(t); } mtl_sub_counter(ad, (uint32_t)t); break; }
-        case OP_RESET_COUNTER: break;
+        case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, a + 8, 8); if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED && g_occ_mode) { occ_report(ad); break; }
+            if (DM_GAME_RENDER_COND) { rc_note(ad, t == 0 || t == 0x10 ? 1 : 2); rc_count_report(t); } mtl_sub_counter(ad, (uint32_t)t); break; }
+        case OP_RESET_COUNTER: { uint64_t t; memcpy(&t, a, 8); if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED && g_occ_mode) { occ_rec_reset(&g_occ, &g_occ_io); g_occ_used = g_tex_frame; } break; }
         case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8); s->fence = mtl_last_fence() + 1; s->fenced = 1; break; }
         // (DM_VK_TRACE_PASS=-2 lists the buffer writes too: copies, clears and uniform updates, by address)
         case OP_COPY_B2B: { uint64_t s_, d, n; memcpy(&s_, a, 8); memcpy(&d, a + 8, 8); memcpy(&n, a + 16, 8); mtl_sub_copy(s_, d, n);
@@ -2471,8 +2564,9 @@ static void exec_ops(const uint8_t *p) {
         case OP_UPDATE_UB: { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, a + 8, 8); vk_sub_update(d, a + 16, n);
             if (g_x_tracepass == -2) VKLOG("--- uniform update %#llx, %llu bytes, after pass %d", (unsigned long long)d, (unsigned long long)n, g_sub_pass - 1); break; }
         case OP_SET_RT: set_rt((const p_set_rt *)a); break;
-        case OP_CLEAR_COLOR: if (!g_rc_skip) clear_color((const p_clear_color *)a); break;
-        case OP_CLEAR_DS: if (!g_rc_skip) clear_ds((const p_clear_ds *)a); break;
+        // (a clear while counting goes outside the occlusion query: a masked clear is a draw of ours, NVN's clears pass no samples)
+        case OP_CLEAR_COLOR: if (g_occ.q >= 0) occ_rec_close(&g_occ, &g_occ_io); if (!g_rc_skip) clear_color((const p_clear_color *)a); else g_rcs.skip_clears++; break;
+        case OP_CLEAR_DS: if (g_occ.q >= 0) occ_rec_close(&g_occ, &g_occ_io); if (!g_rc_skip) clear_ds((const p_clear_ds *)a); else g_rcs.skip_clears++; break;
         case OP_VIEWPORTS: { const p_viewports *v = (const p_viewports *)a; for (int i = 0; i < v->n && v->first + i < 16; i++) memcpy(S.vp[v->first + i], v->v[i], 16); break; }
         case OP_SCISSOR: S.sc = *(const p_scissor *)a; S.sc_set = 1; break;
         case OP_DEPTH_RANGE: { const p_depth_range *d = (const p_depth_range *)a; S.dnear = d->n; S.dfar = d->f; break; }
@@ -2502,8 +2596,8 @@ static void exec_ops(const uint8_t *p) {
         case OP_RAST_DISCARD: S.rast_discard = ((const p_rast_discard *)a)->on; break;
         case OP_PRIM_RESTART: S.prim_restart = ((const p_prim_restart *)a)->on; break;
         case OP_ALPHA_REF: S.alpha_ref = ((const p_alpha_ref *)a)->ref; break;
-        case OP_DRAW: { if (g_rc_skip) break; p_draw t; draw(draw_rec(a, h.size, &t)); break; }
-        case OP_DRAW_IDX: { if (g_rc_skip) break; p_draw_idx t; draw_idx(draw_idx_rec(a, h.size, &t)); break; }
+        case OP_DRAW: { if (g_rc_skip) { occ_draw(0); g_rcs.skip_draws++; break; } p_draw t; draw(draw_rec(a, h.size, &t)); break; }   // (a skipped draw is not counted: occ_draw)
+        case OP_DRAW_IDX: { if (g_rc_skip) { occ_draw(0); g_rcs.skip_draws++; break; } p_draw_idx t; draw_idx(draw_idx_rec(a, h.size, &t)); break; }
         case OP_DISPATCH: dispatch((const p_dispatch *)a); break;
         case OP_BARRIER: {   // the pass ends at every barrier: kept across XC3's fragment- and primitive-order barriers (0x1 0x2 0x4) its characters drew torn in some frames
             int32_t bits = *(const int32_t *)a;
@@ -2520,7 +2614,7 @@ static void exec_ops(const uint8_t *p) {
         case OP_COPY_T2T: copy_t2t((const p_copy_t2t *)a); break;
         case OP_CLEAR_TEX: clear_tex((const p_clear_tex *)a); break;
         case OP_RENDER_COND: render_cond((const p_render_cond *)a); break;   // recorded only with the profile key render_cond (hle_nvn.c)
-        case OP_DRAW_TF: if (!g_rc_skip) draw_tf((const p_draw_tf *)a); break;
+        case OP_DRAW_TF: if (!g_rc_skip) draw_tf((const p_draw_tf *)a); else { occ_draw(0); g_rcs.skip_draws++; } break;
         case OP_TF_BIND: { const p_tf_bind *b = (const p_tf_bind *)a; if (b->index >= 0 && b->index < 4) g_tf[b->index] = *b; break; }
         case OP_TF_STATE: if (!V.has_xfb) VKRED_ONCE(80, "transform feedback: the device has none, its draws write nothing"); tf_state((const p_tf_state *)a); break;
         case OP_VP_SWIZZLE: { const p_vp_swizzle *b = (const p_vp_swizzle *)a; memcpy(S.vp_sw[b->first], b->sw, 4 * (size_t)b->n); break; }

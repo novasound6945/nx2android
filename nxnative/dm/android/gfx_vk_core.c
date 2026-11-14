@@ -8,6 +8,7 @@
 //   (event writes, counter reports), as nvn_mtl.m does in its completion handler.
 #define _GNU_SOURCE
 #include "gfx_vk.h"
+#include "vk_occ.h"
 #include "nvn_hmap.h"
 #include "nvn_dirty.h"
 #include <android/hardware_buffer.h>
@@ -260,6 +261,8 @@ void vk_init(void) {
     V.has_depth_clip_ctl = fdc.depthClipControl && has_ext(ex, ne, "VK_EXT_depth_clip_control");
     V.has_dtiming = has_ext(ex, ne, "VK_GOOGLE_display_timing");   // frame pacing on the display (gfx_vk_present.c pace_*)
     V.has_bc = ff.features.textureCompressionBC; V.has_astc = ff.features.textureCompressionASTC_LDR; V.has_gs = ff.features.geometryShader;
+    V.has_oq_precise = ff.features.occlusionQueryPrecise;   // (enabled with the rest: en = ff.features)
+    V.has_hqr = v12 ? f12.hostQueryReset : featx(xf, nxf, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES)[0];   // (checked against the entry point below)
     { const char *e = getenv("DM_VK_X_BC_CPU"); if (e && atoi(e)) V.has_bc = 0; }   // (start-up) BC textures decoded on the CPU as on a device without them (gfx_vk_tex.c bc_decode)
     V.max_aniso = V.props.limits.maxSamplerAnisotropy;
     // subgroups: where the shaders' votes, ballots and shuffles may run; a module whose stage lacks them runs as subgroups of one invocation (gfx_vk_shader.c, spv_one_lane).
@@ -296,6 +299,8 @@ void vk_init(void) {
     vkGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)p_vkGetInstanceProcAddr(V.inst, "vkGetDeviceProcAddr");
 #define VK_LOADD(f) f = (PFN_##f)vkGetDeviceProcAddr(V.dev, #f); if (!f) f = (PFN_##f)vkGetDeviceProcAddr(V.dev, #f "KHR"); if (!f) f = (PFN_##f)p_vkGetInstanceProcAddr(V.inst, #f);   // a promoted function by its extension's name (Vulkan 1.1 / 1.2 devices)
     VK_DEV_FNS(VK_LOADD)
+    if (!vkResetQueryPool) vkResetQueryPool = (PFN_vkResetQueryPool)vkGetDeviceProcAddr(V.dev, "vkResetQueryPoolEXT");   // (VK_EXT_host_query_reset on a 1.1 device)
+    V.has_hqr = V.has_hqr && vkResetQueryPool;
     // A driver can report the timeline-semaphore feature (and Vulkan 1.3) and still export no vkWaitSemaphores: the emulator's ranchu / gfxstream driver does
     // (both the device and the instance dispatcher return null for it and for vkGetSemaphoreCounterValue), and the first wait then called address 0
     // (SIGSEGV pc=0, lr=wait_fence+0x70, thread 'dm-vk-complete', South Park: The Stick of Truth). The feature query is not proof the entry points load:
@@ -773,16 +778,26 @@ static VkQueryPool g_tsq; uint64_t g_gpu_ns;
 // the size holds steady
 enum { CQ = 64 };
 static VkQueryPool g_cq;
+// Occlusion queries (NVN SAMPLES_PASSED, vk_occ.h; gfx_vk_exec.c occ_* decides where they go): OQ per slot, each one stretch of draws inside one pass. A slot's range is reset
+// on the host once its submission has completed and its results are read (hostQueryReset, core in 1.2), so nothing is recorded for it; without that, at the start
+// of each submission while gfx_vk_exec.c wants queries (g_oq_want). Past OQ in a submission no query is begun (the draws count as lost: their reports unknown)
+enum { OQ = 1024 };
+static VkQueryPool g_oq; int g_oq_want;
+static occ_ctr g_occ_c;   // NVN's counter as the completion thread has it (completion thread only)
+extern occ_ent g_occ_ent[];   // report addresses' last results (gfx_vk_exec.c)
+uint64_t g_occ_done[6];   // completed samples-passed reports: all, 0, not 0, unknown; query results missing; reports known only up to lost draws (completion thread; gfx_vk_exec.c logs them)
 #define SCRATCH_BLOCK (8u << 20)
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *p; VkDeviceSize size, used; } scratch_blk;
 typedef struct { int kind; void *a; void *b; } dfree_t;   // 0 buffer+memory, 1 image+memory, 2 view
-typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; int q; } post_op;   // q: a timestamp counter's query in g_cq, or -1
+typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; int q; uint64_t aux; } post_op;   // q: a timestamp counter's query in g_cq, or -1
+// kinds: 1 event, 2 counter report, 3 samples-passed report (q: its entry or -1, v: its sequence, aux: its present), 4 OCC_SEG (q: the query), 5 OCC_RESET, 6 OCC_LOST, 7 OCC_BROKEN
 struct vksub {
     VkCommandPool pool; VkCommandBuffer up, main; int up_used;
     VkCommandBuffer mains[MAIN_CBS]; int nmain_alloc, nmain_used, cb_err;
     VkCommandBuffer ups[MAIN_CBS]; int nup_alloc, nup_used; int nmain_sent;   // upload command buffers in order (one per part sent early), main buffers already submitted   // the submission's main command buffers in order (vk_cmd_split); main = the one being recorded
     uint64_t fence;   // the fence this slot last committed with (0 = never)
     int ncq;          // timestamp counter queries used in this submission (g_cq)
+    int noq, oq_ok;   // occlusion queries used in this submission (g_oq), and whether its range may be used (reset)
     scratch_blk *blk; int nblk, capblk;
     VkDescriptorPool *dp; int ndp, capdp, dp_cur;
     uint32_t dp_used[9], dp_sets; int dp_counted; int no_ts;   // what pool dp_cur has given out (vk_alloc_set)
@@ -897,6 +912,10 @@ static void slots_init(void) {
     if (V.props.limits.timestampComputeAndGraphics && vkCreateQueryPool(V.dev, &qi, NULL, &g_tsq)) g_tsq = VK_NULL_HANDLE;
     VkQueryPoolCreateInfo cqi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_TIMESTAMP, NSLOT * CQ};
     if (!g_tsq || vkCreateQueryPool(V.dev, &cqi, NULL, &g_cq)) g_cq = VK_NULL_HANDLE;
+    VkQueryPoolCreateInfo oqi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_OCCLUSION, NSLOT * OQ, 0};
+    if (vkCreateQueryPool(V.dev, &oqi, NULL, &g_oq)) { g_oq = VK_NULL_HANDLE; VKLOG("[RED] occlusion query pool not made: samples-passed reports stay unknown"); }
+    else if (V.has_hqr) vkResetQueryPool(V.dev, g_oq, 0, NSLOT * OQ);
+    VKLOG("occlusion queries: %s, %s, reset %s", g_oq ? "pool made" : "none", V.has_oq_precise ? "precise" : "not precise (only zero / not zero)", V.has_hqr ? "on the host" : "in each submission while wanted");
     { const char *e = getenv("DM_VK_PASS_TIMES"); if (e && atoi(e)) { VkQueryPoolCreateInfo pq = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_TIMESTAMP, NSLOT * PASSQ * 2}; if (vkCreateQueryPool(V.dev, &pq, NULL, &g_pq)) g_pq = VK_NULL_HANDLE; } }
     for (int i = 0; i < NSLOT; i++) {
         // not TRANSIENT, and reset by command buffer (see slot_recycle)
@@ -1136,15 +1155,26 @@ void mtl_sub_begin(void) {
     if (g_tsq) { vkCmdResetQueryPool(s->main, g_tsq, 2 * (uint32_t)g_cur, 2); vkCmdWriteTimestamp(s->main, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_tsq, 2 * (uint32_t)g_cur); }
     if (g_cq) vkCmdResetQueryPool(s->main, g_cq, (uint32_t)g_cur * CQ, CQ);
     s->ncq = 0;
+    s->noq = 0; s->oq_ok = g_oq && V.has_hqr;
+    if (g_oq && !V.has_hqr && __atomic_load_n(&g_oq_want, __ATOMIC_RELAXED)) { vkCmdResetQueryPool(s->main, g_oq, (uint32_t)g_cur * OQ, OQ); s->oq_ok = 1; }
     g_npass[g_cur] = 0; if (pass_times_on()) vkCmdResetQueryPool(s->main, g_pq, (uint32_t)(g_cur * PASSQ * 2), PASSQ * 2);
     vk_exec_reset();
 }
-void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v) { post((post_op){1, val, mode, v, 0, 0, -1}); }
+void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v) { post((post_op){1, val, mode, v, 0, 0, -1, 0}); }
 void mtl_sub_counter(uint64_t addr, uint32_t type) {
     vksub_t *s = cur(); int q = -1;
     if (g_cq && (type == 0 || type == 0x10) && s->ncq < CQ) { q = g_cur * CQ + s->ncq++; vkCmdWriteTimestamp(vk_cmd(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_cq, (uint32_t)q); }
-    post((post_op){2, NULL, 0, 0, addr, type, q});
+    post((post_op){2, NULL, 0, 0, addr, type, q, 0});
 }
+// occlusion queries (gfx_vk_exec.c occ_*): a query begun in the open pass (-1 none: no pool, range not reset, OQ used), ended there, and the operations the completion
+// thread applies in command order
+int vk_oq_begin(void) {
+    vksub_t *s = cur(); if (!s->oq_ok || s->noq >= OQ) return -1;
+    int q = g_cur * OQ + s->noq++; vkCmdBeginQuery(vk_cmd(), g_oq, (uint32_t)q, V.has_oq_precise ? VK_QUERY_CONTROL_PRECISE_BIT : 0); return q;
+}
+void vk_oq_end(int q) { vkCmdEndQuery(vk_cmd(), g_oq, (uint32_t)q); }
+void vk_oq_post(int kind, int q) { post((post_op){kind == OCC_SEG ? 4 : kind == OCC_RESET ? 5 : kind == OCC_LOST ? 6 : 7, NULL, 0, 0, 0, 0, q, 0}); }
+void vk_oq_report(uint64_t addr, int ent, uint32_t seq, uint64_t frame) { post((post_op){3, NULL, 0, seq, addr, NVN_COUNTER_TYPE_SAMPLES_PASSED, ent, frame}); }
 static VkMemoryBarrier2 full_barrier(void) {
     return (VkMemoryBarrier2){VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, NULL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                               VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
@@ -1287,7 +1317,7 @@ void mtl_sub_index(const uint64_t *h, int n) { (void)h; (void)n; }
 void mtl_exec_rest(const uint64_t *h, int n) { (void)h; (void)n; }
 
 // completion: a queue of committed submissions, each with its CPU-visible effects
-typedef struct cpend { uint64_t fence, frame; post_op *ops; int n; int slot, rslot; int npass; pass_meta pmeta[PASSQ]; struct cpend *next; } cpend;
+typedef struct cpend { uint64_t fence, frame; post_op *ops; int n; int slot, rslot; int npass, noq; pass_meta pmeta[PASSQ]; struct cpend *next; } cpend;   // noq: occlusion queries used
 static cpend *g_ch, *g_ct; static pthread_mutex_t g_cmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_ccv = PTHREAD_COND_INITIALIZER;
 uint64_t guest_ns(void);
 static uint64_t gpu_ticks(void) { uint64_t g = guest_ns(); if (!g) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); g = (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; } return g * 12 / 625; }
@@ -1334,17 +1364,29 @@ static void *completion_main(void *a) {
             if (np && vkGetQueryPoolResults(V.dev, g_pq, (uint32_t)(c->slot * PASSQ * 2), (uint32_t)np * 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
                 for (int i = 0; i < np; i++) if (t[2 * i + 1] > t[2 * i]) { pass_spike_add((double)(t[2 * i + 1] - t[2 * i]) * V.props.limits.timestampPeriod / 1e6, &c->pmeta[i]); int f = (int)c->pmeta[i].fidx; g_pacc[f] += (double)(t[2 * i + 1] - t[2 * i]) * V.props.limits.timestampPeriod / 1e6; g_pcnt[f]++; g_plast[f] = c->pmeta[i]; if (f + 1 > g_pmax) g_pmax = f + 1; }
         }
+        // occlusion queries: each one's result with its availability (a dropped submission, c->slot -1: none of them counts, the counter is unknown until the next reset)
+        static uint64_t oqr[OQ][2]; int oq_got = 0;
+        if (c->noq && c->slot >= 0 && vkGetQueryPoolResults(V.dev, g_oq, (uint32_t)(c->rslot * OQ), (uint32_t)c->noq, sizeof oqr, oqr, 16, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) >= 0) oq_got = 1;
         uint64_t now = gpu_ticks(), tend = 0;
         if (g_tsq && c->slot >= 0) { uint64_t t[2]; if (vkGetQueryPoolResults(V.dev, g_tsq, 2 * (uint32_t)c->slot, 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) tend = t[1]; }
         for (int i = 0; i < c->n; i++) {
             post_op *o = &c->ops[i];
             if (o->kind == 1) { if (o->mode == 1) *o->val += o->v; else *o->val = o->v; continue; }
+            if (o->kind >= 4) {   // the running counter (vk_occ.h)
+                int kind = o->kind == 4 ? OCC_SEG : o->kind == 5 ? OCC_RESET : o->kind == 6 ? OCC_LOST : OCC_BROKEN, qi = o->q - c->rslot * OQ;
+                int ok = kind != OCC_SEG || (oq_got && qi >= 0 && qi < c->noq && oqr[qi][1]); if (!ok) g_occ_done[4]++;
+                occ_apply(&g_occ_c, kind, ok, ok && kind == OCC_SEG ? oqr[qi][0] : 0); continue; }
+            if (o->kind == 3) {   // a samples-passed report: the counter now (unknown: 1 << 20, as before), and its address's entry for the replay's conditions
+                occ_val r = occ_take(&g_occ_c, V.has_oq_precise); uint64_t rec[2] = {occ_guest(r), now}; memcpy((void *)(uintptr_t)o->addr, rec, sizeof rec);
+                if (o->q >= 0) occ_ent_put(&g_occ_ent[o->q], o->v, r, o->aux);
+                g_occ_done[0]++; g_occ_done[!r.known ? 3 : r.lost ? 5 : r.v ? 2 : 1]++; continue; }
             uint64_t ts = now, tq;
             if (o->q >= 0 && tend && vkGetQueryPoolResults(V.dev, g_cq, (uint32_t)o->q, 1, 8, &tq, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && tq <= tend) {
                 uint64_t back = (uint64_t)((double)(tend - tq) * V.props.limits.timestampPeriod * 12 / 625); if (back < now) ts = now - back; }
             // render_cond: a timestamp report's counter field is 0, as on the GPU (gfx_vk_exec.c render_cond evaluates conditions on it)
             uint64_t rec[2] = {o->type == 0 || o->type == 0x10 ? (DM_GAME_RENDER_COND ? 0 : ts) : o->type == NVN_COUNTER_TYPE_SAMPLES_PASSED ? (1u << 20) : 0, ts}; memcpy((void *)(uintptr_t)o->addr, rec, sizeof rec);
         }
+        if (c->noq && V.has_hqr) vkResetQueryPool(V.dev, g_oq, (uint32_t)(c->rslot * OQ), (uint32_t)c->noq);   // before the slot can be taken again (g_done below)
         pthread_mutex_lock(&g_cmu); g_ch = c->next; if (!g_ch) g_ct = NULL; pthread_mutex_unlock(&g_cmu);
         if (g_prereset > 0 && c->rslot >= 0) { vksub_t *s = &g_slot[c->rslot];   // its command buffers reset here (slot_recycle); the slot is not taken before g_done passes this fence
             if (s->fence == c->fence) { for (int i = 0; i < s->nmain_alloc; i++) vkResetCommandBuffer(s->mains[i], 0); for (int i = 0; i < s->nup_alloc; i++) vkResetCommandBuffer(s->ups[i], 0); } }
@@ -1393,7 +1435,7 @@ uint64_t mtl_sub_commit(void) {
     if (r) { void vk_crumbs_report(void); vk_crumbs_report(); die("[vk] vkQueueSubmit: %d (device lost?)", r); }
     s->fence = f;
     cpend *c = calloc(1, sizeof *c); c->fence = f; c->frame = __atomic_load_n(&g_cur_frame, __ATOMIC_RELAXED); c->n = s->npost; c->rslot = g_cur; c->slot = s->no_ts ? -1 : g_cur; s->no_ts = 0;
-    c->npass = g_npass[g_cur]; memcpy(c->pmeta, g_pmeta[g_cur], sizeof(pass_meta) * (size_t)c->npass);
+    c->npass = g_npass[g_cur]; memcpy(c->pmeta, g_pmeta[g_cur], sizeof(pass_meta) * (size_t)c->npass); c->noq = s->noq;
     if (s->npost) { c->ops = malloc(s->npost * sizeof *c->ops); memcpy(c->ops, s->post, s->npost * sizeof *c->ops); }
     pthread_mutex_lock(&g_cmu); if (g_ct) g_ct->next = c; else g_ch = c; g_ct = c; pthread_cond_signal(&g_ccv); pthread_mutex_unlock(&g_cmu);
     s->npost = 0; g_cur = -1;
