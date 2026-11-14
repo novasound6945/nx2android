@@ -161,6 +161,8 @@ uint64_t dm_present_period_adapt(uint64_t period) {
     int64_t want = STEPS[g_step];
     return (uint64_t)want > period ? (uint64_t)want : period;   // never faster than the game asks
 }
+// The period dm_present_period_adapt would give, without taking it as the game's (hle_nvn.c fstep_tick: the float frame step's next hold)
+uint64_t dm_present_period_peek(uint64_t period) { return g_adapt <= 0 || !period || (uint64_t)STEPS[g_step] <= period ? period : (uint64_t)STEPS[g_step]; }
 static int fps_pin(void) {   // a DM_CTL "env DM_FPS_PIN=40" line holds that step (60, 40 or 30; anything else lets the rate adapt again): tests
     static unsigned k; static int pin = -1; if (k++ % 30) return pin;
     const char *e = getenv("DM_FPS_PIN"); int v = e ? atoi(e) : 0, st = v == 60 ? 0 : v == 40 ? 1 : v == 30 ? 2 : -1;

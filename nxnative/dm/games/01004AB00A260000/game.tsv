@@ -1,4 +1,4 @@
-# Game profile of DARK SOULS: REMASTERED (Switch, update 1.0.3 = v196608; base game v0 not extracted). Plays on the iPhone and the Mac (title, character creation, the opening, the Undead Asylum at 60 fps with sound; 30 on the Switch, rewriter cuts lift its limiter and halve its fixed frame step, patches.py)
+# Game profile of DARK SOULS: REMASTERED (Switch, update 1.0.3 = v196608; base game v0 not extracted). Plays on the iPhone and the Mac (title, character creation, the opening, the Undead Asylum at 60 fps with sound, then with rewriter cuts that lifted its limiter and halved its fixed frame step; 30 on the Switch. Now 60 through the frame step, patches.py)
 # Format: see dm/games/README.md
 # FromSoftware's engine (dantelion2) on SDK 4.5.0, the oldest so far, NVN, Havok, FMOD through AudioOut; subsdk0 is the SDK's movie library (H.264 MP4 movies, decoded by the host).
 # Files are in two dvdbnd archives (dvdbnd0.bdt / dvdbnd1.bdt, each indexed by its .bhd5; DCX zlib entries, BND3 archives inside), which the game reads itself
@@ -37,6 +37,20 @@ app_pool	0xCD500000
 sys_resource	0x0
 # the rewritten modules (110 MB with main's 51 MB bss) are larger than the default 64 MB of used memory the game takes off the pool for its heap
 mem_used	0x6e00000
+
+# ---- Frame rate ----
+# 60 fps (30 on the Switch): the frame step stubs (patches.py FRAME_STEP) raise the render thread's CPU limiter to this target and hand the main thread's frame update the
+# time the frame really stays on screen (a float step, state page +0x38, hle_nvn.c fstep_tick), so game time = real time at 60, at 30 and at the adaptive rate's 40.
+# DM_FPS_TARGET=30 (env.txt on the device) keeps the game's own 30 fps and fixed 1/30 step; 0 runs the game without the host's frame step
+fps_target	60
+# Frames are not held longer than the 60 cap's vsync: a float step fits any rate, so the Android adaptive rate picks 60, 40 or 30 by the frames' work. With holds, three late
+# frames sent the hold to 2 (30 fps), and the trial back to 1 needs frames at 85% of a vsync, which this game's CPU work (p50 16.7 ms at 60 on the Y700) never gives, so it would
+# stay at 30 where 40 holds. DM_FPS_HOLD=on (env.txt) brings the holds back
+fps_hold	off
+
+# ---- Graphics ----
+# on for diagnostics: the replay logs which conditions the game uses (gfx_vk_exec.c "render_cond:" every 600 presents). Turn it off if the picture shows anything wrong
+render_cond	on
 
 # ---- Shader split ----
 # 3,099 shaders: 3,040 GLSLC outputs, one per .vpo / .fpo entry of six BND3 archives in dvdbnd0.bdt (shader_split.py bdt_shaders), and 59 more in main. SDK 4's GLSLC writes control

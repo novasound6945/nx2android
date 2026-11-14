@@ -120,3 +120,34 @@ static inline int nvn_fstep_gpu_slowed(nvn_fgpu *g, double gpu, int k, int kmin,
     g->cur = g->n ? g->cur + (gpu - g->cur) / 8 : gpu; g->n++;
     return nvn_fgpu_slow(g);
 }
+
+// Float frame step (patch_nso.py FRAME_STEP, state page +0x38: a game that steps its frame update by a fixed time constant, DARK SOULS: REMASTERED's 1/30 s). A step in seconds
+// need not be a whole number of vsyncs, so each frame is stepped by the time the next one will stay on screen (nominal: its present period in vsyncs, the hold k or the
+// Android adaptive rate's longer period, 1.5 at 40 fps): a steady rate gets exactly its period (1, 1.5, 2 vsyncs) and motion stays even. The whole-vsync step cannot do that:
+// at 40 fps it alternates 1 and 2 (half and double speed), and it pays a late frame back in jumps of a whole vsync. Real time the game falls behind (a late frame) or runs
+// ahead is a debt as in nvn_fstep_next; past a dead band (jitter, start-to-start) a share of it is paid each frame, so over time game time = real time whatever paces the
+// frames. Steps stay within [FSTEPF_MIN, FSTEPF_MAX] vsyncs (1/60 to 1/20 s: no teleport after a stall), and debt beyond FSTEP_DEBT_MAX (a load, the app in the background)
+// is dropped. Unit test: tests/t_fstep.c
+#define FSTEPF_MIN 1.0        // vsyncs: 1/60 s
+#define FSTEPF_MAX 3.0        // vsyncs: 1/20 s
+#define FSTEPF_DEAD 0.25      // debt within this many vsyncs is not paid: frames at a steady rate get exactly their period
+#define FSTEPF_PAY 0.25       // share of the debt past the dead band paid per frame (a 100 ms hitch at 60 fps is paid within about 15 frames)
+typedef struct {
+    double step;              // the step handed out last (vsyncs; 0 = none yet)
+    double debt, dropped;     // real time the game is behind, in vsyncs; debt dropped past FSTEP_DEBT_MAX
+    double game, real;        // sums of the steps handed out and of the frames' times (vsyncs; statistics for the log)
+} nvn_fstepf;
+// Once per frame. shown: real time since the previous frame's start, in vsyncs (0 = not measured yet); nominal: the next frame's present period in vsyncs.
+// Returns the step for the next frame in vsyncs (the caller writes step / 60 seconds into the state page)
+static inline double nvn_fstepf_next(nvn_fstepf *f, double shown, double nominal) {
+    if (f->step > 0 && shown > 0) {
+        f->debt += shown - f->step; f->real += shown;
+        if (f->debt > FSTEP_DEBT_MAX) { f->dropped += f->debt - FSTEP_DEBT_MAX; f->debt = FSTEP_DEBT_MAX; }
+        if (f->debt < -1) f->debt = -1;   // ahead: at most one vsync is remembered (as nvn_fstep_next)
+    }
+    double pay = f->debt > FSTEPF_DEAD ? (f->debt - FSTEPF_DEAD) * FSTEPF_PAY : f->debt < -FSTEPF_DEAD ? (f->debt + FSTEPF_DEAD) * FSTEPF_PAY : 0, s = nominal + pay;
+    if (s < FSTEPF_MIN) s = FSTEPF_MIN;
+    if (s > FSTEPF_MAX) s = FSTEPF_MAX;
+    f->step = s; f->game += s;
+    return s;
+}

@@ -1,5 +1,6 @@
 # DARK SOULS: REMASTERED on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android")
-# FromSoftware's engine on SDK 4.5.0, update 1.0.3; 3,099 shaders, all translated. 30 fps, the game's own (patches.py says why its 60 fps patch was taken out).
+# FromSoftware's engine on SDK 4.5.0, update 1.0.3; 3,099 shaders, all translated. 60 fps through the float frame step (game.tsv fps_target, patches.py; Retroid Pocket Nova
+# 2026-11-14: 60 fps held, game time 1.000 of real time, ladders fine); DM_FPS_TARGET=30 in env.txt keeps the game's own 30 fps, which the test below ran at.
 # Tested 2026-11-06 on the Legion Y700 (TB322FC, Snapdragon 8 Elite, Adreno 830, Android 16), docked: the title, the offline notice, the first-start settings (brightness,
 # options, buttons), character creation (the name through the overlay keyboard), the opening movie (skipped with +), the Undead Asylum's first cell (walking, the camera);
 # a save and Continue. 30 fps on screen (99% of frames at 33.3 ms, the rest 41.7; 6 long frames in 72 s of walking), GPU about 10 ms; 0 audio underruns.
@@ -11,3 +12,7 @@ status	playable
 tested	v196608 Lenovo Legion Y700 TB322FC (Snapdragon 8 Elite, Adreno 830, Android 16)
 package	org.nx2a.darksoulsremastered
 orientation	landscape
+# Pipelines are built where they are first drawn, not on the background thread: a draw skipped while its pipeline builds leaves one pass of this deferred renderer out, and
+# the object (the player, the shield, props) flashed grey for a few frames, again with every new material / pass / state combination (994 pipelines and 5,771 skipped draws in
+# one session). Retroid Pocket Nova, 2026-11-14: with this the grey flashes are gone and the builds' hitches were not noticed at 60 fps
+env	DM_VK_ASYNC_PIPE=0

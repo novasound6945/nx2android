@@ -84,6 +84,9 @@ def load_patches():
     return tables, where
 PATCHES, PATCH_WHERE = load_patches()
 BUILD_ID = d[0x40:0x50].hex()
+# The frame step state page (the page after the key page, "Frame step in whole vsyncs" below) must fit before the patch area. A main whose key page ends on a 64 KB boundary has
+# no room there (DARK SOULS: REMASTERED 1.0.3: key page 0x55ec000, patch area 0x55f0000): the patch area then moves 64 KB on. Every other module keeps its layout byte for byte
+if not FAR and NAME == 'main' and BUILD_ID in PATCHES['FRAME_STEP'] and KEY_PAGE_OFF + 0x8000 > PATCH_OFF: PATCH_OFF = (KEY_PAGE_OFF + 0x8000 + 0xFFFF) & ~0xFFFF
 cuts = list(PATCHES['CUTS'].get(BUILD_ID, []))
 for off, ob, nb, why in cuts:
     ob, nb = bytes.fromhex(ob), bytes.fromhex(nb)
@@ -899,11 +902,15 @@ for off, oid, ow, why in obs:
 # State page = the page after the key page (zero in the file, read-write in both loaders): +0 float target fps written by the loader (fps_target, DM_FPS_TARGET; 0 = every stub
 # runs the original instructions), +4 TOTK movie flag, +8 double lead (TOTK), +0x10 float render scale (TOTK, BotW), +0x18 double game seconds (TOTK),
 # +0x20 u32 step in vsyncs (host; 0 = not decided yet), +0x24 u32 a step the game fixes itself (BotW's VFR override; 0 = none), +0x28 u32 AoC's vsyncs per update, marked by
-# its first stub (0 = off), +0x30 u64 vsyncs stepped (the stubs; logged by the host to check the game's speed). Stub bodies assembled with clang
+# its first stub (0 = off), +0x30 u64 vsyncs stepped (the stubs; logged by the host to check the game's speed), +0x38 float step in seconds (host, at a 60 cap only; 0 = not decided
+# yet or the game's own step) for a game whose frame update takes a fixed time constant (DARK SOULS: REMASTERED's 1/30 s): the time the next frame stays on screen plus a share of
+# the real time the game is behind (nvn_fstep.h nvn_fstepf_next), any value from 1/60 to 1/20 s. Stub bodies assembled with clang
 # A build's stubs are FRAME_STEP[build ID](ctx) in its patches.py: ctx.here() / ctx.emit(word) assemble into the patch area, ctx.site(offset, original bytes) asserts a site and that it is
-# no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, and ctx.render_scale = 1 marks a render-scale stub
+# no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, ctx.render_scale = 1 marks a render-scale stub, and
+# ctx.float_step = 1 marks stubs that read the float step at +0x38 (fixups FSTEP_FLOAT: the host computes and writes it only then)
 FRAME_STEP = PATCHES['FRAME_STEP']
 FS_STATE_OFF = 0
+FSTEP_FLOAT = 0    # 1 = the build's stubs read the float step (state +0x38): the fixups table says so (FSTEP_FLOAT), and the host writes the slot
 RENDER_SCALE = 0   # 1 = the build has a render-scale stub (state +0x10): the fixups table says so (RENDER_SCALE), and the iOS launcher offers the setting (dm/games/settings.tsv)
 if BUILD_ID in FRAME_STEP and NAME == 'main':
     FS_STATE_OFF = KEY_PAGE_OFF + 0x4000
@@ -918,8 +925,8 @@ if BUILD_ID in FRAME_STEP and NAME == 'main':
         for i, w in enumerate(words): struct.pack_into('<I', IMG, off + 4 * i, w)
         cuts.append((off, old.hex(), bytes(IMG[off:off + 4 * len(words)]).hex(), why)); stat('frame_step')
 if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py)
-    fs = types.SimpleNamespace(here=here, emit=emit, site=fs_site, put=fs_put, state=FS_STATE_OFF, render_scale=0)
-    FRAME_STEP[BUILD_ID](fs); RENDER_SCALE = fs.render_scale
+    fs = types.SimpleNamespace(here=here, emit=emit, site=fs_site, put=fs_put, state=FS_STATE_OFF, render_scale=0, float_step=0)
+    FRAME_STEP[BUILD_ID](fs); RENDER_SCALE, FSTEP_FLOAT = fs.render_scale, fs.float_step
 
 # ---- Spin waits (every module) ----
 # A guest loop that polls memory until another thread changes it fills only its own core on the Switch, where any higher-priority thread pinned there preempts it, so the
@@ -1149,6 +1156,7 @@ with open(P('fixups.tsv'), 'w') as f:
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
     if FS_STATE_OFF: f.write(f'# FPS_STATE_OFF\t{FS_STATE_OFF:#x}\n')   # frame step state page (FRAME_STEP): the loader writes the target fps there
+    if FSTEP_FLOAT: f.write('# FSTEP_FLOAT\t1\n')   # the stubs read the float step at state +0x38 (loader.c dm_fps_float: the host writes it)
     if RENDER_SCALE: f.write('# RENDER_SCALE\t1\n')   # a render-scale stub reads state +0x10 (the loader ignores the key; dm/games/settings.py offers the setting by it)
     f.write(f'# TARGET\t{TARGET}\n')   # the slot access differs per OS: the host refuses an image rewritten for the other one
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')   # the host identifies the build by it: features with hard-coded addresses only run on the build they belong to

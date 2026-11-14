@@ -18,8 +18,20 @@ static void run(sim *m, int n, double w, int kmin, int kmax, int fixed) {
     }
 }
 
+typedef struct { nvn_fstepf f; double real, game, next, dev_max, step_max; } fsim;
+// Float step: n frames shown sh vsyncs each (± jit by turns) at the host's present period nom; dev_max: the largest |step − nom|, step_max: the largest step
+static void frun(fsim *m, int n, double sh, double jit, double nom) {
+    for (int i = 0; i < n; i++) {
+        double s = m->next ? m->next : nom, t = sh + (i % 2 ? jit : -jit);
+        m->real += t; m->game += s;
+        m->next = nvn_fstepf_next(&m->f, t, nom);
+        if (fabs(m->next - nom) > m->dev_max) m->dev_max = fabs(m->next - nom);
+        if (m->next > m->step_max) m->step_max = m->next;
+    }
+}
+
 int main(void) {
-    char b[160];
+    char b[256];
     {   sim m = {0}; run(&m, 600, 0.5, 1, 3, 0);
         check(m.s.k == 1 && m.s.ups == 0 && m.s.paid == 0 && m.game == m.real, "steady 60: hold 1, step 1, game time = real time");
     }
@@ -236,6 +248,47 @@ int main(void) {
         }
         sim m = {0}; m.s.shown_slack = 60.0 / 165; run(&m, 60, 0.5, 1, 3, 0); run(&m, 300, 1.32, 1, 3, 0);
         check(m.s.k == 2, "  the slack does not hide work: 22 ms frames still step to hold 2");
+    }
+    // ---- float frame step (nvn_fstepf_next): each frame is stepped by the step handed out at the previous present and stays on screen sh vsyncs; nom is the host's present period
+    {   fsim m = {0}; frun(&m, 3600, 1, 0.1, 1);
+        snprintf(b, sizeof b, "float, 60 fps with ±1.7 ms jitter: every step 1/60 s (largest deviation %.4f vsyncs), game − real %+.2f ms", m.dev_max, (m.game - m.real) * 1000 / 60);
+        check(m.dev_max == 0 && fabs(m.real - m.game) < FSTEPF_DEAD + 0.11, b);
+    }
+    {   fsim m = {0}; frun(&m, 1800, 2, 0.1, 2);
+        snprintf(b, sizeof b, "float, 30 fps: every step 1/30 s (largest deviation %.4f), game − real %+.2f ms", m.dev_max, (m.game - m.real) * 1000 / 60);
+        check(m.dev_max == 0 && fabs(m.real - m.game) < FSTEPF_DEAD + 0.11, b);
+    }
+    {   fsim m = {0}; frun(&m, 2400, 1.5, 0.1, 1.5);
+        snprintf(b, sizeof b, "float, the adaptive rate's 40 fps (period 25 ms known): every step 1/40 s (largest deviation %.4f), game − real %+.2f ms", m.dev_max, (m.game - m.real) * 1000 / 60);
+        check(m.dev_max == 0 && fabs(m.real - m.game) < FSTEPF_DEAD + 0.11, b);
+    }
+    {   fsim m = {0}; frun(&m, 600, 1, 0, 1); double g0 = m.game, r0 = m.real; frun(&m, 2400, 1.5, 0, 1);
+        snprintf(b, sizeof b, "float, 40 fps the host did not know of (period 1): steps settle at %.4f vsyncs, %.4f of real time over 60 s, lag %.2f ms", m.next, (m.game - g0) / (m.real - r0), (m.real - m.game) * 1000 / 60);
+        check(fabs(m.next - 1.5) < 1e-6 && fabs((m.game - g0) / (m.real - r0) - 1) < 0.001 && m.real - m.game < 2.5, b);
+    }
+    {   fsim m = {0}; frun(&m, 600, 1, 0, 1); m.step_max = 0; frun(&m, 1, 6, 0, 1); frun(&m, 1200, 1, 0, 1);
+        snprintf(b, sizeof b, "float, one 100 ms hitch at 60: paid back, largest step %.2f vsyncs, game − real %+.2f ms after 20 s", m.step_max, (m.game - m.real) * 1000 / 60);
+        check(m.step_max <= FSTEPF_MAX && fabs(m.real - m.game) <= FSTEPF_DEAD + 1e-9 && m.f.dropped == 0, b);
+    }
+    {   fsim m = {0}; frun(&m, 600, 1, 0, 1); m.step_max = 0; frun(&m, 1, 120, 0, 1); frun(&m, 1200, 1, 0, 1);
+        snprintf(b, sizeof b, "float, one 2 s stall (a load): %.0f vsyncs dropped (%.2f s), largest step %.2f vsyncs (%.1f ms), game − real + dropped %+.2f ms",
+                 m.f.dropped, m.f.dropped / 60, m.step_max, m.step_max * 1000 / 60, (m.game - m.real + m.f.dropped) * 1000 / 60);
+        check(m.step_max <= FSTEPF_MAX && fabs(m.f.dropped - (120 - 1 - FSTEP_DEBT_MAX)) < 1e-9 && fabs(m.real - m.game - m.f.dropped) <= FSTEPF_DEAD + 1e-9, b);
+    }
+    {   // the hold moving between 60, the adaptive 40 and 30, frames now and then late: game time = real time over 5 minutes
+        fsim m = {0}; unsigned r = 1;
+        for (int i = 0; i < 18000; i++) {
+            r = r * 1103515245u + 12345u; double nom = (i / 600) % 3 == 0 ? 1 : (i / 600) % 3 == 1 ? 1.5 : 2, sh = nom + ((r >> 16) % 100 < 5 ? 0.6 : 0) + ((int)((r >> 8) % 21) - 10) / 100.0;
+            frun(&m, 1, sh, 0, nom);
+        }
+        snprintf(b, sizeof b, "float, 5 min of 60 / 40 / 30 fps with 5%% late frames: %.5f of real time, game − real %+.2f ms", m.game / m.real, (m.game - m.real) * 1000 / 60);
+        check(fabs(m.game / m.real - 1) < 1e-4 && m.f.dropped == 0, b);
+    }
+    {   // for comparison: whole vsyncs at 40 fps (hold 1, fps_hold off) step 1 and 2 by turns
+        sim m = {0}; int steps[8]; run(&m, 120, 1.5, 1, 1, 0);
+        for (int i = 0; i < 8; i++) { steps[i] = m.next; run(&m, 1, 1.5, 1, 1, 0); }
+        snprintf(b, sizeof b, "  (whole vsyncs at 40 fps step %d %d %d %d %d %d %d %d: half and double speed by turns)", steps[0], steps[1], steps[2], steps[3], steps[4], steps[5], steps[6], steps[7]);
+        check(steps[0] + steps[1] == 3, b);
     }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;

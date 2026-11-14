@@ -1447,6 +1447,7 @@ __attribute__((weak)) void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n =
 __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *count = 0; return QOS_CLASS_UNSPECIFIED; }
 __attribute__((weak)) void dm_perf_frame_start(uint64_t pace_ns, uint64_t pq_ns) { (void)pace_ns; (void)pq_ns; }   // Android (perf_android.c): a frame's work starts, for the CPU performance hint
 __attribute__((weak)) uint64_t dm_present_period_adapt(uint64_t period) { return period; }   // Android (perf_android.c): a longer period the frames can hold steadily
+__attribute__((weak)) uint64_t dm_present_period_peek(uint64_t period) { return period; }   // the same without taking the period as the game's (the float frame step's next hold)
 __attribute__((weak)) void dm_yield_top(char *out, size_t n) { if (n) snprintf(out, n, "-"); }   // hle_thread.c: the threads that yielded most since the last call; none in graphics unit tests
 __attribute__((weak)) void dm_thread_cpu(char *out, size_t n, double secs) { (void)secs; if (n) snprintf(out, n, "-"); }   // hle_thread.c: guest-thread CPU by Switch priority band since the last call
 void mtl_res_stats(char *out, size_t n);
@@ -1749,6 +1750,11 @@ static int fstep_on(void) { return fps_step_cap() != 0; }   // the host decides 
 static nvn_fstep g_fs;   // present thread only
 static nvn_fgpu g_fg;   // the GPU time at kmin and at the current hold (nvn_fstep_gpu_slowed)
 static _Atomic int g_fs_k;   // the hold presentation follows (0 = not decided yet)
+// Float frame step (patch_nso.py FRAME_STEP, fixups FSTEP_FLOAT: DARK SOULS: REMASTERED): the build's stubs step the game by the seconds in state +0x38 (0 = the game's own fixed
+// step). Written at the 60 cap only (nvn_fstepf_next: the next frame's present period, Android's adaptive 40 fps included, plus the debt paid back smoothly); at a 30 cap it
+// stays 0 and the stubs keep the game's own 1/30 and its 30 fps limiter
+__attribute__((weak)) int dm_fps_float;   // loader.c (fixups FSTEP_FLOAT); graphics unit tests have no loader
+static nvn_fstepf g_ff;   // present thread only
 // The display link runs at 30 Hz at a 30 cap, except while the game fixes its own step at 1 (BotW's VFR override)
 int nvn_game_fps(void) { int c = fps_step_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() - s >= 1000000000ull ? 30 : 60; }
 static void present_cfg(const win_t *o) {
@@ -1833,6 +1839,12 @@ static void fstep_tick(const win_t *o) {
     int cslow = fstep_cpu_slowed(o->presents), gslow = nvn_fstep_gpu_slowed(&g_fg, gpu, k0 ? k0 : kmin, kmin, pphase) && dm_thermal_now() <= 1 && !dm_low_power_now();   // same gates as the CPU's
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED); atomic_store(&g_fs_k, g_fs.k);
+    if (dm_fps_float) {   // the next frame's present period, as present_period takes it after this (hold k, then Android's adaptive rate)
+        float sec = 0;
+        if (c == 60) { uint64_t per = g_hz > 0 ? dm_present_period_peek((uint64_t)g_fs.k * 1000000000ull / (uint64_t)g_hz) : 0; sec = (float)(nvn_fstepf_next(&g_ff, shown, per ? per / v : g_fs.k) / 60); }
+        else g_ff.step = g_ff.debt = 0;   // the game's own 1/30: a return to 60 starts without the old debt
+        uint32_t b; memcpy(&b, &sec, sizeof b); __atomic_store_n((uint32_t *)(dm_fps_state + 0x38), b, __ATOMIC_RELAXED);
+    }
     held[g_fs.k]++; if (fixed) fixed_sum += (uint64_t)n;   // the stubs count only the host's steps
     static int fixed_was, nfix;
     if (fixed != fixed_was && nfix < 40) { nfix++; if (fixed) LOG("[nvn] frame step: the game fixes its own step at %d vsyncs at present %llu", fixed, (unsigned long long)o->presents); else LOG("[nvn] frame step: the game hands the step back to the host at present %llu", (unsigned long long)o->presents); }
@@ -1856,6 +1868,10 @@ static void fstep_tick(const win_t *o) {
                     (vs - v0) / 60.0, (t - t0) / 1e9, (vs - v0) / 60.0 / ((t - t0) / 1e9), (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)held[3],
                     (unsigned long long)g_fs.late, (unsigned long long)g_fs.paid, g_fs.dropped, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed);
         t0 = t; v0 = vs; memset(held, 0, sizeof held);
+        static double fg0, fr0;   // the float step's own sums (its stubs count nothing)
+        if (dm_fps_float && g_ff.real > fr0) LOG("[nvn] frame step (float): game time %.2f s in %.2f s of frames (%.3f of real time), last step %.2f ms, debt %.2f vsyncs, %.0f dropped",
+                                                 (g_ff.game - fg0) / 60, (g_ff.real - fr0) / 60, (g_ff.game - fg0) / (g_ff.real - fr0), g_ff.step * 1000 / 60, g_ff.debt, g_ff.dropped);
+        fg0 = g_ff.game; fr0 = g_ff.real;
     }
 }
 // DM_DYN_SCALE=<lowest scale, 0.5 to 0.95> (live, a DM_CTL "env" line or env.txt; 0 or unset = off): the host's dynamic resolution, through the render-scale stubs
