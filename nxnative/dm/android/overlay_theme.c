@@ -22,14 +22,15 @@ static uint8_t *asset(const char *name, size_t *n) {   // the whole asset, NUL-t
     return b;
 }
 
-// The overlay's font (pixel_font.h): read once, kept for good. Without it the overlay draws Latin-1 only, with the font built in (pixel_font_latin1.h)
-const uint8_t *dm_overlay_font(void) {
-    static int tried; static const uint8_t *f; if (tried) return f;
-    tried = 1; size_t n = 0; uint8_t *b = asset("font/ui.bin", &n);
-    if (b && n >= 8 && !memcmp(b, "NXPF", 4)) f = b;
-    else { free(b); f = PF_LATIN1; LOG("[RED] the APK has no overlay font (assets/font/ui.bin): the overlay draws Latin-1 only, Chinese, Japanese and Korean as boxes"); }
-    return f;
+// The overlay's font (pixel_font.h): read once, kept for good (pthread_once: the screen's thread and the data sync's thread both ask, the first of them while the other may be
+// asking too). Without it the overlay draws Latin-1 only, with the font built in (pixel_font_latin1.h)
+static const uint8_t *g_font; static pthread_once_t g_font_once = PTHREAD_ONCE_INIT;
+static void font_load(void) {
+    size_t n = 0; uint8_t *b = asset("font/ui.bin", &n);
+    if (b && n >= 8 && !memcmp(b, "NXPF", 4)) g_font = b;
+    else { free(b); g_font = PF_LATIN1; LOG("[RED] the APK has no overlay font (assets/font/ui.bin): the overlay draws Latin-1 only, Chinese, Japanese and Korean as boxes"); }
 }
+const uint8_t *dm_overlay_font(void) { pthread_once(&g_font_once, font_load); return g_font; }
 
 static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
 static uint8_t *png_rgba(const uint8_t *f, size_t n, int *pw, int *ph) {   // RGBA texels (malloc), NULL for a PNG of another kind
