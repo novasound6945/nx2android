@@ -65,10 +65,22 @@ static int jprop(jhttp *h, jobject c, const char *k, const char *v, char *why, s
     JNIEnv *E = h->E; jstring a = (*E)->NewStringUTF(E, k), b = a ? (*E)->NewStringUTF(E, v) : NULL; if (b) (*E)->CallVoidMethod(E, c, h->mProp, a, b);
     return jx(E, why, cap) || !b ? -1 : 0;
 }
-static int http_fetch(void *u, const char *rel, uint64_t from, uint64_t *start, int64_t *total, int *http, ds_sink sink, void *su) {
+static void jheader(jhttp *h, jobject C, const char *k, char *out, size_t cap) {   // a response header's value; "" when the answer has none (or one longer than cap - 1)
+    JNIEnv *E = h->E; out[0] = 0;
+    jstring n = (*E)->NewStringUTF(E, k); jstring v = n ? (*E)->CallObjectMethod(E, C, h->mHeader, n) : NULL;
+    if (jx(E, NULL, 0) || !v) return;
+    const char *s = (*E)->GetStringUTFChars(E, v, NULL); if (!s) { jx(E, NULL, 0); return; }
+    size_t len = strlen(s); if (len < cap) memcpy(out, s, len + 1);
+    (*E)->ReleaseStringUTFChars(E, v, s);
+}
+// cond / got (datasync.h ds_fetch_fn): files.json asked for only if it changed since the copy the app has. HttpURLConnection passes the headers as they are and returns
+// the server's 304 (setUseCaches(false), and the app installs no HttpResponseCache, that would answer it itself); a server that does not honour them answers 200 and
+// sends the list whole, as before
+static int http_fetch(void *u, const char *rel, uint64_t from, uint64_t *start, int64_t *total, int *http, const ds_val *cond, ds_val *got, ds_sink sink, void *su) {
     jhttp *h = u; JNIEnv *E = h->E; char url[2048], why[256] = "", rng[48]; static uint8_t chunk[256 << 10];
+    if (got) memset(got, 0, sizeof *got);
     if (ds_url(url, sizeof url, S.base, rel)) { LOG("[RED] data: the address of %s is too long", rel); return DS_ERR_SERVER; }
-    if ((*E)->PushLocalFrame(E, 32)) { jx(E, NULL, 0); return DS_ERR_NET; }
+    if ((*E)->PushLocalFrame(E, 48)) { jx(E, NULL, 0); return DS_ERR_NET; }
     int rc = DS_ERR_NET, probe = !strcmp(rel, DS_LIST);   // the list: short timeouts, so an app without the server starts the game soon (offline play)
     jobject U = (*E)->NewObject(E, h->cUrl, h->mUrl, (*E)->NewStringUTF(E, url)); jobject C = U && !jx(E, why, sizeof why) ? (*E)->CallObjectMethod(E, U, h->mOpen) : NULL;
     jobject in = NULL;
@@ -79,8 +91,12 @@ static int http_fetch(void *u, const char *rel, uint64_t from, uint64_t *start, 
     if (S.auth[0] && jprop(h, C, "Authorization", S.auth, why, sizeof why)) goto out;
     if (jprop(h, C, "Accept-Encoding", "identity", why, sizeof why)) goto out;   // the bytes as they are on the server: Range offsets and sizes are the file's
     if (from) { snprintf(rng, sizeof rng, "bytes=%llu-", (unsigned long long)from); if (jprop(h, C, "Range", rng, why, sizeof why)) goto out; }
+    if (cond && cond->etag[0] && jprop(h, C, "If-None-Match", cond->etag, why, sizeof why)) goto out;
+    if (cond && cond->modified[0] && jprop(h, C, "If-Modified-Since", cond->modified, why, sizeof why)) goto out;
     int code = (*E)->CallIntMethod(E, C, h->mCode); if (jx(E, why, sizeof why)) goto out;
     *http = code;
+    if (got && (code == 200 || code == 304)) { jheader(h, C, "ETag", got->etag, sizeof got->etag); jheader(h, C, "Last-Modified", got->modified, sizeof got->modified); }
+    if (code == 304 && cond) { *start = 0; *total = -1; rc = 0; goto out; }   // not modified: no body
     if (code == 206) {
         jstring cr = (*E)->CallObjectMethod(E, C, h->mHeader, (*E)->NewStringUTF(E, "Content-Range")); jx(E, NULL, 0);
         const char *s = cr ? (*E)->GetStringUTFChars(E, cr, NULL) : NULL; unsigned long long a = 0, b = 0, t = 0;

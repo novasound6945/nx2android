@@ -4,6 +4,10 @@
 // The player's own files stay: settings.txt is downloaded only when there is none; env.txt is the pack's with the rows the player added kept (ds_env_merge); a file the
 // server no longer lists is left alone. No Android here: the transport is a callback (front_android.c: java.net.HttpURLConnection through JNI) and a test on the computer
 // drives it with a folder (C:\d2rm\tools\easy-install\t_sync.c).
+// A launch with nothing new costs little also for a pack of many files (Tales of Eternia Remastered: 33,696 files, an 8.6 MB files.json downloaded and every file's
+// size read on the /sdcard at each launch kept the "connecting" screen up 10-15 s on a Retroid Pocket 6, 2026-11-15): the list is asked for only if it changed
+// (the ETag / Last-Modified of the copy the folder has, kept in files.json.etag: HTTP 304 instead of the list), and a folder whose list is the server's is checked
+// by a sample of its files (ds_sample), not by all of them.
 #ifndef DATASYNC_H
 #define DATASYNC_H
 #include <errno.h>
@@ -30,6 +34,7 @@ typedef struct stat ds_stat_t;
 #define DS_LIST "files.json"
 #define DS_PREV "files.json.prev"     // the list of the pack the folder held before a download started (its hashes save rehashing files that did not change)
 #define DS_ENV_PACK "env.pack.txt"    // the pack's env.txt as downloaded: the rows the player added are those of env.txt that are not here (ds_env_merge)
+#define DS_VAL "files.json.etag"      // the id of the folder's list, and the ETag and Last-Modified of the server's files.json it was taken from (ds_val_load)
 #define DS_MANIFEST "nx2a-data.json"
 enum { DS_DONE = 0, DS_UPTODATE, DS_OFFLINE, DS_ERR_NET, DS_ERR_SERVER, DS_ERR_PACKAGE, DS_ERR_SPACE, DS_ERR_DATA, DS_ERR_DISK };
 enum { DS_PH_CONNECT, DS_PH_CHECK, DS_PH_DOWNLOAD, DS_PH_FINISH };
@@ -205,7 +210,13 @@ static int ds_write(const char *path, const void *d, size_t n) {   // through <p
     int ok = fwrite(d, 1, n, f) == n; ok &= fflush(f) == 0; ok &= fclose(f) == 0;
     return ok && !ds_rename(t, path) ? 0 : -1;
 }
-static int64_t ds_size(const char *path) { ds_stat_t st; return ds_stat(path, &st) ? -1 : (st.st_mode & S_IFMT) == S_IFREG ? (int64_t)st.st_size : -2; }
+#ifdef DS_COUNT_STATS   // the test (t_sync.c) counts the files whose size is read: a sync of a pack that did not change reads a sample's, not every file's
+static long ds_stats;
+#define DS_STAT_COUNTED() (ds_stats++)
+#else
+#define DS_STAT_COUNTED() ((void)0)
+#endif
+static int64_t ds_size(const char *path) { DS_STAT_COUNTED(); ds_stat_t st; return ds_stat(path, &st) ? -1 : (st.st_mode & S_IFMT) == S_IFREG ? (int64_t)st.st_size : -2; }
 static int ds_mkdirs(char *path) {   // the folders of a file's path (path is restored)
     for (char *s = path + 1; *s; s++) if (*s == '/') { *s = 0; int r = ds_mkdir(path); int e = errno; *s = '/'; if (r && e != EEXIST) return -1; }
     return 0;
@@ -243,8 +254,12 @@ static int ds_source(const uint8_t *a, size_t n, char *url, size_t ucap, char *c
 // ---- the sync ----
 typedef int (*ds_sink)(void *u, const void *b, size_t n);   // 0 to go on
 // fetch: rel (a path in the pack, '/'-separated, not escaped) from byte from on; *start: where the data the sink gets begins (0 when the server sent the whole file);
-// *total: the file's size when known (else -1). Returns 0, DS_ERR_NET (no answer, a break), DS_ERR_SERVER (an HTTP error: *http its status)
-typedef int (*ds_fetch_fn)(void *u, const char *rel, uint64_t from, uint64_t *start, int64_t *total, int *http, ds_sink sink, void *su);
+// *total: the file's size when known (else -1). Returns 0, DS_ERR_NET (no answer, a break), DS_ERR_SERVER (an HTTP error: *http its status).
+// cond and got, for files.json only (NULL for the pack's files): cond, when not NULL, holds the validators of the copy the folder has, sent as If-None-Match and
+// If-Modified-Since (each when not ""); a server whose file is still that one answers HTTP 304: returned as 0 with *http 304, *start 0 and the sink not called.
+// got: the answer's ETag and Last-Modified, "" for one it has not (or one longer than the field)
+typedef struct { char etag[128], modified[64]; } ds_val;
+typedef int (*ds_fetch_fn)(void *u, const char *rel, uint64_t from, uint64_t *start, int64_t *total, int *http, const ds_val *cond, ds_val *got, ds_sink sink, void *su);
 typedef struct { int phase, files, file_no; uint64_t total, done, net; char file[256]; } ds_progress;   // net: bytes that came over the network (the speed); done also counts a resumed part's bytes
 typedef struct {
     const char *root, *package;                       // the files folder; the app's package (a list of another app's pack is refused)
@@ -264,22 +279,66 @@ static int ds_mem_sink(void *u, const void *b, size_t n) { ds_mem *m = u; if (m-
     if (m->n + n + 1 > m->cap) { size_t c = (m->n + n + 1) * 2; char *nb = realloc(m->b, c); if (!nb) return 1; m->b = nb; m->cap = c; }
     memcpy(m->b + m->n, b, n); m->n += n; m->b[m->n] = 0; return 0; }
 
-static int ds_list_load(const ds_ctx *c, const char *name, ds_list *l) {
-    char p[1100]; ds_path(p, sizeof p, c, name); size_t n; char *t = ds_read(p, &n, 256u << 20);
-    int r = t ? ds_parse(t, n, l) : -1; free(t); if (r) memset(l, 0, sizeof *l); return r;
+static int ds_list_load(const ds_ctx *c, const char *name, ds_list *l, char **raw, size_t *rn) {   // raw (when not NULL): the file's bytes, kept (malloc) when it parsed
+    char p[1100]; ds_path(p, sizeof p, c, name); size_t n = 0; char *t = ds_read(p, &n, 256u << 20);
+    int r = t ? ds_parse(t, n, l) : -1; if (r) memset(l, 0, sizeof *l);
+    if (raw && !r) { *raw = t; *rn = n; } else free(t);
+    return r;
 }
-static int ds_complete(const ds_ctx *c, const ds_list *l) {   // every file of the list in the folder at its size
+static int ds_file_ok(const ds_ctx *c, const ds_file *f) {   // the file in the folder at the list's size
     char p[1100];
+    if (!strcmp(f->path, "settings.txt")) return 1;   // the player's (it may have been rewritten since)
+    ds_path(p, sizeof p, c, ds_local_name(f->path));
+    if (ds_size(p) == (int64_t)f->size) return 1;
+    // a pack installed over adb (porter install) has the pack's env.txt as env.txt itself, and no env.pack.txt: Tales of Eternia Remastered so installed
+    // waited on its server's HTTP 404 (no pack published yet) instead of starting from its whole pack, 2026-11-15
+    if (!strcmp(f->path, "env.txt")) { ds_path(p, sizeof p, c, "env.txt"); if (ds_size(p) >= 0) return 1; }
+    return 0;
+}
+static int ds_complete(const ds_ctx *c, const ds_list *l) { for (int i = 0; i < l->n; i++) if (!ds_file_ok(c, &l->f[i])) return 0; return 1; }   // every file of the list
+// The folder's pack when the server's list is the folder's own (the same id, or HTTP 304): files.json is written after the last of its files, so the folder held every
+// one of them then. What may have gone since (a file removed by hand, a card's fault) is looked for in a sample, as ds_complete looks at each file: the DS_SAMPLE
+// largest files (the ones an interrupted copy cuts), DS_SAMPLE at even steps through the list (it is in path order: every part of the folder tree), and the two the
+// download writes last (env.txt, the manifest). At most 2 * DS_SAMPLE + 2 sizes read, not one per file (33,696 took 10-15 s on a Retroid Pocket 6's /sdcard); a pack
+// of up to 4 * DS_SAMPLE files has every file looked at. 1: the sample is there; 0: a file is missing (the caller then checks every file and downloads what is not
+// there). *looked: the files looked at, for the log
+#define DS_SAMPLE 32
+static int ds_sample(const ds_ctx *c, const ds_list *l, int *looked) {
+    *looked = 0;
+    if (l->n <= 4 * DS_SAMPLE) { *looked = l->n; return ds_complete(c, l); }
+    int big[DS_SAMPLE], nb = 0;   // the largest, largest first (an insertion into the short array: the list itself stays in its order)
     for (int i = 0; i < l->n; i++) {
-        if (!strcmp(l->f[i].path, "settings.txt")) continue;   // the player's (it may have been rewritten since)
-        ds_path(p, sizeof p, c, ds_local_name(l->f[i].path));
-        if (ds_size(p) == (int64_t)l->f[i].size) continue;
-        // a pack installed over adb (porter install) has the pack's env.txt as env.txt itself, and no env.pack.txt: Tales of Eternia Remastered so installed
-        // waited on its server's HTTP 404 (no pack published yet) instead of starting from its whole pack, 2026-11-15
-        if (!strcmp(l->f[i].path, "env.txt")) { ds_path(p, sizeof p, c, "env.txt"); if (ds_size(p) >= 0) continue; }
-        return 0;
+        uint64_t s = l->f[i].size; if (nb == DS_SAMPLE && s <= l->f[big[nb - 1]].size) continue;
+        int k = nb < DS_SAMPLE ? nb++ : nb - 1;
+        while (k && l->f[big[k - 1]].size < s) { big[k] = big[k - 1]; k--; }
+        big[k] = i;
     }
+    for (int k = 0; k < nb; k++) { ++*looked; if (!ds_file_ok(c, &l->f[big[k]])) return 0; }
+    for (int k = 0; k < DS_SAMPLE; k++) { ++*looked; if (!ds_file_ok(c, &l->f[(2 * (int64_t)k + 1) * l->n / (2 * DS_SAMPLE)])) return 0; }   // the middle of each step
+    for (int i = 0; i < l->n; i++)
+        if (!strcmp(l->f[i].path, "env.txt") || !strcmp(l->f[i].path, DS_MANIFEST)) { ++*looked; if (!ds_file_ok(c, &l->f[i])) return 0; }
     return 1;
+}
+
+// files.json.etag: "<id of the folder's list>\n<ETag>\n<Last-Modified>\n", the validators of the server's files.json that list was taken from, written once a sync
+// ends with that list (and removed when a download starts: the list is then files.json.prev). The id ties them to the list: validators of another list are not sent
+static int ds_val_text(const char *s) { for (; *s; s++) if ((unsigned char)*s < 0x20 || (unsigned char)*s > 0x7e) return 0; return 1; }   // a header value as it can be sent
+static int ds_val_load(const ds_ctx *c, const char *id, ds_val *v) {   // 1: the folder has validators for the list of that id
+    memset(v, 0, sizeof *v); char p[1100]; ds_path(p, sizeof p, c, DS_VAL); char *t = ds_read(p, NULL, 4096); if (!t) return 0;
+    char *a = strchr(t, '\n'), *b = a ? strchr(a + 1, '\n') : NULL, *e = b ? strchr(b + 1, '\n') : NULL;
+    int ok = e && a - t == 64 && !memcmp(t, id, 64) && (size_t)(b - a - 1) < sizeof v->etag && (size_t)(e - b - 1) < sizeof v->modified;
+    if (ok) { memcpy(v->etag, a + 1, (size_t)(b - a - 1)); memcpy(v->modified, b + 1, (size_t)(e - b - 1)); }
+    free(t);
+    ok = ok && (v->etag[0] || v->modified[0]) && ds_val_text(v->etag) && ds_val_text(v->modified);   // (one that cannot be sent would fail every request)
+    if (!ok) memset(v, 0, sizeof *v);
+    return ok;
+}
+static void ds_val_save(const ds_ctx *c, const char *id, const ds_val *v, const ds_val *had) {   // had: the folder's (NULL: none), not written again when the same
+    char p[1100], t[300]; ds_path(p, sizeof p, c, DS_VAL);
+    if (had && !strcmp(had->etag, v->etag) && !strcmp(had->modified, v->modified)) return;
+    if (!(v->etag[0] || v->modified[0]) || !ds_val_text(v->etag) || !ds_val_text(v->modified)) { remove(p); return; }   // a server without them: the list comes whole
+    int n = snprintf(t, sizeof t, "%s\n%s\n%s\n", id, v->etag, v->modified);
+    if (n <= 0 || (size_t)n >= sizeof t || ds_write(p, t, (size_t)n)) remove(p);   // without them the next sync downloads the list again: no harm
 }
 static int ds_hash_file(const char *path, char out[65], ds_ctx *c, uint64_t *done) {   // 0, or -1 when it cannot be read
     FILE *f = fopen(path, "rb"); if (!f) return -1;
@@ -365,7 +424,7 @@ static int ds_get(ds_ctx *c, const ds_file *f, const char *dst) {
     uint64_t start = 0; int64_t total = -1;
     ds_dl d = {fp, &s, c, (uint64_t)have, f->size, (uint64_t)have, 0, &start, part, 0};
     int rc = 0, http = 0;
-    if ((uint64_t)have < f->size) rc = c->fetch(c->fu, f->path, (uint64_t)have, &start, &total, &http, ds_dl_sink, &d);   // (the fetch sets start before its first sink call)
+    if ((uint64_t)have < f->size) rc = c->fetch(c->fu, f->path, (uint64_t)have, &start, &total, &http, NULL, NULL, ds_dl_sink, &d);   // (the fetch sets start before its first sink call)
     fp = d.f; if (!fp) { snprintf(c->err, sizeof c->err, "cannot write %s (errno %d)", part, errno); return DS_ERR_DISK; }
     int wbad = fflush(fp) || ferror(fp); fclose(fp);
     if (wbad) { snprintf(c->err, sizeof c->err, "cannot write %s (errno %d)", part, errno); return DS_ERR_DISK; }
@@ -382,12 +441,21 @@ static int ds_get(ds_ctx *c, const ds_file *f, const char *dst) {
 // c->err (DS_ERR_NET: try again later; a part already downloaded is kept)
 static int ds_sync(ds_ctx *c) {
     memset(&c->pr, 0, sizeof c->pr); c->err[0] = 0; c->pr.phase = DS_PH_CONNECT; ds_note(c);
-    ds_list local, prev, srv; int have_local = !ds_list_load(c, DS_LIST, &local), have_prev = !ds_list_load(c, DS_PREV, &prev);
+    ds_list local, prev, srv; char *lraw = NULL; size_t lrn = 0; int looked = 0;
+    int have_local = !ds_list_load(c, DS_LIST, &local, &lraw, &lrn), have_prev = !ds_list_load(c, DS_PREV, &prev, NULL, NULL);
+    ds_val cond, got; memset(&cond, 0, sizeof cond); memset(&got, 0, sizeof got);
+    int ask = have_local && ds_val_load(c, local.id, &cond);   // the list only if it is no longer the folder's
     ds_mem m = {NULL, 0, 0, 256u << 20}; uint64_t st = 0; int64_t tot = -1; int http = 0;
-    int rc = c->fetch(c->fu, DS_LIST, 0, &st, &tot, &http, ds_mem_sink, &m);
+    int rc = c->fetch(c->fu, DS_LIST, 0, &st, &tot, &http, ask ? &cond : NULL, &got, ds_mem_sink, &m);
     if (rc || st) {
-        free(m.b); m.b = NULL;
-        int whole = have_local && !strcmp(local.package, c->package) && ds_complete(c, &local);
+        free(m.b); m.b = NULL; free(lraw);
+        // the folder's list with no update begun after it (files.json.prev) is a whole pack by construction: a sample (ds_sample), and every file only when the sample
+        // misses one (then not offline) or with files.json.prev there. An offline start read every file's size: 10-15 s for 33,696 files on a Retroid Pocket 6's /sdcard
+        int whole = 0;
+        if (have_local && !strcmp(local.package, c->package)) {
+            if (!have_prev && ds_sample(c, &local, &looked)) { whole = 1; DS_LOG(c, "data: no server; the folder's pack, %d of its %d files looked at", looked, local.n); }
+            else whole = ds_complete(c, &local);
+        }
         if (!whole && !have_local && !have_prev) {   // a pack installed over adb (porter install): its manifest goes last, so with it the pack is whole
             char p[1100]; ds_path(p, sizeof p, c, DS_MANIFEST); size_t n; char *t = ds_read(p, &n, 1 << 20);
             char want[300]; snprintf(want, sizeof want, "\"package\": \"%s\"", c->package); whole = t && strstr(t, want); free(t);
@@ -397,9 +465,21 @@ static int ds_sync(ds_ctx *c) {
         if (have_prev) ds_free(&prev);
         return whole ? DS_OFFLINE : rc ? rc : DS_ERR_NET;
     }
-    if (ds_parse(m.b ? m.b : "", m.n, &srv)) { free(m.b); snprintf(c->err, sizeof c->err, "the server's " DS_LIST " is not a data pack's list"); rc = DS_ERR_SERVER; goto out0; }
+    int same = ask && http == 304;   // the server's list is still the folder's: not downloaded
+    if (same) {
+        int mine = !strcmp(local.package, c->package);
+        if (mine && ds_sample(c, &local, &looked)) {
+            DS_LOG(c, "data: the server's " DS_LIST " has not changed (HTTP 304); %d of the pack's %d files looked at", looked, local.n); rc = DS_UPTODATE; goto out0; }
+        if (mine) DS_LOG(c, "data: the server's " DS_LIST " has not changed (HTTP 304), but a file of the pack is missing: every file is checked");
+        free(m.b); m.b = lraw; m.n = lrn; lraw = NULL;   // the folder's list stands for the server's (the same bytes it sent then), the rest as for a list just downloaded
+    }
+    free(lraw); lraw = NULL;   // (only a 304 needs the folder's bytes: not kept through a download)
+    if (ds_parse(m.b ? m.b : "", m.n, &srv)) { snprintf(c->err, sizeof c->err, "the server's " DS_LIST " is not a data pack's list"); rc = DS_ERR_SERVER; goto out0; }   // (m.b is freed at out0)
     if (strcmp(srv.package, c->package)) { snprintf(c->err, sizeof c->err, "the server's data is for %.100s, not this app (%.100s)", srv.package, c->package); rc = DS_ERR_PACKAGE; goto out1; }
-    if (have_local && !strcmp(local.id, srv.id) && ds_complete(c, &srv)) { rc = DS_UPTODATE; goto out1; }
+    if (!same && have_local && !strcmp(local.id, srv.id) && ds_sample(c, &srv, &looked)) {   // the server's pack is the folder's
+        DS_LOG(c, "data: the server's " DS_LIST " lists the folder's pack; %d of its %d files looked at", looked, srv.n);
+        ds_val_save(c, srv.id, &got, ask ? &cond : NULL); rc = DS_UPTODATE; goto out1;   // its validators: the next sync asks for the list only if it changed
+    }
     // which files to download: not there at the list's size, or there at that size with another hash (the earlier list's, else the file's own)
     const ds_list *known = have_local ? &local : have_prev ? &prev : NULL;
     char *need = calloc((size_t)srv.n + 1, 1); char p[1100];
@@ -429,6 +509,7 @@ static int ds_sync(ds_ctx *c) {
     }
     if (have_local) {   // the folder is no longer one whole pack until the new list is written: an app without the server must not start a mix of two packs
         char a[1100], b[1100]; ds_path(a, sizeof a, c, DS_LIST); ds_path(b, sizeof b, c, DS_PREV); ds_rename(a, b);
+        ds_path(a, sizeof a, c, DS_VAL); remove(a);   // (the validators of the list that went)
     }
     c->pr.phase = DS_PH_DOWNLOAD; c->pr.total = want; c->pr.done = 0; c->pr.files = nneed; c->pr.file_no = 0; ds_note(c);
     // the pack's own files first; env.txt and the manifest last of all
@@ -454,9 +535,10 @@ finish:
     ds_path(p, sizeof p, c, DS_LIST);
     if (ds_write(p, m.b, m.n)) { snprintf(c->err, sizeof c->err, "cannot write " DS_LIST " (errno %d)", errno); rc = DS_ERR_DISK; goto out1; }
     ds_path(p, sizeof p, c, DS_PREV); remove(p);
+    ds_val_save(c, srv.id, same ? &cond : &got, NULL);   // after the list: validators beside a list they are not of are never sent (their id is checked)
     rc = nneed ? DS_DONE : DS_UPTODATE;
 out1: ds_free(&srv);
-out0: free(m.b);
+out0: free(m.b); free(lraw);
     if (have_local) ds_free(&local);
     if (have_prev) ds_free(&prev);
     return rc;
