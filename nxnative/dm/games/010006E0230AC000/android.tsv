@@ -5,7 +5,11 @@
 # its CRI output keeps only about 2 blocks queued, so AAudio's callbacks of up to 960 frames underran (11% of the sound was zero padding, heard as "weird" sound,
 # and the opening movie, paced by the sound, ran at 25 ms a frame) until the stream asked for 5 ms callbacks (dm/android/compat/audiotoolbox_aaudio.c).
 # The one red line at boot, ro::LookupModuleSymbol UnitySetGraphicsDevice, is Unity looking for an optional entry point in its native plugin NRO.
+# Update 2.1.0 (v131072), packed from porter's derived profile (+8 GB alias region, no per-build patch lost), on the Retroid Pocket 6 (Adreno 740, Turnip T30
+# through --vulkan-driver, graphics pipeline libraries), 2026-11-15: shader preparation 5.6 s (23,868 parts), the title (Ver.2.1.0, its update notice in Korean),
+# the opening and play by the user: 60 fps held (12,000 frames, worst p50 16.75 ms), GPU about 2.8 ms a frame (~50 draws), no colour flashes, nothing on screen
+# wrong. Its data pack is 33,696 files (5.4 GB, Unity bundles): publish it as one tar unpacked on the server
 status	playable
-tested	v65536 Lenovo Legion Y700 TB322FC (Snapdragon 8 Elite, Adreno 830, Android 16)
+tested	v131072 Retroid Pocket 6 (Snapdragon 8 Gen 2, Adreno 740, Turnip T30, Android 13)
 package	org.nx2a.talesofeternia
 orientation	landscape
