@@ -1,8 +1,8 @@
 # A data pack with bundles (android.tsv data_bundles): porter/datapack.py packs the small files of the game's trees into tar bundles, porter/publish.py lists them
 # (files.json format 2), and nxnative/dm/android/datasync.h (built on the computer: datasync_fixture.c, with a folder as the server) downloads what the folder lacks,
 # unpacks the bundles (downloaded, or pushed by porter install) and refuses what is not the list's. A pack without the row is checked to stay as it was.
-# python -m unittest tests.test_datasync (a C compiler as `cc`, else the sync's half is skipped)
-import hashlib, io, json, os, shutil, subprocess, sys, tarfile, tempfile, types, unittest
+# python -m unittest tests.test_datasync (a C compiler: $CC, else cc, clang or gcc; without one the sync's half is skipped, and says which names were tried)
+import atexit, hashlib, io, json, os, shutil, subprocess, sys, tarfile, tempfile, types, unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -13,7 +13,10 @@ from porter.upstream import BuildError   # noqa: E402
 PKG = 'org.nx2a.bundletest'
 MAX, SIZE = 2000, 24 * 1024   # files of at most 2,000 bytes into bundles of up to 24 KB: many bundles from a small pack
 BEFORE = '314fd85231d068bb91627761aa3a4a4137115917'   # the last datasync.h from before bundles (an app ported before them)
-CC = shutil.which('cc')
+CC_TRIED = [n for n in (os.environ.get('CC'), 'cc', 'clang', 'gcc') if n]   # the compiler: $CC, else the first of these on PATH
+CC = next((w for w in map(shutil.which, CC_TRIED) if w), None)
+NO_CC = f'no C compiler (tried {", ".join(CC_TRIED)})'
+UNPACKERS = 8   # DS_UNPACKERS of datasync.h (the harness is built with -DDS_PTHREADS)
 
 
 def blob(n, seed): return hashlib.shake_256(f'{seed}'.encode()).digest(n) if n else b''
@@ -43,7 +46,7 @@ def make_pack(t, name='Test-data', bundles=(MAX, SIZE), changed=None):
 _built = {}
 def fixture(old=False):   # the harness, once a run; old: with the datasync.h of BEFORE
     if old in _built: return _built[old]
-    d = Path(tempfile.mkdtemp(prefix='nx2a_dsfx_')); exe = d / ('fx.exe' if os.name == 'nt' else 'fx'); args = []
+    d = Path(tempfile.mkdtemp(prefix='nx2a_dsfx_')); atexit.register(shutil.rmtree, d, ignore_errors=True); exe = d / ('fx.exe' if os.name == 'nt' else 'fx'); args = []
     if old:
         r = subprocess.run(['git', '-C', str(REPO), 'show', f'{BEFORE}:nxnative/dm/android/datasync.h'], capture_output=True)
         if r.returncode: _built[old] = None; return None
@@ -55,8 +58,9 @@ def fixture(old=False):   # the harness, once a run; old: with the datasync.h of
     _built[old] = exe; return exe
 
 
-def sync(server, root, *a, old=False):
-    r = subprocess.run([str(fixture(old)), str(server), str(root), PKG, *map(str, a)], capture_output=True, text=True, encoding='utf-8')
+def sync(server, root, *a, old=False, timeout=None):   # timeout: seconds, else the test fails (a sync that does not end)
+    try: r = subprocess.run([str(fixture(old)), str(server), str(root), PKG, *map(str, a)], capture_output=True, text=True, encoding='utf-8', timeout=timeout)
+    except subprocess.TimeoutExpired: raise AssertionError(f'the sync did not end in {timeout} s (a loop)') from None
     lines = r.stdout.splitlines(); last = (lines or [''])[-1].split(' ', 10)
     if last[:1] != ['result']: return dict(result=None, text=r.stdout + r.stderr + f'\n(exit {r.returncode & 0xffffffff:#x})', fetched=[])
     return dict(result=last[1], files=int(last[3]), bytes=int(last[5]), space_need=int(last[7]), space_free=int(last[9]), err=last[10][4:] if len(last) > 10 else '', text=r.stdout,
@@ -148,7 +152,7 @@ class Pack(unittest.TestCase):
             with self.assertRaisesRegex(android_profile.ProfileError, 'data_bundles', msg=bad): android_profile.AndroidProfile(types.SimpleNamespace(id=g.name, dir=g, get=lambda k, d='': d))
 
 
-@unittest.skipUnless(CC, 'no C compiler (cc)')
+@unittest.skipUnless(CC, NO_CC)
 class Sync(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -226,14 +230,81 @@ class Sync(unittest.TestCase):
         self.assertEqual(x['result'], 'DONE', x['text']); self.whole(r); self.assertGreater(i, 3)
         self.assertLess(got, total + (i + 1) * (self.server / publish.FILES).stat().st_size + 1, 'bytes downloaded again')
 
+    def stray_root(self, name, manifest=True, list_format1=False):   # a files folder an install that stopped left: the bundles porter install pushes first, over an earlier pack's files
+        r = self.root(name); (r / 'RomFS').mkdir(); (r / 'RomFS' / 'old.bin').write_bytes(b'old')
+        shutil.copytree(self.server / 'bundles', r / 'bundles')
+        if manifest:   # the earlier, non-bundled pack's manifest: no "bundles" key
+            old = {'title_id': '0100000000B00000', 'name': 'Bundle Test', 'package': PKG, 'version': 'v0', 'files': 1, 'bytes': 1}
+            (r / datapack.MANIFEST).write_text(json.dumps(old, indent=2), encoding='utf-8')
+        if list_format1:   # the earlier pack's files.json (format 1: no bundles), with every file of it there
+            plain, files, _ = make_pack(self.t, 'plain-earlier', bundles=None)
+            for rel, b in files.items(): p = r / rel; p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(b)
+            shutil.copy(plain / publish.FILES, r / publish.FILES)
+        return r
+
+    def test_unfinished_install_is_not_whole(self):   # porter install pushed the bundles and stopped before files.json: the earlier pack's manifest (no "bundles" key), or a
+        # format 1 files.json, with the bundles folder is not a whole pack: no server (or none reachable), the bundles stay and the game does not start (ERR_LOCAL)
+        for label, kw in (('manifest', dict()), ('format1', dict(manifest=False, list_format1=True)), ('both', dict(list_format1=True))):
+            for mode in ('none', '-'):
+                r = self.stray_root(f'stray-{label}', **kw); before = sorted(p.name for p in (r / 'bundles').iterdir()); self.assertEqual(before, sorted(Path(b).name for b in self.bundles))
+                x = sync(mode, r); self.assertEqual(x['result'], 'ERR_LOCAL', (label, mode, x['text'])); self.assertIn('install the pack again', x['err'])
+                self.assertEqual(sorted(p.name for p in (r / 'bundles').iterdir()), before, f'{label} {mode}: the bundles were deleted')
+                self.assertEqual(sync(mode, r)['result'], 'ERR_LOCAL')   # (and at every start)
+
+    def test_unfinished_install_with_server(self):   # the same folders with a server: its list decides; the bundles in the folder are unpacked (none downloaded) and the folder is whole
+        for label, kw in (('manifest', dict()), ('format1', dict(manifest=False, list_format1=True))):
+            r = self.stray_root(f'stray-srv-{label}', **kw); x = sync(self.server, r)
+            self.assertEqual(x['result'], 'DONE', x['text']); self.assertFalse(set(self.bundles) & set(x['fetched']), x['text'])
+            self.assertEqual(tree(r, skip=('RomFS/old.bin',)), self.files); self.assertFalse((r / 'bundles').exists())   # (the earlier pack's old.bin is not the app's to delete)
+
+    def test_unfinished_install_same_list_as_server(self):   # a format 1 list the server has too (same id) with a bundles folder beside it: not taken for the folder's pack by a sample
+        # (the server's 304 or its same list), the folder is checked by that list and the bundles folder goes only after it
+        plain, files, fj1 = make_pack(self.t, 'plain-same', bundles=None); r = self.root('stray-same'); shutil.copytree(plain, r, dirs_exist_ok=True)
+        shutil.copytree(self.server / 'bundles', r / 'bundles'); self.assertEqual(sync('none', r)['result'], 'ERR_LOCAL')
+        x = sync(plain, r); self.assertIn(x['result'], ('DONE', 'UPTODATE'), x['text']); self.assertFalse((r / 'bundles').exists()); self.assertEqual(tree(r), files)
+
+    def test_killed_unpack(self):   # an unpack killed part way (a bundle taken out and deleted, another half taken out with its last file cut short, the rest untouched): the
+        # folder's list stands, so the rest is unpacked, with or without a server, and the bundles folder goes
+        for mode in ('none', 'server'):
+            r = self.pushed(f'killed-{mode}')
+            for k in (0, 1):
+                with tarfile.open(r / self.bundles[k], encoding='utf-8') as t:
+                    ms = [m for m in t if m.isreg()]
+                    if k == 1: ms = ms[:len(ms) // 2]
+                    for m in ms: p = r / m.name; p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(t.extractfile(m).read())
+                    if k == 1: last = r / ms[-1].name; b = last.read_bytes(); last.write_bytes(b[:len(b) // 2])
+            (r / self.bundles[0]).unlink()
+            x = sync('none' if mode == 'none' else self.server, r); self.assertIn(x['result'], ('OFFLINE', 'DONE', 'UPTODATE'), x['text']); self.whole(r)
+
+    def test_offline_success_has_no_error(self):   # a server that cannot be reached with a whole folder: the game starts, and no error text is left
+        r = self.root('offline-ok'); self.assertEqual(sync(self.server, r)['result'], 'DONE')
+        x = sync('-', r); self.assertEqual((x['result'], x['err']), ('OFFLINE', ''), x['text'])
+
     def test_space(self):   # not enough room: refused before anything is downloaded, with how much more is needed and how much is free (the screen says them in the
         # app's language: datasync_android.c); the room counted is what comes down and one bundle's files beside the bundles, with a margin of 64 MB
         x = sync(self.server, self.root('space'), '--free', 100_000); self.assertEqual(x['result'], 'ERR_SPACE', x['text']); self.assertEqual(x['fetched'], [publish.FILES])
-        sizes = [b['size'] for b in self.fj['bundles']]
-        want = sum(f['size'] for f in self.fj['files'] if 'bundle' not in f) + sum(sizes) + max(sizes) + (64 << 20)
+        sizes = [b['size'] for b in self.fj['bundles']]; par = min(UNPACKERS, len(sizes)); self.assertGreater(par, 1)
+        nfiles = len([f for f in self.fj['files'] if f['path'] != publish.FILES])
+        want = sum(f['size'] for f in self.fj['files'] if 'bundle' not in f) + sum(sizes) + par * max(sizes) + nfiles * 4096 + (64 << 20)
         self.assertEqual((x['space_need'], x['space_free']), (want - 100_000, 100_000), x['text'])
         self.assertIn(f'{(want - 100_000) / 2**30:.1f} GB more space is needed', x['err'])   # (the log's English, as before)
         y = sync(self.server, self.root('space2')); self.assertEqual((y['result'], y['space_need'], y['space_free']), ('DONE', 0, 0), y['text'])   # (room: none set)
+
+    def test_space_counts_the_bundles_unpacked_at_once(self):   # one bundle's room for each the unpackers take out at once (at most DS_UNPACKERS, or fewer bundles), and 4 KB for each file written
+        h = (REPO / 'nxnative/dm/android/datasync.h').read_text(encoding='utf-8')
+        self.assertRegex(h, rf'#define DS_UNPACKERS {UNPACKERS}'); self.assertRegex(h, r'#define DS_FILE_SLACK 4096')
+        from porter import install; self.assertEqual((install.UNPACKERS, install.FILE_SLACK, install.MARGIN), (UNPACKERS, 4096, 64 << 20))   # porter install counts the same
+        for name, bundles in (('few', (MAX, 80 * 1024)), ('one', (MAX, 600 * 1024))):   # fewer bundles than unpackers; a single bundle
+            s, _, fj = make_pack(self.t, f'space-{name}', bundles=bundles); sizes = [b['size'] for b in fj['bundles']]; par = min(UNPACKERS, len(sizes))
+            if name == 'few': self.assertTrue(1 < par < UNPACKERS, len(sizes))
+            else: self.assertEqual(par, 1)
+            nfiles = len([f for f in fj['files'] if f['path'] != publish.FILES])
+            want = sum(f['size'] for f in fj['files'] if 'bundle' not in f) + sum(sizes) + par * max(sizes) + nfiles * 4096 + (64 << 20)
+            x = sync(s, self.root(f'space-{name}-root'), '--free', 1); self.assertEqual((x['result'], x['space_need']), ('ERR_SPACE', want - 1), x['text'])
+        r = self.pushed('space-pushed')   # bundles in the folder, no server: no download counted, the bundles unpacked at once and the files written still are
+        x = sync('none', r, '--free', 1); sizes = [b['size'] for b in self.fj['bundles']]
+        nfiles = len([f for f in self.fj['files'] if 'bundle' in f])
+        self.assertEqual((x['result'], x['space_need']), ('ERR_SPACE', min(UNPACKERS, len(sizes)) * max(sizes) + nfiles * 4096 + (64 << 20) - 1), x['text'])
 
     def test_old_app(self):   # an app from before bundles on a pack with them: its first download is a bundled file's, an HTTP 404 it stops at, nothing else downloaded
         if not fixture(old=True): self.skipTest(f'no {BEFORE[:8]} in this clone')
@@ -250,7 +321,7 @@ class Sync(unittest.TestCase):
         self.assertEqual(sync(s, r)['result'], 'UPTODATE'); self.assertEqual(sync('-', r)['result'], 'OFFLINE')
 
 
-@unittest.skipUnless(CC, 'no C compiler (cc)')
+@unittest.skipUnless(CC, NO_CC)
 class Tar(unittest.TestCase):
     """Bundles that are not what porter writes: datasync.h takes only regular files with safe names, at the list's sizes, and every file the list puts in a bundle"""
     def setUp(self): self.t = Path(tempfile.mkdtemp(prefix='nx2a_test_tar_'))
@@ -300,6 +371,32 @@ class Tar(unittest.TestCase):
         s = self.server([('RomFS/a.bin', b'aa', tarfile.REGTYPE)]); p = s / 'bundles/b0000.tar'; b = bytearray(p.read_bytes()); b[0] ^= 1; p.write_bytes(bytes(b))
         fj = json.loads((s / publish.FILES).read_text()); fj['bundles'][0]['sha256'] = hashlib.sha256(bytes(b)).hexdigest(); (s / publish.FILES).write_text(json.dumps(fj))
         x = sync(s, self.root()); self.assertEqual(x['result'], 'ERR_DATA', x['text']); self.assertIn('damaged header', x['err'])
+
+    @staticmethod
+    def header(name, kind, size_field):   # a ustar header by hand: the size field as given (porter writes octal; GNU tar writes base-256 for a size past 8 GB)
+        h = bytearray(512); h[0:len(name)] = name.encode()
+        h[100:108] = b'0000644\0'; h[108:116] = b'0000000\0'; h[116:124] = b'0000000\0'
+        h[124:136] = size_field; h[136:148] = b'00000000000\0'; h[156:157] = kind; h[257:265] = b'ustar  \0'
+        h[148:156] = b' ' * 8; h[148:156] = b'%06o\0 ' % sum(h)
+        return bytes(h)
+
+    def raw_server(self, first):   # a bundle that begins with the header `first`, then a file a.bin (listed), then the end blocks
+        data = b'aa'; s = self.t / 'server'; shutil.rmtree(s, ignore_errors=True); (s / 'bundles').mkdir(parents=True)
+        body = first + self.header('RomFS/a.bin', b'0', b'%011o\0' % len(data)) + data + b'\0' * (512 - len(data)) + b'\0' * 1024
+        (s / 'bundles/b0000.tar').write_bytes(body)
+        fj = dict(format=2, id='ab' * 32, package=PKG, version='v0', display='1', variants=[], bytes=2, made='',
+                  bundles=[dict(path='bundles/b0000.tar', size=len(body), sha256=hashlib.sha256(body).hexdigest(), files=1, bytes=2)],
+                  files=[dict(path='RomFS/a.bin', size=2, sha256=hashlib.sha256(data).hexdigest(), bundle=0)])
+        (s / publish.FILES).write_text(json.dumps(fj), encoding='utf-8'); return s
+
+    def test_size_past_the_end(self):   # an entry whose size reaches past the bundle's end (base-256 2**64 - 512 once cast to -512 and the skip read the same header again, for ever; a
+        # size of 2**62 too): refused at once, whatever the entry's type (a folder, a file the list does not have)
+        for label, kind, size in (('neg512-dir', b'5', 2**64 - 512), ('neg512-unlisted', b'0', 2**64 - 512), ('huge-dir', b'5', 2**62), ('huge-unlisted', b'0', 2**62), ('max-dir', b'5', 2**64 - 1)):
+            name = 'RomFS/d/' if kind == b'5' else 'RomFS/zz.bin'
+            s = self.raw_server(self.header(name, kind, b'\x80' + size.to_bytes(11, 'big')))
+            x = sync(s, self.root(), timeout=15); self.assertEqual(x['result'], 'ERR_DATA', (label, x['text'])); self.assertIn('reaches past its end', x['err'])
+        s = self.raw_server(self.header('RomFS/d/', b'5', b'%011o\0' % 0))   # a folder entry of size 0 is fine (the control)
+        r = self.root(); x = sync(s, r, timeout=15); self.assertEqual(x['result'], 'DONE', x['text']); self.assertEqual((r / 'RomFS/a.bin').read_bytes(), b'aa')
 
     def test_newer_format(self):   # a list of a format this app does not know: refused, with what to do
         x = sync(self.server([('RomFS/a.bin', b'aa', tarfile.REGTYPE)], fmt=3), self.root())

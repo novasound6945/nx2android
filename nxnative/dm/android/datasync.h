@@ -334,6 +334,9 @@ static int ds_list_load(const ds_ctx *c, const char *name, ds_list *l, char **ra
 }
 // Whether the files folder has a bundles folder: bundles to unpack (pushed by porter install, or left by an unpack that stopped part way). One stat: the folder goes once empty
 static int ds_bundles_dir(const char *root) { char p[1100]; snprintf(p, sizeof p, "%s/" DS_BUNDLES, root); return ds_size(p) == -2; }
+// The same for a folder whose list has no bundles (or no list): one more stat at every start, of a directory and not of a file of the pack, so not counted with the sample's sizes
+// (DS_STAT_COUNTED: the tests hold the sample to its size)
+static int ds_bundles_dir_any(const char *root) { char p[1100]; ds_stat_t st; snprintf(p, sizeof p, "%s/" DS_BUNDLES, root); return !ds_stat(p, &st) && (st.st_mode & S_IFMT) != S_IFREG; }
 // Whether a folder with a list of bundles is not known to be whole: its bundles folder is there. That folder goes only once the folder holds every file (ds_clean_bundles),
 // so while it is there every file is checked (not a sample): an unpack that refused a bundle deleted it, and the files it held are missing until it comes again
 static int ds_pending(const ds_ctx *c, const ds_list *l) { return l->nb && ds_bundles_dir(c->root); }
@@ -517,6 +520,7 @@ static uint64_t ds_tar_num(const uint8_t *s, size_t n, int *bad) {   // a header
 #else
 #define DS_UNPACKERS 0
 #endif
+#define DS_FILE_SLACK 4096   // the space a file written takes beyond its bytes (f2fs: its node, and its last block rounded up), counted for each file to write (ds_apply)
 static int ds_hash_buf(const char *path, char out[65], uint8_t *b, size_t cap) {   // ds_hash_file with the caller's buffer and no progress (a thread of its own); 0 or -1
     FILE *f = fopen(path, "rb"); if (!f) return -1;
     ds_sha s; ds_sha_init(&s); size_t k;
@@ -532,7 +536,9 @@ typedef struct { void (*add)(void *u, uint64_t bytes, int files); void *u; char 
 // ending early, or a needed file not in it); DS_ERR_DISK; the reason in o->err. *wrote: the files written
 static int ds_untar(const ds_ctx *c, const ds_list *l, int k, char *need, const char *tar, int *wrote, uint8_t *buf, const ds_uout *o) {
     *wrote = 0; const char *bn = l->b[k].path;
-    FILE *t = fopen(tar, "rb"); if (!t) { snprintf(o->err, o->cap, "cannot read %s (errno %d)", bn, errno); return DS_ERR_DISK; }
+    int64_t tsz = ds_size(tar);   // the bundle file's size: no entry may reach past it (a size field of 2**64 - 512 made the skip seek back onto the same header: a loop)
+    FILE *t = tsz >= 0 ? fopen(tar, "rb") : NULL; if (!t) { snprintf(o->err, o->cap, "cannot read %s (errno %d)", bn, errno); return DS_ERR_DISK; }
+    uint64_t pos = 0;   // the bytes of the file passed so far (every entry's header, then its data padded to 512)
     int want = 0, lname = 0, rc = 0, step = 0; uint64_t bytes = 0; for (int i = 0; i < l->n; i++) want += l->f[i].bundle == k && need[i];
     uint8_t h[512]; char name[1024], dir[1100] = "", dst[1100];
 #define DS_TAR_BAD(...) do { snprintf(o->err, o->cap, __VA_ARGS__); rc = DS_ERR_DATA; goto out; } while (0)
@@ -542,8 +548,11 @@ static int ds_untar(const ds_ctx *c, const ds_list *l, int k, char *need, const 
         int zero = 1; for (int i = 0; i < 512 && zero; i++) zero = !h[i];
         if (zero) break;   // the end
         unsigned sum = 0; for (int i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? ' ' : h[i];
-        int bad = 0; uint64_t ck = ds_tar_num(h + 148, 8, &bad), size = ds_tar_num(h + 124, 12, &bad), padded = (size + 511) & ~(uint64_t)511;
+        int bad = 0; uint64_t ck = ds_tar_num(h + 148, 8, &bad), size = ds_tar_num(h + 124, 12, &bad);
         if (bad || ck != sum) DS_TAR_BAD("%s has a damaged header after %d files", bn, *wrote);
+        pos += 512;
+        if (size > (uint64_t)tsz - pos || ((size + 511) & ~(uint64_t)511) > (uint64_t)tsz - pos) DS_TAR_BAD("%s has an entry that reaches past its end (a size of %llu bytes)", bn, (unsigned long long)size);
+        uint64_t padded = (size + 511) & ~(uint64_t)511; pos += padded;   // (no overflow: size is at most what is left of the file)
         char type = (char)h[156];
         if (type == 'L') {   // a GNU long name, the next entry's
             if (!size || size >= sizeof name || fread(name, 1, (size_t)padded, t) != padded) DS_TAR_BAD("%s has a damaged long name", bn);
@@ -623,12 +632,13 @@ static void *ds_unpacker(void *a) {
         if (k < 0) break;
         const ds_bundle *b = &l->b[k]; ds_path(p, sizeof p, c, b->path); hex[0] = 0;
         if (u->bs[k] == 1 && (ds_hash_buf(p, hex, buf, 1 << 20) || strcmp(hex, b->sha))) {   // the folder's bundle: not the list's (another pack's, or damaged)
-            DS_LOG(c, "data: %s in the folder is not the list's (SHA-256 %.16s, not %.16s): deleted", b->path, hex, b->sha); remove(p);
+            DS_LOG(c, "data: %s in the folder is not the list's (SHA-256 %.16s, not %.16s): deleted", b->path, hex, b->sha);
+            if (remove(p)) DS_LOG(c, "[RED] data: cannot delete %s (errno %d)", b->path, errno);
             ds_upk_lock(u, 1); u->bs[k] = 4; ds_upk_lock(u, 0); continue;
         }
         ds_uout o = {ds_upk_add, u, err, sizeof err}; int n = 0;
         int r = ds_untar(c, l, k, u->need, p, &n, buf, &o);
-        if (!r || r == DS_ERR_DATA) remove(p);   // (taken out; or not what the list says, downloaded again by the next try)
+        if ((!r || r == DS_ERR_DATA) && remove(p)) DS_LOG(c, "[RED] data: cannot delete %s (errno %d)", b->path, errno);   // (taken out; or not what the list says, downloaded again by the next try)
         ds_upk_lock(u, 1); u->got += n; if (r && !u->rc) { u->rc = r; snprintf(u->err, sizeof u->err, "%s", err); } ds_upk_lock(u, 0);
         if (r) DS_LOG(c, "data: %s", err);
     }
@@ -652,8 +662,11 @@ static void ds_unpack_all(ds_upk *u) {   // every bundle of bs 1 or 3, by DS_UNP
 static void ds_clean_bundles(const ds_ctx *c) {   // the folder is whole: what is left in the bundles folder (a bundle none of whose files was needed, an older pack's, a part) goes, then the folder
     char d[1100], p[1400]; ds_path(d, sizeof d, c, DS_BUNDLES);
     DIR *dir = opendir(d); if (!dir) return;
-    for (struct dirent *e; (e = readdir(dir));) if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) { snprintf(p, sizeof p, "%s/%s", d, e->d_name); remove(p); }
-    closedir(dir); ds_rmdir(d);
+    for (struct dirent *e; (e = readdir(dir));) if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) {
+        snprintf(p, sizeof p, "%s/%s", d, e->d_name);
+        if (remove(p)) DS_LOG(c, "[RED] data: cannot delete %s (errno %d)", p, errno);
+    }
+    closedir(dir); if (ds_rmdir(d)) DS_LOG(c, "[RED] data: cannot delete %s (errno %d)", d, errno);
 }
 
 // The files of list l the folder lacks or holds with other bytes (not there at l's size, or there at that size with another hash: known's, the folder's list or the one
@@ -702,7 +715,10 @@ static int ds_apply(ds_ctx *c, const ds_list *l, const ds_list *known, const cha
                 nneed, l->n, nown, want / 1048576.0, nmem, nbloc + nbdl, unpack / 1048576.0, nbloc, nbdl, bwant / 1048576.0, parts / 1048576.0);
     if (!nneed) goto out;
     if (c->free_bytes) {   // what comes down, and one bundle's files beside the bundles (each bundle is deleted once its files are out)
-        uint64_t fr = c->free_bytes(c->bu, c->root), need_b = (fetch ? want + bwant - parts : 0) + maxb + (64u << 20);
+        // what comes down; the bundles being taken out at once (DS_UNPACKERS of them, or fewer when there are fewer), each beside its files before it is deleted (the largest is
+        // counted for each); f2fs's node and block rounding for every file written (DS_FILE_SLACK); a margin. porter/install.py install() counts the same (its UNPACKERS, SLACK, MARGIN)
+        uint64_t par = (uint64_t)(DS_UNPACKERS ? DS_UNPACKERS : 1); if (par > (uint64_t)(nbloc + nbdl)) par = (uint64_t)(nbloc + nbdl);
+        uint64_t fr = c->free_bytes(c->bu, c->root), need_b = (fetch ? want + bwant - parts : 0) + par * maxb + (uint64_t)nneed * DS_FILE_SLACK + (64u << 20);
         if (fr < need_b) {
             c->space_need = need_b - fr; c->space_free = fr;
             snprintf(c->err, sizeof c->err, "%.1f GB more space is needed; the device has %.1f GB free", (need_b - fr) / 1073741824.0, fr / 1073741824.0); rc = DS_ERR_SPACE; goto out;
@@ -742,7 +758,7 @@ static int ds_apply(ds_ctx *c, const ds_list *l, const ds_list *known, const cha
                 if (rc) { free(buf); DS_LOG(c, "data: %s", c->err); goto out; }
                 char err[256]; ds_uout o = {ds_upk_add, &u, err, sizeof err}; int n = 0;   // (u: no threads now, its lock unused)
                 rc = ds_untar(c, l, k, need, p, &n, buf, &o); *got += n;
-                if (!rc || rc == DS_ERR_DATA) remove(p);
+                if ((!rc || rc == DS_ERR_DATA) && remove(p)) DS_LOG(c, "[RED] data: cannot delete %s (errno %d)", b->path, errno);
                 if (rc) { free(buf); snprintf(c->err, sizeof c->err, "%s", err); DS_LOG(c, "data: %s", c->err); goto out; }
             }
             free(buf);
@@ -787,6 +803,10 @@ static int ds_sync(ds_ctx *c) {
     ds_list local, prev, srv; char *lraw = NULL; size_t lrn = 0; int looked = 0;
     int have_local = !ds_list_load(c, DS_LIST, &local, &lraw, &lrn), have_prev = !ds_list_load(c, DS_PREV, &prev, NULL, NULL);
     int pending = have_local && ds_pending(c, &local);   // bundles in the folder (porter install's, or an unpack that stopped): their files are taken out before the game starts
+    // A bundles folder with no list of bundles beside it (none, or one of format 1) is an install that has not finished (porter install pushes the bundles first, files.json
+    // and the manifest after): its pack is not known to be whole, and the folder is neither taken for whole nor deleted (that would delete the bundles the install pushed). Only
+    // a server's list (below), which the files are then made right by, decides what the folder holds
+    int stray = !pending && ds_bundles_dir_any(c->root);
     ds_val cond, got; memset(&cond, 0, sizeof cond); memset(&got, 0, sizeof got);
     int ask = have_local && ds_val_load(c, local.id, &cond);   // the list only if it is no longer the folder's
     ds_mem m = {NULL, 0, 0, 256u << 20}; uint64_t st = 0; int64_t tot = -1; int http = 0;
@@ -796,7 +816,11 @@ static int ds_sync(ds_ctx *c) {
         // the folder's list with no update begun after it (files.json.prev) is a whole pack by construction: a sample (ds_sample), and every file only when the sample
         // misses one (then not offline) or with files.json.prev there. An offline start read every file's size: 10-15 s for 33,696 files on a Retroid Pocket 6's /sdcard
         int whole = 0, why = 0;
-        if (have_local && !strcmp(local.package, c->package)) {
+        if (stray) {
+            snprintf(c->err, sizeof c->err, "the files folder has bundles, but no list of them beside it: the install did not finish, install the pack again");
+            DS_LOG(c, "data: %s", c->err); why = DS_ERR_LOCAL;
+        }
+        else if (have_local && !strcmp(local.package, c->package)) {
             if (pending) {   // its bundles taken out, from the folder alone; whole once every file of the list is there
                 int n = 0; why = ds_apply(c, &local, &local, NULL, 0, &n); whole = !why;
                 if (whole) DS_LOG(c, "data: no server; %d files taken out of the bundles in the folder", n);
@@ -804,24 +828,25 @@ static int ds_sync(ds_ctx *c) {
             else if (!have_prev && ds_sample(c, &local, &looked)) { whole = 1; DS_LOG(c, "data: no server; the folder's pack, %d of its %d files looked at", looked, local.n); }
             else whole = ds_complete(c, &local);
         }
-        if (!whole && !have_local && !have_prev) {   // a pack installed over adb (porter install): its manifest goes last, so with it the pack is whole (a pack with bundles: only
+        if (!whole && !stray && !have_local && !have_prev) {   // a pack installed over adb (porter install): its manifest goes last, so with it the pack is whole (a pack with bundles: only
             // by its files.json, which porter install pushes before the manifest, once the bundles are unpacked)
             char p[1100]; ds_path(p, sizeof p, c, DS_MANIFEST); size_t n; char *t = ds_read(p, &n, 1 << 20);
             char want[300]; snprintf(want, sizeof want, "\"package\": \"%s\"", c->package); whole = t && strstr(t, want) && !strstr(t, "\"bundles\":"); free(t);
         }
         if (whole) ds_clean_bundles(c);   // (what an older pack left there: else an APK without a server would run this at every launch)
-        if (!why || why == DS_ERR_LOCAL) {
+        if (!stray && (!why || why == DS_ERR_LOCAL)) {
             if (c->fetch) snprintf(c->err, sizeof c->err, rc == DS_ERR_SERVER ? "the server answered HTTP %d for " DS_LIST : "the server could not be reached", http);
             else if (!why) snprintf(c->err, sizeof c->err, "the files folder does not hold the whole pack, and there is no server: install the pack again");
         }
+        if (whole) c->err[0] = 0;   // (the game starts: nothing to say, not even that the server could not be reached)
         if (have_local) ds_free(&local);
         if (have_prev) ds_free(&prev);
-        return whole ? DS_OFFLINE : why && why != DS_ERR_LOCAL ? why : !c->fetch ? DS_ERR_LOCAL : rc ? rc : DS_ERR_NET;
+        return whole ? DS_OFFLINE : stray ? DS_ERR_LOCAL : why && why != DS_ERR_LOCAL ? why : !c->fetch ? DS_ERR_LOCAL : rc ? rc : DS_ERR_NET;
     }
     int same = ask && http == 304;   // the server's list is still the folder's: not downloaded
     if (same) {
         int mine = !strcmp(local.package, c->package);
-        if (mine && !pending && ds_sample(c, &local, &looked)) {
+        if (mine && !pending && !stray && ds_sample(c, &local, &looked)) {
             DS_LOG(c, "data: the server's " DS_LIST " has not changed (HTTP 304); %d of the pack's %d files looked at", looked, local.n); rc = DS_UPTODATE; goto out0; }
         if (mine) DS_LOG(c, pending ? "data: the server's " DS_LIST " has not changed (HTTP 304); the folder has bundles to unpack" :
                          "data: the server's " DS_LIST " has not changed (HTTP 304), but a file of the pack is missing: every file is checked");
@@ -831,7 +856,7 @@ static int ds_sync(ds_ctx *c) {
     if (ds_parse(m.b ? m.b : "", m.n, &srv)) { snprintf(c->err, sizeof c->err, "the server's " DS_LIST " is not a data pack's list"); rc = DS_ERR_SERVER; goto out0; }   // (m.b is freed at out0)
     if (srv.format > DS_FORMAT) { snprintf(c->err, sizeof c->err, "the server's " DS_LIST " is format %d; this app reads up to format %d: install the APK ported with that pack", srv.format, DS_FORMAT); rc = DS_ERR_SERVER; goto out1; }
     if (strcmp(srv.package, c->package)) { snprintf(c->err, sizeof c->err, "the server's data is for %.100s, not this app (%.100s)", srv.package, c->package); rc = DS_ERR_PACKAGE; goto out1; }
-    if (!same && have_local && !pending && !strcmp(local.id, srv.id) && ds_sample(c, &srv, &looked)) {   // the server's pack is the folder's
+    if (!same && have_local && !pending && !stray && !strcmp(local.id, srv.id) && ds_sample(c, &srv, &looked)) {   // the server's pack is the folder's
         DS_LOG(c, "data: the server's " DS_LIST " lists the folder's pack; %d of its %d files looked at", looked, srv.n);
         ds_val_save(c, srv.id, &got, ask ? &cond : NULL); rc = DS_UPTODATE; goto out1;   // its validators: the next sync asks for the list only if it changed
     }

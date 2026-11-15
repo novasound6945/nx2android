@@ -167,7 +167,8 @@ static void draw(canvas *c, const ds_progress *p, int status, int wait_s, const 
                       : status == DS_ERR_LOCAL ? (ko ? "기기에 있는 게임 데이터가 모자랍니다. 다시 설치해 주세요" : "The game data on the device is incomplete: install it again")
                       : status == DS_ERR_SPACE ? (ko ? "저장 공간이 부족합니다" : "Not enough storage space")
                       : status == DS_ERR_PACKAGE ? (ko ? "서버의 데이터가 이 앱의 것이 아닙니다" : "The server's data is not this app's")
-                      : status == DS_ERR_DATA ? (ko ? "받은 파일이 손상되었습니다. 다시 받습니다" : "A downloaded file was damaged; it is downloaded again")
+                      : status == DS_ERR_DATA ? (!S.base[0] ? (ko ? "기기에 있는 묶음 파일이 손상되었습니다. 다시 설치해 주세요" : "A bundle on the device is damaged: install the pack again")
+                                                      : ko ? "받은 파일이 손상되었습니다. 다시 받습니다" : "A downloaded file was damaged; it is downloaded again")
                       : status == DS_ERR_DISK ? (ko ? "파일을 쓸 수 없습니다" : "A file cannot be written") : (ko ? "서버 오류" : "Server error");
         ctext(c, w, y, 2, RGB(255, 150, 120)); y += 22;
         if (msg[0]) { ctext(c, msg, y, 1, RGB(200, 140, 120)); y += 16; }
@@ -299,11 +300,16 @@ static void *sync_thread(void *a) {
             if (c.pr.phase == DS_PH_DOWNLOAD && c.pr.done) delay = 2;   // it moved on: the next break waits from the start again
             LOG("[RED] data: try %d failed (%d): %s; again in %d s", round, rc, c.err, delay);
             char msg[256]; snprintf(msg, sizeof msg, "%s", c.err);   // (the log keeps c.err in English; the screen says how much space in the app's language)
-            if (rc == DS_ERR_SPACE && korean()) snprintf(msg, sizeof msg, "%.1fGB가 더 필요합니다 (남은 공간 %.1fGB)", c.space_need / 1073741824.0, c.space_free / 1073741824.0);
+            if (rc == DS_ERR_SPACE) {   // (under 0.1 GB short: MB, else it would say 0.0 GB more)
+                double more = c.space_need / 1073741824.0, fr = c.space_free / 1073741824.0;
+                if (more < 0.1) { if (korean()) snprintf(msg, sizeof msg, "%.0fMB가 더 필요합니다 (남은 공간 %.1fGB)", c.space_need / 1048576.0, fr); else snprintf(msg, sizeof msg, "%.0f MB more space is needed; the device has %.1f GB free", c.space_need / 1048576.0, fr); }
+                else if (korean()) snprintf(msg, sizeof msg, "%.1fGB가 더 필요합니다 (남은 공간 %.1fGB)", more, fr);
+            }
             for (int s = delay; s > 0; s--) { pthread_mutex_lock(&S.mu); S.status = rc; S.wait_s = s; snprintf(S.msg, sizeof S.msg, "%s", msg); pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); sleep(1); }
             delay = rc == DS_ERR_PACKAGE || rc == DS_ERR_SPACE || rc == DS_ERR_LOCAL ? 30 : delay * 2 > 60 ? 60 : delay * 2;   // (DS_ERR_LOCAL: until an install pushes what is missing)
         }
-        LOG("%s", rc == DS_DONE ? "data: downloaded, the files folder holds the server's pack" : rc == DS_UPTODATE ? "data: the files folder holds the server's pack already"
+        LOG("%s", rc == DS_DONE ? c.pr.net ? "data: downloaded, the files folder holds the server's pack"
+            : "data: unpacked the bundles in the folder, the files folder holds the server's pack" : rc == DS_UPTODATE ? "data: the files folder holds the server's pack already"
             : "data: no server, the files folder holds a whole pack: the game starts with it");
         if (net) {
             if (h.buf) (*h.E)->DeleteGlobalRef(h.E, h.buf);

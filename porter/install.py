@@ -21,6 +21,10 @@ APP = 'app'                                                  # --romfs-at app: t
 ROMFS_MARK = '# porter install --romfs-at'                   # in the device's env.txt: the DM_ROMFS row under it is the installer's, carried over by later installs
 ACCESS = 'android.permission.MANAGE_EXTERNAL_STORAGE'        # All files access, which the APK asks for (mkapk.py) and the installer grants
 ACCESS_HOW = 'Settings > Apps > {name} > All files access (Android 10: Permissions > Files and media)'
+# The room a pack with bundles needs beyond what is pushed, as the app counts it before it unpacks (nxnative/dm/android/datasync.h ds_apply: DS_UNPACKERS, DS_FILE_SLACK and its
+# 64 MB margin; keep the three the same): the bundles unpacked at once each beside its files, f2fs's node and block rounding for every file written, a margin
+UNPACKERS, FILE_SLACK, MARGIN = 8, 4096, 64 << 20
+LIST_FILES = (publish.FILES, publish.FILES + '.etag', publish.FILES + '.prev', datapack.MANIFEST)   # what tells the app a pack is whole: the list (with its validators and the one before it), the manifest
 SAMPLE_FILES, SAMPLE_MAX = 256, 4 << 20                      # the folder's content check: up to this many of its files, each of at most this many bytes (romfs_sample)
 
 
@@ -164,8 +168,9 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
         elif bund:   # the bundles it pushes and the files it pushes on their own, and room for one bundle's files while the app unpacks (each bundle goes once its files are out)
             bneed, bthere = bundle_plan(fj, have)
             loose = [f for f in fj['files'] if 'bundle' not in f]
+            nwrite = sum(1 for f in fj['files'] if have.get(f['path']) != f['size'])   # the files the device lacks at their size: written by the push or by the unpacking
             need = sum(fj['bundles'][k]['size'] for k in bneed if k not in bthere) + sum(f['size'] for f in loose if have.get(f['path']) != f['size']) \
-                + max((fj['bundles'][k]['size'] for k in bneed), default=0)
+                + min(UNPACKERS, len(bneed)) * max((fj['bundles'][k]['size'] for k in bneed), default=0) + nwrite * FILE_SLACK + MARGIN
         else: need = man['bytes'] - sum(have.values())
         if free is not None and need > free: raise BuildError(f'the device has {free / 2**30:.1f} GB free; the game needs {need / 2**30:.1f} GB more')
         if target and not replace_signer and adb.installed(man['package']):   # an update: the grant (the app's uid's, which the update keeps) before the APK goes in
@@ -188,6 +193,9 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
             say(f'{state}: the app reads its RomFS from {target}')
         PROG.set(step='pushing the game data', done=0, total=man['bytes'] - sum(rom.values()), unit='B'); pushing = True
         have = adb.remote_sizes(files)   # again: an install with --replace-signer uninstalls first, and Android deletes the files folder with the app
+        if bund:   # the list and the manifest first: a device whose install stops after the bundles went in then has neither, so the app cannot take the folder for a whole pack
+            # (and delete the bundles); it says the install did not finish. They are written again at the end, the list first
+            adb.shell(f'cd {shlex.quote(files)} && rm -f ' + ' '.join(LIST_FILES))
         base, bkeep = push_bundles(adb, data, files, fj, have, lambda d, t, note: PROG.set(done=d, total=t, note=note)) if bund else (0, set())
         adb.push_tree(data, files, keep=datapack.KEEP_ON_DEVICE, skip=(datapack.MANIFEST,) + (('env.txt',) if target else ()) + ((publish.FILES,) if bund else ()),
                       exclude=(datapack.ROMFS,) if target else (datapack.BUNDLES,) if bund else (),
@@ -207,7 +215,13 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
         if bund:   # the pack's files are its list's (the bundled ones are not in the pack folder); a bundle the device has that the app does not need goes too
             listed = {f['path'] for f in fj['files']}
             stale = [rel for rel in have if (datapack.owned(rel) and rel not in listed) or (rel.startswith(datapack.BUNDLES + '/') and rel not in bkeep)]
-        else: stale = [rel for rel in have if datapack.owned(rel) and not (target and rel.startswith(datapack.ROMFS + '/')) and not (data / rel).is_file()]   # the push only adds the pack's own files, which are never stale
+        else:
+            stale = [rel for rel in have if datapack.owned(rel) and not (target and rel.startswith(datapack.ROMFS + '/')) and not (data / rel).is_file()]   # the push only adds the pack's own files, which are never stale
+            # a pack without bundles over a device that holds one with (or the app's own download of bundles): the bundles folder is of no use, and a list that names bundles must
+            # not stay (a pack with a files.json of its own writes it above; the manifest is the pack's, written last). check=False: a folder the app made is its own, adb cannot empty it
+            if any(r.startswith(datapack.BUNDLES + '/') for r in have): adb.shell(f'rm -rf {shlex.quote(f"{files}/{datapack.BUNDLES}")}', timeout=1200, check=False)
+            if not (data / publish.FILES).is_file() and any(r in have for r in LIST_FILES[:3]):
+                adb.shell(f'cd {shlex.quote(files)} && rm -f ' + ' '.join(LIST_FILES[:3]))
         if stale:   # an older version's files, which the game would still find
             PROG.set(step=f'removing {len(stale):,} stale files')
             for i in range(0, len(stale), 64): adb.shell(f'cd {shlex.quote(files)} && rm -f ' + ' '.join(shlex.quote(r) for r in stale[i:i + 64]))

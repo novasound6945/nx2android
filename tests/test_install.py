@@ -203,6 +203,21 @@ class RomfsAt(unittest.TestCase):
         dev = self.run_on(Device(rom, installed=True), romfs_at=DUMP)   # granted before the APK
         self.assertLess(dev.step('shell', 'appops set'), dev.step('install'))
 
+    def test_bundles_left_by_an_earlier_pack(self):   # a pack without bundles over a device that holds one with: its bundles folder goes, and a list the pack does not bring (files.json,
+        # its validators, the one before) goes with it; a pack with a files.json of its own leaves the list to its own push
+        old = {f'{FILES}/bundles/b0000.tar': 9, f'{FILES}/bundles/b0001.tar.part': 3, f'{FILES}/files.json': 5, f'{FILES}/files.json.etag': 5, f'{FILES}/files.json.prev': 5, f'{FILES}/log.txt': 9}
+        dev = self.run_on(Device(old))
+        self.assertFalse([k for k in dev.fs if '/bundles/' in k]); self.assertIn(f'{FILES}/log.txt', dev.fs)
+        rm = [o[1] for o in dev.ops if o[0] == 'shell' and o[1].startswith('cd ') and 'rm -f' in o[1]]
+        self.assertEqual(len(rm), 1); self.assertEqual(set(rm[0].split()) & {'files.json', 'files.json.etag', 'files.json.prev', datapack.MANIFEST}, {'files.json', 'files.json.etag', 'files.json.prev'})
+        self.assertNotIn(datapack.MANIFEST, rm[0].split())   # (the pack's manifest is pushed last)
+        (self.data / 'files.json').write_text('{}', encoding='utf-8')   # a pack with a list of its own (a format 1 one)
+        dev = self.run_on(Device(old)); self.assertFalse([k for k in dev.fs if '/bundles/' in k])
+        self.assertEqual([o for o in dev.ops if o[0] == 'shell' and 'rm -f' in o[1] and 'files.json' in o[1]], [])
+        self.assertTrue(dev.step('push_tree', FILES) >= 0)   # (files.json goes with the pack's other files)
+        dev = self.run_on(Device({f'{FILES}/log.txt': 9}))   # nothing to clear on a device without them: no command
+        self.assertEqual([o for o in dev.ops if o[0] == 'shell' and ('bundles' in o[1] or 'rm -f' in o[1])], [])
+
     def test_free_space(self):   # the RomFS in another folder needs no room in the files folder
         rom = sum(ROM.values())
         self.run_on(Device({f'{DUMP}/{r}': n for r, n in ROM.items()}, free=self.bytes - rom), romfs_at=DUMP)
@@ -288,6 +303,32 @@ class Bundles(unittest.TestCase):
         dev = Locked({f'{FILES}/bundles/b0000.tar.part': 5})
         with self.assertRaisesRegex(BuildError, 'made by the app itself'): self.run_on(dev)
         self.assertEqual([o for o in dev.ops if o[0] == 'push_whole'], [])
+
+    def test_list_and_manifest_go_before_the_bundles(self):   # the device's files.json (and its validators, and the one before) and manifest are deleted before the first bundle is
+        # pushed: an install that stops after the bundles then leaves a device the app cannot take for a whole pack; the list and the manifest are written again at the end
+        old = {f'{FILES}/{n}': 5 for n in ('files.json', 'files.json.etag', 'files.json.prev', datapack.MANIFEST)}
+        dev = self.run_on(Device(old | {f'{FILES}/log.txt': 9}))
+        rm = next(i for i, o in enumerate(dev.ops) if o[0] == 'shell' and o[1].startswith('cd ') and 'rm -f' in o[1] and datapack.MANIFEST in o[1]); cmd = dev.ops[rm][1]
+        for n in ('files.json', 'files.json.etag', 'files.json.prev', datapack.MANIFEST): self.assertIn(n, cmd.split())
+        self.assertNotIn('log.txt', cmd)
+        first = dev.step('push_whole'); self.assertGreater(first, rm)
+        self.assertLess(rm, min(dev.step('push_tree', FILES), dev.step('push_file', 'files.json'), dev.step('push_file', datapack.MANIFEST)))
+        self.assertLess(dev.step('push_file', 'files.json'), dev.step('push_file', datapack.MANIFEST))   # (written again: the list, then the manifest)
+
+    def test_space_counts_the_bundles_unpacked_at_once(self):   # as the app counts (datasync.h ds_apply): the largest bundle for each unpacked at once (at most UNPACKERS), 4 KB a file written, 64 MB
+        import types
+        from porter import publish
+        for name, size in (('few', 24 * 1024), ('many', 2048)):   # fewer bundles than unpackers: every one counts; more: UNPACKERS of them
+            prof = types.SimpleNamespace(name='Test Game', id='0100000000AAA000', package=PKG, env=[], settings={}, requires=[], bundles=(2000, size))
+            data = self.t / f'Test-data-{name}'
+            datapack.build(data, profile=prof, version='v65536', display='1.1.0', patched=self.t / 'src/mods', romfs=self.t / 'src/RomFS', shaders=None); fj = publish.manifest(data)
+            sizes = [b['size'] for b in fj['bundles']]; par = min(install.UNPACKERS, len(sizes))
+            self.assertEqual(par < install.UNPACKERS, name == 'few', (name, len(sizes))); self.assertGreater(par, 1)
+            loose = sum(f['size'] for f in fj['files'] if 'bundle' not in f)
+            need = sum(sizes) + loose + par * max(sizes) + len(fj['files']) * install.FILE_SLACK + install.MARGIN
+            self.data = data
+            self.run_on(Device(free=need))   # (just enough)
+            with self.assertRaisesRegex(BuildError, 'GB more'): self.run_on(Device(free=need - 1))
 
     def test_plan(self):   # bundle_plan: the bundles holding a file the device lacks at its size, and which of them it has at their size
         have = {f['path']: f['size'] for f in self.fj['files'] if f.get('bundle') != 1} | {self.bun[1]: self.fj['bundles'][1]['size']}
