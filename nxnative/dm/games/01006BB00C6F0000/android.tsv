@@ -3,11 +3,14 @@
 # Its own text is drawn with the system's shared fonts (main imports nn::pl and ScalableFontEngine), which the host serves from the device's Roboto: no Hangul. For Korean, port with
 # --shared-font <a TTF with Hangul>; Noto Sans KR (SIL OFL), made static at weight 400 and given the console font's OS/2 Windows ascent / descent (1158 / 378 per 1024 units of em),
 # draws the file select at the console's size (a substitute's own metrics draw text about 1.5x too large: LASRecomp, runtime/hle/pl.c)
-# The depth-of-field and tilt-shift blur (the top and bottom of the field blurred) can be turned off with an env.txt row, live through DM_CTL as well:
-#   DM_VK_BIND_ALIAS=52fcbb4ca2a78907:2=3:4=3
-# pfx_dof_composite_back (postprocess.bfsha @0x2a6000) mixes the frame (binding 3) with two blurred copies (bindings 2 and 4) and writes the whole picture; given the frame in place of
-# the copies it writes the frame. Retroid Pocket 6, Mabe Village: edge variance of the top band 1,166 -> 3,263, bottom 431 -> 1,092, middle the same; frame rate unchanged
-# (the passes still run). Left out by default: the game's own look. The community's "No DOF Blur" mod (MelonSpeedruns and Rodrigo, 2019) replaces postprocess.bfsha for the same
+# The depth-of-field and tilt-shift blur (the top and bottom of the field blurred) is off by default (the user's choice, 2026-11-16). pfx_dof_composite_back
+# (52fcbb4ca2a78907, postprocess.bfsha @0x2a6000) mixes the frame (binding 3) with two blurred copies (bindings 2 and 4) and writes the whole picture; given the frame in place of
+# the copies (DM_VK_BIND_ALIAS) it writes the frame. Retroid Pocket 6, Mabe Village: edge variance of the top band 1,166 -> 3,263, bottom 431 -> 1,092, middle the same;
+# frame rate unchanged (the passes still run). Checked docked, switched to handheld while running and started handheld (C:\d2rm\ports\lashot\alias-v1.png, c-hh-sw-on.png,
+# c-hhcold-on.png; the off captures beside them). The game's own look again: a row "DM_VK_BIND_ALIAS=" (empty) in the device's env.txt, after the pack's rows (the app sets
+# them in order; an install writes env.txt again, so add it after each), or "env DM_VK_BIND_ALIAS=" through DM_CTL while it runs. The community's "No DOF Blur" mod
+# (MelonSpeedruns and Rodrigo, 2019) does the same by replacing postprocess.bfsha, whose shader keys the host's bundle would not match
+env	DM_VK_BIND_ALIAS=52fcbb4ca2a78907:2=3:4=3
 # Retroid Pocket 6 (QCS8550, Adreno 740, Turnip T30), 2026-11-15: boot (7 cold starts after the main+0x1c16c cut, none crashed), opening and title movies (VP9 on c2.qti.vp9.decoder),
 # file select in Korean, Mabe Village from a save at 40-52 fps with sound. Left: a new game to Marin and Tarin's house not run here; the field's frame work is one game thread at
 # 100% (frame work p50 17-19 ms); black slivers at grass tips and a fluorescent map on its first opening reported by the user, not reproduced yet
