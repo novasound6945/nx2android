@@ -22,11 +22,17 @@ struct mavc {
     struct { uint8_t *nv12; int w, h; int64_t pts; } q[QMAX]; int nq;
     uint8_t *au; size_t aucap;   // Annex B copy of the access unit being decoded
     int red, rgba;               // rgba: pictures as 4-byte RGBA (native texture mode) instead of NV12
-    // The codec's timestamps: the game's while they increase, else the last one + 1 µs, each mapped back to the game's on output (pmap). 13 Sentinels: Aegis Rim sends every
-    // packet of its 1024x576 movies with time 0, and c2.qti.avc.decoder gave no picture for 81 packets and then took no more input. With made-up timestamps the codec's
-    // own output order stands (synth: the queue is not sorted)
+    // The codec's timestamps: the game's own, each mapped back to the game's on output (pmap). 13 Sentinels: Aegis Rim sends every packet of its 1024x576 movies with time 0,
+    // and c2.qti.avc.decoder gave no picture for 81 packets and then took no more input. From the first packet whose time repeats one still in the codec, the times are made up:
+    // the game's while they increase, else the last one + 1 µs, and the codec's own output order stands (synth: the queue is not sorted).
+    // Times that only go back are real ones: a stream with B-frames is sent in decode order, each packet with its presentation time (Disgaea 5's opening movie, H.264 Main, I P B B B:
+    // 16666, 83333, 33333, 50000, 66666, 150000, 100000 …). Made-up increasing times put each P-frame's time below its B-frames', and the codec framework's output reordering, which
+    // sorts the pictures it holds by time, then showed the P-frame before them (a picture from ahead, then the three before it) whenever several were held at once: 20 to 100 pictures
+    // in 600 went back in time, "previous and next frames mixed". Real times keep them in presentation order, and the queue stays sorted by them
     int64_t last_in; int synth; struct { int64_t c, g; } pmap[64]; int npmap;
+    long ntr_in, ntr_out;        // DM_MOVIE_TRACE: the first inputs and pictures, one line each
 };
+static int avc_trace(void) { static int on = -1; if (on < 0) on = getenv("DM_MOVIE_TRACE") != NULL; return on; }
 
 mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); a->last_in = INT64_MIN; return a; }
 static void close_codec(mavc *a) { if (a->mc) { AMediaCodec_stop(a->mc); AMediaCodec_delete(a->mc); a->mc = NULL; } a->nin = a->nout = 0; a->eos_sent = 0; a->last_in = INT64_MIN; a->npmap = 0; }
@@ -126,7 +132,9 @@ static void keep_picture(mavc *a, const uint8_t *src, size_t n, int64_t pts) {
         }
     } else for (int r = 0; r < h / 2; r++) memcpy(ouv + (size_t)r * w, src + uvoff + (size_t)(a->ct / 2 + r) * s + (a->cl & ~1), (size_t)w);
     if (a->nq == QMAX) { if (!a->red++) LOG("[RED] movie: AVC picture queue full, dropping the oldest picture"); free(a->q[0].nv12); memmove(a->q, a->q + 1, --a->nq * sizeof a->q[0]); }
+    int64_t cpts = pts;
     for (int m = 0; m < a->npmap; m++) if (a->pmap[m].c == pts) { pts = a->pmap[m].g; a->pmap[m] = a->pmap[--a->npmap]; break; }   // the game's own timestamp
+    if (avc_trace() && a->ntr_out++ < 120) LOG("[movie] AVC picture %ld out: codec time %lld → time %lld (%d queued before it)", a->ntr_out, (long long)cpts, (long long)pts, a->nq);
     int k = a->nq; while (!a->synth && k > 0 && a->q[k - 1].pts > pts) { a->q[k] = a->q[k - 1]; k--; }
     a->q[k].nv12 = o; a->q[k].w = w; a->q[k].h = h; a->q[k].pts = pts; a->nq++;
 }
@@ -145,9 +153,22 @@ static int drain(mavc *a, int64_t wait_us) {
         wait_us = 0;
     }
 }
-typedef struct { mavc *a; size_t len; } au_ctx;
+typedef struct { mavc *a; size_t len; int slice; } au_ctx;   // slice: the first slice's slice_type (0 P, 1 B, 2 I, +5 for "all slices"), -1 none; 10 + the type for an IDR
+// slice_type of a slice NAL unit: first_mb_in_slice ue(v), then slice_type ue(v), right after the one-byte header (emulation prevention cannot occur in these first bits)
+static int slice_type(const uint8_t *p, size_t n) {
+    size_t bit = 8; int v[2];
+    for (int k = 0; k < 2; k++) {
+        int z = 0; while (bit < n * 8 && !(p[bit >> 3] >> (7 - (bit & 7)) & 1)) { z++; bit++; }
+        if (bit >= n * 8 || z > 30) return -1;
+        bit++; unsigned x = 1;
+        for (int i = 0; i < z; i++, bit++) { if (bit >= n * 8) return -1; x = x << 1 | (p[bit >> 3] >> (7 - (bit & 7)) & 1); }
+        v[k] = (int)x - 1;
+    }
+    return v[1];
+}
 static void au_add(void *ctx, const uint8_t *nal, size_t n) {
     au_ctx *c = ctx; mavc *a = c->a; int t = nal[0] & 31;
+    if ((t == 1 || t == 5) && c->slice < 0) { int s = slice_type(nal, n); c->slice = s < 0 ? -1 : (t == 5 ? 10 : 0) + s % 5; }
     if (t == 7 || t == 8) { keep_ps(a, nal, n); return; }
     if (t == 9) return;   // access unit delimiter
     if (c->len + 4 + n > a->aucap) { a->aucap = (c->len + 4 + n) * 2; a->au = realloc(a->au, a->aucap); if (!a->au) die("movie: AVC buffer allocation failed"); }
@@ -162,7 +183,7 @@ static ssize_t input_slot(mavc *a) {   // a free input buffer; while none is fre
     return -1;
 }
 int mavc_decode(mavc *a, const uint8_t *p, int n, int64_t pts_us) {
-    au_ctx c = {a, 0}; each_nal(p, (size_t)n, au_add, &c);
+    au_ctx c = {a, 0, -1}; each_nal(p, (size_t)n, au_add, &c);
     if (!c.len) return 0;
     if ((a->dirty || !a->mc || a->eos_sent) && !open_codec(a)) return -1;
     ssize_t i = input_slot(a);
@@ -170,10 +191,16 @@ int mavc_decode(mavc *a, const uint8_t *p, int n, int64_t pts_us) {
     size_t cap = 0; uint8_t *b = AMediaCodec_getInputBuffer(a->mc, (size_t)i, &cap);
     if (!b || cap < c.len) { if (!a->red++) LOG("[RED] movie: AVC access unit of %zu bytes does not fit MediaCodec's %zu-byte input buffer", c.len, cap); AMediaCodec_queueInputBuffer(a->mc, (size_t)i, 0, 0, (uint64_t)pts_us, 0); return -1; }
     memcpy(b, a->au, c.len);
-    int64_t cpts = pts_us > a->last_in ? pts_us : a->last_in + 1; if (cpts != pts_us) a->synth = 1; a->last_in = cpts;
+    int dup = a->last_in != INT64_MIN && pts_us == a->last_in;   // a time the codec holds already: made-up times from here on
+    for (int m = 0; !dup && m < a->npmap; m++) dup = a->pmap[m].g == pts_us;
+    if (dup && !a->synth) { a->synth = 1; LOG("[movie] AVC: packet time %lld µs repeats one still in the decoder: increasing times are made up from here on", (long long)pts_us); }
+    int64_t cpts = !a->synth || pts_us > a->last_in ? pts_us : a->last_in + 1;
+    if (cpts > a->last_in) a->last_in = cpts;
     if (a->npmap == 64) a->pmap[0] = a->pmap[--a->npmap];   // (outputs the codec never gave)
     a->pmap[a->npmap].c = cpts; a->pmap[a->npmap].g = pts_us; a->npmap++;
     if (AMediaCodec_queueInputBuffer(a->mc, (size_t)i, 0, c.len, (uint64_t)cpts, 0) != AMEDIA_OK) { if (!a->red++) LOG("[RED] movie: MediaCodec refused an AVC access unit (first case)"); return -1; }
+    if (avc_trace() && a->ntr_in++ < 120) LOG("[movie] AVC packet %ld in: time %lld → codec time %lld, %zu bytes, %s%c slice", a->ntr_in, (long long)pts_us, (long long)cpts, c.len,
+                                              c.slice >= 10 ? "IDR " : "", c.slice < 0 ? '?' : "PBISS"[c.slice % 10]);
     a->nin++;
     drain(a, 0);
     return 0;

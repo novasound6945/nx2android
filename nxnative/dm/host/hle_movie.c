@@ -87,6 +87,9 @@ typedef struct {
     uint64_t in_ns;                              // when the last packet came (md_tail)
     uint64_t dec_n, dec_ns, dec_max;            // decode timing (on the host thread, per packet)
     unsigned long ncall[24];
+    // Video pacing as the client sees it (md_pace, one line per 600 pictures): presents between successive GetOutputBuffer calls, pictures whose time goes backwards,
+    // and how many outputs the client held (acquired, not released) at each one
+    struct { uint64_t frame; int64_t pts; unsigned long n, gap[4], back, held_sum, held1; int held; } pace;
 } mdec_t;
 
 static struct {
@@ -104,17 +107,19 @@ static struct {
 } G;
 
 static void *msym(const char *n) { void *p = guest_sym(n); if (!p) die("movie: missing SDK symbol %s", n); return p; }
+// SDK 1's movie::Buffer declares its getters non-const (Disgaea 5, SDK 1.7.1: _ZN5movie6Buffer4DataEv at subsdk4+0x2dbe64); the code is the same wrapper over NnBuffer
+static void *msym_or(const char *n, const char *old) { void *p = guest_sym(n); return p ? p : msym(old); }
 static void md_syms(void) {
     if (G.signal) return;
     G.set_data = msym("_ZN5movie6Buffer18SetDataAndCapacityEPvm");
     G.set_range = msym("_ZN5movie6Buffer8SetRangeEii");
-    G.data = msym("_ZNK5movie6Buffer4DataEv");
-    G.cap = msym("_ZNK5movie6Buffer8CapacityEv");
+    G.data = msym_or("_ZNK5movie6Buffer4DataEv", "_ZN5movie6Buffer4DataEv");
+    G.cap = msym_or("_ZNK5movie6Buffer8CapacityEv", "_ZN5movie6Buffer8CapacityEv");
     G.set_i32 = msym("_ZN5movie9MediaData8SetInt32EPKci");
     G.set_rect = msym("_ZN5movie9MediaData7SetRectEPKciiii");
     G.find_i32 = msym("_ZNK5movie9MediaData9FindInt32EPKcPi");
     G.find_buf = msym("_ZNK5movie9MediaData10FindBufferEPKcPPNS_6BufferE");
-    G.size = msym("_ZNK5movie6Buffer4SizeEv");
+    G.size = msym_or("_ZNK5movie6Buffer4SizeEv", "_ZN5movie6Buffer4SizeEv");
     G.signal = msym("_ZN2nn2os11SignalEventEPNS0_9EventTypeE");
 }
 static mdec_t *md_of(void **self) { return self ? (mdec_t *)self[1] : NULL; }
@@ -554,6 +559,17 @@ HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11De
 // SDK 4's constructor has no priority argument (Dark Souls Remastered, NintendoSDK_movie 4.5.0). Without this take-over the SDK built its own decoder and the host's Configure read it as a host one (a call through a null pointer)
 HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeE", "movie decoder (SDK 4, no priority): host implementation", void, h_movie_Decoder4,
           void **self, int type, int fmt, int mode) { h_movie_Decoder(self, type, fmt, mode, 0); }
+// SDK 1's constructor has neither a mode nor a priority (Disgaea 5, SDK 1.7.1: subsdk4+0x2d9ab8; main+0x1ec84c makes the video decoder with output 3, main+0x1ec9b4 the audio one
+// with output 1). Its output formats count differently: 1 PCM16, 2 ARGB, 3 NV12 (DecoderImpl::GetOutputBufferSize subsdk4+0x2d8044, ConvertDecoderOutputFormat +0x2d83c8: format 3
+// copies a compact NV12 frame, stride = width, the chroma right after the luma, as the host writes it), where later SDKs have 3 = RGBA and 4 = NV12. The types are the same (1 AVC,
+// 2 VP8, 3 VP9, 4 AAC, 5 Vorbis: DecoderTypeToMime +0x2d7274), and so are the methods and the vtable (symbol relocations, so the game's virtual calls reach the host). Its "no input"
+// / "no output" result is 0x1000 for both; the game tests only for non-zero (main+0x1ebc7c). The output is CPU buffers only, mode 1
+HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatE", "movie decoder (SDK 1, no mode, its own output numbering): host implementation", void, h_movie_Decoder1,
+          void **self, int type, int fmt) {
+    int f = fmt == 3 ? MD_FMT_NV12 : fmt == 1 ? MD_FMT_PCM16 : 0;
+    if (!f) LOG("[RED] movie: SDK 1 decoder output format %d (2 = ARGB into the client's buffer) has no host implementation", fmt);
+    h_movie_Decoder(self, type, f, 1, 0);
+}
 static void md_free(void **self) {
     mdec_t *d = md_of(self); if (!d) return;
     md_defer_drop(d);
@@ -626,7 +642,7 @@ static void md_reset(mdec_t *d, int close) {
     // control thread flushes to loop an activity preview, and sends them after the flush (SendInputBufferForDecode claims them back). Those are withheld for a while (h_movie_AcqIn)
     uint64_t now = now_ns();
     for (int i = 0; i < MD_NIN; i++) { d->infree[i] = i; d->instale[i] = d->inown[i] ? now : 0; d->inown[i] = 0; }
-    d->ninfree = MD_NIN; d->noutq = 0; d->npend = 0; d->avc_drain = 0; d->in_eos = 0;
+    d->ninfree = MD_NIN; d->noutq = 0; d->npend = 0; d->avc_drain = 0; d->in_eos = 0; d->pace.held = 0;
     // a flush keeps each slot's last picture: the same game reads an output it acquired before the flush right after it (a black frame in the loop otherwise)
     for (int i = 0; i < MD_NOUT; i++) { d->out[i].used = 0; if (close) d->out[i].pic = 0; }
     pthread_mutex_unlock(&d->mu);
@@ -757,7 +773,7 @@ HLE_FORCE("_ZN5movie7Decoder24AcquireOutputBufferIndexEPiPlPjS1_", "movie decode
     int r = MD_NO_OUTPUT; *idx = -1; *left = 0;
     if (d->noutq && d->started) {
         int s = d->outq[0]; memmove(d->outq, d->outq + 1, --d->noutq * sizeof *d->outq);
-        *idx = s; *pts = d->out[s].pts; *flags = d->out[s].flags; *left = d->noutq; r = 0;
+        *idx = s; *pts = d->out[s].pts; *flags = d->out[s].flags; *left = d->noutq; r = 0; d->pace.held++;
     }
     pthread_mutex_unlock(&d->mu);
     if (!r) MD_TRACE(d, 8, "AcquireOutputBufferIndex → index %d time %lld flags %#x left %d", *idx, (long long)*pts, *flags, *left);
@@ -825,6 +841,23 @@ static int md_out_tex(mdec_t *d, int i, void *buf) {
     MD_TRACE(d, 12, "GetOutputBuffer index %d → texture %p (%d×%d format %#x)%s", i, tex, tw, th, f, d->out[i].pic ? "" : " (no picture: the texture keeps its last frame)");
     return 0;
 }
+// One picture handed to the client in CPU mode: how many presents passed since the previous one (a player that takes one picture a frame shows mostly 1; a player whose logic
+// thread runs beside a render thread that presents shows pairs of 0 and 2 wherever the present lands on either side of the call, as Disgaea 5's does, main+0x1e47e4 handing each
+// frame to its render loop main+0x1e4530: equal counts of 0 and 2 are that phase, not lost pictures), whether its time went backwards (a picture shown out of order: Disgaea 5's
+// B-frames under made-up codec times, movie_avc.c), and how many outputs the client held then (its queue of decoded pictures; 1 or none is a player about to run dry)
+static void md_pace(mdec_t *d, int64_t pts) {
+    uint64_t f = dm_guest_frame();
+    pthread_mutex_lock(&d->mu);
+    if (d->pace.n) { uint64_t g = f - d->pace.frame; d->pace.gap[g > 3 ? 3 : g]++; if (pts < d->pace.pts) d->pace.back++; }
+    d->pace.frame = f; d->pace.pts = pts; d->pace.held_sum += (unsigned long)d->pace.held; d->pace.held1 += d->pace.held <= 1;
+    unsigned long n = ++d->pace.n;
+    if (n % 600 == 0) {
+        LOG("[movie] video pacing, pictures %lu-%lu: presents since the previous picture 0: %lu, 1: %lu, 2: %lu, 3+: %lu; time going backwards %lu; outputs held by the client %.1f on average, 1 or none %lu times; time %.3f s",
+            n - 599, n, d->pace.gap[0], d->pace.gap[1], d->pace.gap[2], d->pace.gap[3], d->pace.back, d->pace.held_sum / 600.0, d->pace.held1, pts / 1e6);
+        memset(d->pace.gap, 0, sizeof d->pace.gap); d->pace.back = d->pace.held_sum = d->pace.held1 = 0;
+    }
+    pthread_mutex_unlock(&d->mu);
+}
 HLE_FORCE("_ZN5movie7Decoder15GetOutputBufferEiPNS_6BufferE", "movie decoder: get a frame", int, h_movie_GetOut, void **self, int i, void *buf) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     if (!buf || i < 0 || i >= d->nout) return 0x100b;
@@ -848,6 +881,7 @@ HLE_FORCE("_ZN5movie7Decoder15GetOutputBufferEiPNS_6BufferE", "movie decoder: ge
     if (d->out[i].pic && d->out[i].frm) memcpy(p, d->out[i].frm, need);
     else { memset(p, 16, (size_t)stride * slice); memset(p + (size_t)stride * slice, 128, need - (size_t)stride * slice); }
     G.set_range(buf, 0, (int)need);
+    md_pace(d, d->out[i].pts);
     MD_TRACE(d, 12, "GetOutputBuffer index %d → %zu bytes%s", i, need, d->out[i].pic ? "" : " (black frame)");
     return 0;
 }
@@ -860,6 +894,7 @@ HLE_FORCE("_ZN5movie7Decoder24ReleaseOutputBufferIndexEi", "movie decoder: relea
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     if (i < 0 || i >= d->nout) return 0x100b;
     pthread_mutex_lock(&d->mu);
+    if (d->out[i].used && d->pace.held > 0) d->pace.held--;
     d->out[i].used = 0; d->out[i].pic = 0;
     int queued = d->npend, drain = d->avc_drain;
     pthread_mutex_unlock(&d->mu);
