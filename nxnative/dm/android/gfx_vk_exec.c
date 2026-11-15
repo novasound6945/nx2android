@@ -638,7 +638,10 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
 // DM_VK_CRUMBS=1 (start-up), for a device lost (a GPU hang): every pass end and dispatch writes {submission, pass} into host-visible memory after a full barrier, and the host
 // keeps the shaders each pass drew with; when the device is lost (vk_crumbs_report), the last work the GPU finished and the passes after it are logged
 static int g_crumbs = -1; static VkBuffer g_crumb_buf; static volatile uint32_t *g_crumb;
-typedef struct { uint32_t sub; int pass, n; uint64_t k[8][3]; } crumb_t; static crumb_t g_cring[512]; static unsigned g_cn;
+// k: the pass's first 8 shader triples, then up to 8 more that drew with a linked pipeline or a new one (a pass of Fire Emblem Engage draws up to 581 times);
+// fl: bit 0 a linked pipeline, bit 1 linked at that draw, bit 2 a whole one's first draw after its linked one
+enum { CRUMB_K = 16 };
+typedef struct { uint32_t sub; int pass, n; uint64_t k[CRUMB_K][3]; uint32_t fl[CRUMB_K]; } crumb_t; static crumb_t g_cring[512]; static unsigned g_cn;
 static int crumbs_on(void) {
     if (g_crumbs < 0) { const char *e = getenv("DM_VK_CRUMBS"); g_crumbs = e && atoi(e);
         if (g_crumbs) { VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, 256, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE};
@@ -649,8 +652,9 @@ static int crumbs_on(void) {
 }
 static crumb_t *crumb_cur(void) { crumb_t *c = &g_cring[(g_cn ? g_cn - 1 : 0) % 512]; uint32_t sub = (uint32_t)mtl_last_fence() + 1;
     if (!g_cn || c->sub != sub || c->pass != g_sub_pass - 1) { c = &g_cring[g_cn++ % 512]; memset(c, 0, sizeof *c); c->sub = sub; c->pass = g_sub_pass - 1; } return c; }
-static void crumb_draw(uint64_t a, uint64_t b, uint64_t c3) { if (!crumbs_on()) return; crumb_t *c = crumb_cur();
-    for (int i = 0; i < c->n; i++) if (c->k[i][0] == a && c->k[i][1] == b && c->k[i][2] == c3) return; if (c->n < 8) { c->k[c->n][0] = a; c->k[c->n][1] = b; c->k[c->n][2] = c3; c->n++; } }
+static void crumb_draw(uint64_t a, uint64_t b, uint64_t c3, uint32_t fl) { if (!crumbs_on()) return; crumb_t *c = crumb_cur();
+    for (int i = 0; i < c->n; i++) if (c->k[i][0] == a && c->k[i][1] == b && c->k[i][2] == c3) { c->fl[i] |= fl; return; }
+    if (c->n < 8 || (fl && c->n < CRUMB_K)) { c->k[c->n][0] = a; c->k[c->n][1] = b; c->k[c->n][2] = c3; c->fl[c->n] = fl; c->n++; } }
 static void crumb_mark(int dispatch) { if (!crumbs_on()) return; VkCommandBuffer cb = vk_cmd(); vk_img_barrier_all(cb);
     vkCmdFillBuffer(cb, g_crumb_buf, 0, 4, ((uint32_t)(mtl_last_fence() + 1) & 0xffff) << 16 | (dispatch ? 0x8000u : 0) | ((uint32_t)(g_sub_pass - 1) & 0x7fff)); }
 void vk_crumbs_report(void) {
@@ -661,7 +665,8 @@ void vk_crumbs_report(void) {
     for (unsigned i = g_cn > 512 ? g_cn - 512 : 0; i < g_cn && shown < 12; i++) { crumb_t *c = &g_cring[i % 512];
         if ((c->sub & 0xffff) < sub || ((c->sub & 0xffff) == sub && c->pass <= (int)pass)) continue;
         shown++; VKLOG("[crumbs] then submission %u pass %d:", c->sub, c->pass);
-        for (int k = 0; k < c->n; k++) VKLOG("[crumbs]   shaders %016llx %016llx %016llx", (unsigned long long)c->k[k][0], (unsigned long long)c->k[k][1], (unsigned long long)c->k[k][2]); }
+        for (int k = 0; k < c->n; k++) VKLOG("[crumbs]   shaders %016llx %016llx %016llx%s%s%s", (unsigned long long)c->k[k][0], (unsigned long long)c->k[k][1], (unsigned long long)c->k[k][2],
+                                             c->fl[k] & 1 ? " (linked pipeline)" : "", c->fl[k] & 2 ? " (linked at this draw)" : "", c->fl[k] & 4 ? " (whole pipeline's first draw)" : ""); }
 }
 void vk_prof_end(void) {
     if (!g_prof_on || !g_prof_t0) return;
@@ -1045,6 +1050,8 @@ static int async_pipe(const pkey *k) {   // 1: queued (the draw is left out); un
 }
 // Graphics pipeline libraries (gfx_vk_gpl.inc): a draw that can take a linked pipeline does until its whole one is built (vk_gpl.h gpl_route), and none is left out
 static nvn_hmap g_gfast = {.klen = sizeof(pkey)};   // linked pipelines by key (the replay thread's only; (VkPipeline)1: the link failed), kept after the whole one took over (command buffers may hold them)
+static nvn_hmap g_gtook = {.klen = sizeof(pkey)};   // keys whose whole pipeline has drawn after their linked one (the replay thread's only; vk_ev VKEV_TAKEOVER once per key)
+static int g_pipe_new;   // graphics_pipeline linked a pipeline at this draw (1), or a whole one took over at it (2): the crumbs' flags
 static _Atomic uint64_t g_gpl_swaps;   // whole pipelines finished in the background (graphics_pipeline looks again at a memoized linked one when it moves)
 static int g_pipe_fast, g_last_fast; static uint64_t g_last_swaps, g_gpl_dyn_gen;   // graphics_pipeline returned a linked pipeline (its dynamic state: gpl_dyn); the memo's; the command buffer gpl_dyn last set it in
 // DM_VK_SHOTS_FAST (gfx_vk_present.c fastshot_frame): while it is armed, each draw that took a linked pipeline is counted here, by shader keys, until the next present takes the tally
@@ -1057,7 +1064,7 @@ static void fast_note(const pkey *k) {
 }
 static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout); static int gpl_eligible(const pkey *k); static void gpl_opt_queue(const pkey *k); static void gpl_old_built(uint64_t ns);
 static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
-    uint64_t swaps = atomic_load(&g_gpl_swaps);
+    uint64_t swaps = atomic_load(&g_gpl_swaps); g_pipe_new = 0;
     if (g_last_p && !memcmp(k, &g_last_k, sizeof *k) && (!g_last_fast || g_last_swaps == swaps)) { g_pipe_fast = g_last_fast; return g_last_p == (void *)1 ? VK_NULL_HANDLE : g_last_p; }
     g_pipe_fast = 0;
     pthread_mutex_lock(&g_pipe_mu); VkPipeline p = nvn_hm_get(&g_pipes, k); pthread_mutex_unlock(&g_pipe_mu);
@@ -1065,16 +1072,22 @@ static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
     // DM_VK_GPL_LINK=0 (live, debugging: a DM_CTL env line): no linked pipelines, each new pipeline is built whole where it is drawn as without libraries,
     // while the rest of the library setup (dynamic rendering, independent-set layouts, the alpha reference as a push constant) stays: tells their artefacts apart
     // DM_VK_GPL_LINK_MS=0 (live, the same for multisampled draws only): tells a multisample-state cause from the rest
-    static int link_on = 1, link_ms = 1; static unsigned lk; if (!(lk++ & 255)) { const char *e = getenv("DM_VK_GPL_LINK"); link_on = !(e && !atoi(e));
-        e = getenv("DM_VK_GPL_LINK_MS"); link_ms = !(e && !atoi(e)); }
-    if (V.gpl && link_on && (link_ms || k->samples <= 1) && gpl_route(V.gpl, gpl_eligible(k), opt) == GPL_USE_FAST) {
+    // DM_VK_X_GPL_FAST=1 (live, diagnosis): every draw that can take a linked pipeline does, whole ones never take over, so what only linked pipelines do shows
+    // in minutes instead of in the few frames after a scene change (Fire Emblem Engage's device lost)
+    static int link_on = 1, link_ms = 1, fast_only = 0; static unsigned lk; if (!(lk++ & 255)) { const char *e = getenv("DM_VK_GPL_LINK"); link_on = !(e && !atoi(e));
+        e = getenv("DM_VK_GPL_LINK_MS"); link_ms = !(e && !atoi(e)); e = getenv("DM_VK_X_GPL_FAST"); fast_only = e && atoi(e); }
+    if (V.gpl && link_on && (link_ms || k->samples <= 1) && (fast_only ? gpl_eligible(k) : gpl_route(V.gpl, gpl_eligible(k), opt) == GPL_USE_FAST)) {
         VkPipeline f = nvn_hm_get(&g_gfast, k);
-        if (!f) { f = gpl_link(k, layout); nvn_hm_put(&g_gfast, k, f ? f : (VkPipeline)1); if (f && opt == GPL_OPT_NONE) { gpl_opt_queue(k); opt = GPL_OPT_PENDING; } }
+        if (!f) { f = gpl_link(k, layout); nvn_hm_put(&g_gfast, k, f ? f : (VkPipeline)1); if (f && opt == GPL_OPT_NONE) { gpl_opt_queue(k); opt = GPL_OPT_PENDING; }
+                  if (f) { g_sub_links++; g_pipe_new = 1; vk_ev(VKEV_LINK, k->key[0], k->key[1], (uint64_t)(uintptr_t)f); } }
         else if (f != (void *)1 && opt == GPL_OPT_NONE) gpl_opt_queue(k);   // (its queue was full before)
         if (f && f != (void *)1) { g_last_k = *k; g_last_p = f; g_last_fast = 1; g_last_swaps = swaps; g_pipe_fast = 1; return f; }
     }   // (no linked pipeline: as without libraries)
     if (p == PIPE_PENDING) return VK_NULL_HANDLE;
-    if (p) { g_last_k = *k; g_last_p = p; g_last_fast = 0; return p == (void *)1 ? VK_NULL_HANDLE : p; }
+    if (p) { g_last_k = *k; g_last_p = p; g_last_fast = 0;
+        if (V.gpl && p != (void *)1) { VkPipeline f = nvn_hm_get(&g_gfast, k);   // the whole pipeline's first draw where a linked one drew before (vk_device_lost's report)
+            if (f && f != (void *)1 && !nvn_hm_get(&g_gtook, k)) { nvn_hm_put(&g_gtook, k, (void *)1); g_sub_takeovers++; g_pipe_new = 2; vk_ev(VKEV_TAKEOVER, k->key[0], k->key[1], (uint64_t)(uintptr_t)p); } }
+        return p == (void *)1 ? VK_NULL_HANDLE : p; }
     if (async_pipe(k)) return VK_NULL_HANDLE;
     vkshader_t *stg[3] = {S.sh[0], S.sh[1], S.sh[2]};
     uint64_t tb = tick(); p = build_pipeline(k, layout, stg); uint64_t tbn = tick() - tb; if (g_prof_on) g_prof_ns[0] += tbn; g_vkst.pipes_built++; if (V.gpl) gpl_old_built(tbn);
@@ -1880,10 +1893,11 @@ static int prepare_draw(int prim, int indexed) {
         for (uint32_t i = 0; i < k.nattr; i++) VKLOG("  attribute location %u binding %u format %u offset %u", k.attr[i].loc, k.attr[i].binding, k.attr[i].fmt, k.attr[i].off);
         for (uint32_t i = 0; i < k.nbind; i++) VKLOG("  binding %u stride %u rate %u divisor %u", k.bind[i].binding, k.bind[i].stride, k.bind[i].rate, k.bind[i].divisor);
     }
-    crumb_draw(k.key[0], k.key[1], k.key[2]);
     VkPipeline p = graphics_pipeline(&k, layout);
     uint64_t t1 = tick(); g_vkst.ns_pipe += t1 - t0 - tdesc;
     if (!p) { g_vkst.skip_pipe++; return 0; }
+    crumb_draw(k.key[0], k.key[1], k.key[2], (uint32_t)(g_pipe_fast | g_pipe_new << 1));
+    g_sub_draws++; if (g_pipe_fast) g_sub_fast_draws++;
     if (g_ubolog_key && g_ubolog_n > 0 && S.sh[0] && S.sh[0]->key == g_ubolog_key) {   // DM_VK_UBO_LOG: the pipeline the draw got, and its key's hash
         uint64_t kh = fnv(1469598103934665603ull, &k, sizeof k); VKLOG("ubo: present %llu pipeline %p key %016llx um %llx/%llx im %llx/%llx", (unsigned long long)g_tex_frame, (void *)p, (unsigned long long)kh,
               (unsigned long long)k.um[0], (unsigned long long)k.um[1], (unsigned long long)k.im[0], (unsigned long long)k.im[1]); }

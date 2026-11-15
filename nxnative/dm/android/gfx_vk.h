@@ -58,6 +58,7 @@ typedef struct {
     // others go into their key; gpl_interp: graphicsPipelineLibraryIndependentInterpolationDecoration
     int gpl, gpl_eds3, gpl_interp;
     int has_oq_precise, has_hqr;   // occlusionQueryPrecise; hostQueryReset with vkResetQueryPool loaded (gfx_vk_core.c occlusion queries)
+    int has_fault;   // VK_EXT_device_fault enabled: the driver's own report of a device lost (gfx_vk_core.c vk_device_lost)
     float max_aniso;
     // subgroups (vk_init): VkPhysicalDeviceSubgroupProperties' size, stages, operations and quadOperationsInAllStages; VkPhysicalDeviceSubgroupSizeControlProperties'
     // range and maxComputeWorkgroupSubgroups; DM_VK_SUBGROUP_PIN's required size (sg_pin) and the stages it is given to (vk_sg_pin)
@@ -94,6 +95,12 @@ void vk_defer_free_view(VkImageView v);
 void vk_defer_free_bview(VkBufferView v);   // a texel buffer view, destroyed when this submission completes
 VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout l);    // from this submission's descriptor pools
 uint64_t vk_fence_done(void);   // the highest submission fence the GPU has completed
+// A device lost (VK_ERROR_DEVICE_LOST) is reported once, with what led to it, and the process stops: the submissions the GPU had not finished, the recent events of
+// vk_ev, the driver's fault report (VK_EXT_device_fault) and the crumbs (DM_VK_CRUMBS=1). Any thread that meets one calls it; the others wait for the first
+__attribute__((noreturn)) void vk_device_lost(const char *where, int result);
+enum { VKEV_LINK, VKEV_TAKEOVER, VKEV_POOL_ADD, VKEV_POOL_DEL, VKEV_XFREE, VKEV_IMG_DROP, VKEV_RECYCLE_FREE };
+void vk_ev(int kind, uint64_t a, uint64_t b, uint64_t c);   // a recent event for vk_device_lost's report (any thread, lock-free)
+extern uint32_t g_sub_draws, g_sub_fast_draws, g_sub_links, g_sub_takeovers;   // this submission's draws, those with a linked pipeline, pipelines linked and whole ones that took over (gfx_vk_exec.c; replay thread)
 
 // ---- formats and textures (gfx_vk_tex.c) ----
 // dec: a BC format the device lacks, decoded on the CPU (gfx_vk_tex.c bc_decode) into vk, dbpp bytes a texel; bw, bh and bpb stay the guest's blocks

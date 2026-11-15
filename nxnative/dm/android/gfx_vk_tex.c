@@ -436,7 +436,7 @@ void vk_tex_sweep(void) {
 // The keys are gathered first, 64 a pass, then deleted (a delete rehashes the table): a rescan from the start after each delete went over the whole table once per image,
 // under the lock the replay's texture lookups take, for each of the pools Pokémon Scarlet drops while a capture loads
 void vk_tex_drop_pool(const void *pool) {   // the pool is finalized: its textures' images go once the GPU is done with them
-    pthread_mutex_lock(&g_img_mu);
+    pthread_mutex_lock(&g_img_mu); uint64_t dropped = 0;
     for (int n = 64; n == 64;) {
         akey ks[64]; n = 0;
         for (uint32_t i = 0; i < g_by_key.cap && n < 64; i++) {
@@ -444,9 +444,10 @@ void vk_tex_drop_pool(const void *pool) {   // the pool is finalized: its textur
             memcpy(&ks[n], g_by_key.keys + (size_t)i * g_by_key.klen, sizeof ks[n]);
             if (ks[n].pool == (uint64_t)(uintptr_t)pool) n++;
         }
-        for (int j = 0; j < n; j++) { vkimg_t *im = nvn_hm_get(&g_by_key, &ks[j]); if (!im) continue; nvn_hm_del(&g_by_key, &ks[j]); img_drop(im); }
+        for (int j = 0; j < n; j++) { vkimg_t *im = nvn_hm_get(&g_by_key, &ks[j]); if (!im) continue; nvn_hm_del(&g_by_key, &ks[j]); img_drop(im); dropped++; }
     }
     pthread_mutex_unlock(&g_img_mu);
+    if (dropped) vk_ev(VKEV_IMG_DROP, (uint64_t)(uintptr_t)pool, dropped, 0);
 }
 // CPU-written textures (WriteTexels / a dirty first use): packaged from now on
 static nvn_hmap g_cpu_written = {.klen = sizeof(uint64_t)}; static pthread_mutex_t g_cw_mu = PTHREAD_MUTEX_INITIALIZER;

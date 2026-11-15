@@ -96,6 +96,7 @@ static void mem_diag_pool(uint64_t size, uint32_t bits, uint32_t selected) {
         size / 1048576.0, bits, selected, flags, flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT ? "yes" : "no", cached == UINT32_MAX ? -1 : (int)cached);
 }
 
+static PFN_vkGetDeviceFaultInfoEXT g_fault_info;   // V.has_fault (vk_device_lost)
 static int has_ext(const VkExtensionProperties *e, uint32_t n, const char *name) { for (uint32_t i = 0; i < n; i++) if (!strcmp(e[i].extensionName, name)) return 1; return 0; }
 static int is_on(const char *const *on, uint32_t n, const char *name) { for (uint32_t i = 0; i < n; i++) if (!strcmp(on[i], name)) return 1; return 0; }
 // a feature struct as vk_init queries it (sType, pNext, then VkBool32s; the largest, descriptor indexing, has 20); featx: its VkBool32s, all off if it is not chained
@@ -323,6 +324,15 @@ void vk_init(void) {
         memset((uint8_t *)&e3f + offsetof(VkPhysicalDeviceExtendedDynamicState3FeaturesEXT, extendedDynamicState3TessellationDomainOrigin), 0, sizeof e3f - offsetof(VkPhysicalDeviceExtendedDynamicState3FeaturesEXT, extendedDynamicState3TessellationDomainOrigin));
         e3f.extendedDynamicState3DepthClampEnable = c; e3f.extendedDynamicState3PolygonMode = pm; e3f.extendedDynamicState3DepthClipNegativeOneToOne = cn;
         gplf.graphicsPipelineLibrary = VK_TRUE; e3f.pNext = enf.pNext; gplf.pNext = V.gpl_eds3 ? (void *)&e3f : enf.pNext; enf.pNext = &gplf; }
+    // VK_EXT_device_fault (vk_device_lost): the driver's account of a device lost, the faulting address and its kind, where the drivers keep one. A device lost
+    // was one line ("GPU timeline wait did not complete: -4") with nothing to tell a page fault from a hang (Fire Emblem Engage on Turnip, scene changes).
+    // DM_VK_DEVICE_FAULT=0 (start-up): not enabled
+    VkPhysicalDeviceFaultFeaturesEXT fdf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+    { const char *e = getenv("DM_VK_DEVICE_FAULT"); int offered = has_ext(ex, ne, "VK_EXT_device_fault");
+      if (offered && !(e && !atoi(e)) && non < 64) { VkPhysicalDeviceFeatures2 fq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &fdf}; vkGetPhysicalDeviceFeatures2(V.pd, &fq); }
+      V.has_fault = fdf.deviceFault == VK_TRUE;
+      if (V.has_fault) { fdf.deviceFaultVendorBinary = VK_FALSE; fdf.pNext = enf.pNext; enf.pNext = &fdf; on[non++] = "VK_EXT_device_fault"; }
+      VKLOG("device fault reports (VK_EXT_device_fault): %s", V.has_fault ? "on" : offered ? "offered, not enabled" : "not offered by the driver"); }
     float prio = 1;
     VkDeviceQueueCreateInfo qci = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, V.qf, 1, &prio};
     VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &enf, 0, 1, &qci, 0, NULL, non, on, NULL};
@@ -330,6 +340,7 @@ void vk_init(void) {
     vkGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)p_vkGetInstanceProcAddr(V.inst, "vkGetDeviceProcAddr");
 #define VK_LOADD(f) f = (PFN_##f)vkGetDeviceProcAddr(V.dev, #f); if (!f) f = (PFN_##f)vkGetDeviceProcAddr(V.dev, #f "KHR"); if (!f) f = (PFN_##f)p_vkGetInstanceProcAddr(V.inst, #f);   // a promoted function by its extension's name (Vulkan 1.1 / 1.2 devices)
     VK_DEV_FNS(VK_LOADD)
+    if (V.has_fault && !(g_fault_info = (PFN_vkGetDeviceFaultInfoEXT)vkGetDeviceProcAddr(V.dev, "vkGetDeviceFaultInfoEXT"))) { V.has_fault = 0; VKLOG("[RED] vkGetDeviceFaultInfoEXT did not load: no fault report"); }
     if (!vkResetQueryPool) vkResetQueryPool = (PFN_vkResetQueryPool)vkGetDeviceProcAddr(V.dev, "vkResetQueryPoolEXT");   // (VK_EXT_host_query_reset on a 1.1 device)
     V.has_hqr = V.has_hqr && vkResetQueryPool;
     if (V.gpl && (!vkCmdSetCullMode || !vkCmdSetFrontFace || !vkCmdSetDepthTestEnable || !vkCmdSetDepthWriteEnable || !vkCmdSetDepthCompareOp || !vkCmdSetStencilTestEnable || !vkCmdSetStencilOp || !vkCmdSetDepthBiasEnable)) {
@@ -684,6 +695,7 @@ static void pool_add_one(const void *mem, uint64_t size, uint64_t base, uint64_t
     static uint64_t zc_bytes, cp_bytes; if (zc) cp_bytes += size; else zc_bytes += size;
     static int nlog; if (nlog++ < 24) VKLOG("memory pool %p +%#llx: %s (zero-copy %.1f MB, copied %.1f MB)", mem, (unsigned long long)size, zc ? "copied" : "zero-copy", zc_bytes / 1048576.0, cp_bytes / 1048576.0);
     pool_note(0, size, pool_ns() - t0);
+    vk_ev(VKEV_POOL_ADD, q.lo, size | (uint64_t)(zc ? 0 : q.slab ? 2 : 1) << 56, (uint64_t)q.buf);
 }
 void mtl_pool_del(const void *mem) {
     for (;;) {   // every chunk of the pool
@@ -696,12 +708,14 @@ void mtl_pool_del(const void *mem) {
         if (p.zero_copy) pool_copy_back(&p);
         free(p.baseline);
         { void vk_tbuf_drop_pool(uint64_t); vk_tbuf_drop_pool(p.serial); }   // the texel buffer views over its buffer (gfx_vk_tex.c), before the buffer itself goes or is kept
-        if (p.slab) slab_give(p.slab, p.slot, mtl_last_fence() + 1);   // the slot goes back to its slab (the GPU may still read it until that submission is done)
+        int how = 0;   // (vk_ev) 0 freed, 1 kept, 2 a slab's slot
+        if (p.slab) { slab_give(p.slab, p.slot, mtl_last_fence() + 1); how = 2; }   // the slot goes back to its slab (the GPU may still read it until that submission is done)
         else if (!(p.zero_copy && p.ahb && zcf_put(p.ahb, p.buf, p.mem, p.hi - p.lo))) {   // (kept for the next pool of its size)
             vk_defer_free_buffer(p.buf, p.mem);   // the AHardwareBuffer goes with the imported memory's last reference
             if (p.ahb) AHardwareBuffer_release(p.ahb);
-        }
+        } else how = 1;
         pool_note(1, p.hi - p.lo, pool_ns() - t0);
+        vk_ev(VKEV_POOL_DEL, p.lo, (p.hi - p.lo) | (uint64_t)how << 56, (uint64_t)p.buf);
     }
 }
 vkpool_t *vk_pool_of(uint64_t addr, uint64_t len) {
@@ -936,7 +950,32 @@ static VkSemaphore g_timeline;   // submission f signals the value f (V.has_time
 #define NFRING 16   // more than the submissions in flight (NSLOT: mtl_sub_begin's slot_recycle waits for the slot's last one)
 static VkFence g_fring[NFRING];
 static pthread_mutex_t g_done_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_done_cv = PTHREAD_COND_INITIALIZER;
-static uint64_t g_done;
+static uint64_t g_done, g_done_ns;   // g_done_ns: when the completion thread last passed a submission (vk_device_lost)
+static uint64_t g_cur_frame;   // (defined with the GPU time per frame, below)
+// ---- what led to a device lost (vk_device_lost) ----
+// The recent events that can make one: pipelines linked at draws and whole ones taking over (gfx_vk_exec.c graphics_pipeline), memory pools made and dropped, objects
+// freed from another thread than the one recording, images of a dropped pool (gfx_vk_tex.c vk_tex_drop_pool). A ring written lock-free from any thread: a report
+// may show an entry torn by a write racing it, which costs a line, not the report. And the last submissions with what they held (sub_note, the replay thread)
+typedef struct { uint64_t ns, open, a, b, c; uint32_t tid; int kind; } vkev_t;
+enum { EV_N = 512, SUBR_N = 64 };
+static vkev_t g_ev[EV_N]; static _Atomic uint64_t g_nev;
+uint32_t g_sub_draws, g_sub_fast_draws, g_sub_links, g_sub_takeovers;
+typedef struct { uint64_t fence, ns, frame; uint32_t tid, ncb, draws, fast, links, takeovers; } subrec_t;
+static subrec_t g_subr[SUBR_N]; static uint64_t g_nsubr;
+void vk_ev(int kind, uint64_t a, uint64_t b, uint64_t c) {
+    uint64_t i = atomic_fetch_add_explicit(&g_nev, 1, memory_order_relaxed); vkev_t *e = &g_ev[i % EV_N];
+    __atomic_store_n(&e->kind, -1, __ATOMIC_RELAXED);
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); e->ns = (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+    e->open = g_fence + 1; e->a = a; e->b = b; e->c = c; e->tid = (uint32_t)gettid();
+    __atomic_store_n(&e->kind, kind, __ATOMIC_RELEASE);
+}
+static const char *ev_free_kind(uint64_t k) { return k == 0 ? "buffer" : k == 1 ? "image" : k == 2 ? "image view" : k == 3 ? "buffer view" : k == 4 ? "image (block slot)" : "?"; }   // df_add's kinds
+static void sub_note(uint64_t f, uint32_t ncb) {   // mtl_sub_commit, after the submit (under g_sub_lock)
+    subrec_t *r = &g_subr[g_nsubr % SUBR_N]; struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+    *r = (subrec_t){f, (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec, __atomic_load_n(&g_cur_frame, __ATOMIC_RELAXED), (uint32_t)gettid(), ncb, g_sub_draws, g_sub_fast_draws, g_sub_links, g_sub_takeovers};
+    __atomic_store_n(&g_nsubr, g_nsubr + 1, __ATOMIC_RELEASE);
+    g_sub_draws = g_sub_fast_draws = g_sub_links = g_sub_takeovers = 0;
+}
 static void slots_init(void) {
     VkSemaphoreTypeCreateInfo ti = {VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO, NULL, VK_SEMAPHORE_TYPE_TIMELINE, 0};
     VkSemaphoreCreateInfo si = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &ti};
@@ -967,7 +1006,7 @@ static void wait_fence(uint64_t f) {
     if (!f) return;
     if (!V.has_timeline) { mtl_wait(f, ~0ull); return; }
     VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, NULL, 0, 1, &g_timeline, &f};
-    VkResult r = vkWaitSemaphores(V.dev, &wi, UINT64_MAX); if (r != VK_SUCCESS) die("[vk] GPU timeline wait did not complete: %d", r);
+    VkResult r = vkWaitSemaphores(V.dev, &wi, UINT64_MAX); if (r != VK_SUCCESS) vk_device_lost("GPU timeline wait", r);
 }
 // The slot's command buffers are reset on the completion thread once its submission is done (completion_main), not when the replay begins them again: an
 // implicit reset at vkBeginCommandBuffer took 7% of Xenoblade Chronicles 3's replay thread at a submission's start and more at every part (its battles
@@ -1016,7 +1055,7 @@ static void vk_cmd_split_(void) {
         if (!s->cb_err) {
             VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, NULL, 0, NULL, NULL, n, cbs, 0, NULL};
             pthread_mutex_lock(&g_vk_queue_mu); VkResult r = vkQueueSubmit(V.q, 1, &si, VK_NULL_HANDLE); pthread_mutex_unlock(&g_vk_queue_mu);
-            if (r) { void vk_crumbs_report(void); vk_crumbs_report(); die("[vk] vkQueueSubmit (part): %d (device lost?)", r); }
+            if (r) vk_device_lost("vkQueueSubmit (part)", r);
             { static int n; if (n++ < 3) VKLOG("a long submission: part %d sent early", s->nmain_used); }
             s->nmain_sent = s->nmain_used;
             if (s->up_used) {   // the next part records its uploads into a fresh upload buffer
@@ -1060,14 +1099,25 @@ void *vk_scratch(VkDeviceSize n, VkDeviceSize align, VkBuffer *buf, VkDeviceSize
 // The deferred frees have a lock of their own: the replay thread adds to its slot's list while it records (holding g_sub_lock for the whole submission), and a game
 // thread that finalizes a pool (nvnMemoryPoolFinalize → mtl_pool_del) adds to the same list without g_sub_lock. Unlocked, two first adds to a recycled slot crashed
 // Animal Crossing: New Horizons' release build (SIGSEGV in df_add: one thread had set capdf, the other wrote through the df still NULL). g_df_mu is above slot_recycle
+static pthread_t g_sub_thread; static int g_recycling = -1;   // (under g_df_mu) the thread recording the open submission; the slot mtl_sub_begin is recycling
 static void df_add(int kind, void *a, void *b) {
     pthread_mutex_lock(&g_df_mu);
     if (g_cur >= 0) {
         vksub_t *s = &g_slot[g_cur]; if (s->ndf == s->capdf) { s->capdf = s->capdf ? 2 * s->capdf : 64; s->df = realloc(s->df, s->capdf * sizeof *s->df); }
         s->df[s->ndf++] = (dfree_t){kind, a, b};
-        pthread_mutex_unlock(&g_df_mu); return;
+        int other = !pthread_equal(pthread_self(), g_sub_thread);
+        pthread_mutex_unlock(&g_df_mu);
+        if (other) {   // (vk_device_lost: frees from a game thread while the replay records; one event per burst, with the count so far)
+            static _Atomic uint64_t last, nx; uint64_t n = atomic_fetch_add(&nx, 1) + 1, t = pool_ns();
+            if (n == 1 || !(n & (n - 1))) VKLOG("frees from another thread than the replay's while it records: %llu so far (this one a %s, thread %d)", (unsigned long long)n, ev_free_kind((uint64_t)kind), (int)gettid());
+            if (t - atomic_load(&last) > 2000000ull) { atomic_store(&last, t); vk_ev(VKEV_XFREE, (uint64_t)kind, (uint64_t)(uintptr_t)a, n); } }
+        return;
     }
+    int rec = g_recycling >= 0;
     pthread_mutex_unlock(&g_df_mu);
+    if (rec) { vk_ev(VKEV_RECYCLE_FREE, (uint64_t)kind, (uint64_t)(uintptr_t)a, 0);   // the case mtl_sub_begin used to free too early
+        static _Atomic uint64_t nr; uint64_t n = atomic_fetch_add(&nr, 1) + 1;
+        if (n == 1 || !(n & (n - 1))) VKLOG("a free from thread %d while a submission slot was recycled (%llu so far): before the fix it was freed once the slot's last submission was done, not every submission so far", (int)gettid(), (unsigned long long)n); }
     {   // outside a submission (a pool finalized between frames): after everything submitted so far
         wait_fence(g_fence);
         if (kind == 0) { vkDestroyBuffer(V.dev, (VkBuffer)a, NULL); if (b) vkFreeMemory(V.dev, (VkDeviceMemory)b, NULL); }
@@ -1170,8 +1220,14 @@ void mtl_sub_begin(void) {
     pthread_mutex_lock(&g_sub_lock);
     // the next slot of the ring (g_cur is -1 between submissions, so it cannot say where the ring is: every submission took slot 0 and waited in slot_recycle
     // for the one before to finish on the GPU, which kept the replay of a frame from overlapping the GPU work of the last)
-    static int next; g_cur = next; next = (next + 1) % NSLOT; vksub_t *s = &g_slot[g_cur];
+    // The slot becomes the open one (g_cur, which df_add reads) only once it is recycled. Published before, a free from a game thread in between (nvnMemoryPoolFinalize
+    // of a pool: its buffer, its images and their views; under synchronous replay nothing holds that thread back) joined the list the recycle frees as soon as the
+    // slot's last submission is done, NSLOT submissions ago, while the newer ones the GPU had not finished could still read that memory. Meanwhile df_add waits
+    // for every submission so far, as between two submissions
+    static int next; int idx = next; next = (next + 1) % NSLOT; vksub_t *s = &g_slot[idx];
+    pthread_mutex_lock(&g_df_mu); g_recycling = idx; pthread_mutex_unlock(&g_df_mu);
     slot_recycle(s);
+    pthread_mutex_lock(&g_df_mu); g_recycling = -1; g_cur = idx; g_sub_thread = pthread_self(); pthread_mutex_unlock(&g_df_mu);
     s->npost = 0; s->up_used = 0; s->ngw = 0;
     { const char *e = getenv("DM_VK_POOL_READBACK_RANGES"); s->readback_ranges = e && atoi(e); }
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
@@ -1387,7 +1443,7 @@ static void *completion_main(void *a) {
         pthread_mutex_lock(&g_cmu);
         while (!g_ch) pthread_cond_wait(&g_ccv, &g_cmu);
         cpend *c = g_ch; pthread_mutex_unlock(&g_cmu);
-        if (V.has_timeline) wait_fence(c->fence); else { VkResult r = vkWaitForFences(V.dev, 1, &g_fring[c->fence % NFRING], VK_TRUE, UINT64_MAX); if (r != VK_SUCCESS) die("[vk] GPU fence wait did not complete: %d", r); }
+        if (V.has_timeline) wait_fence(c->fence); else { VkResult r = vkWaitForFences(V.dev, 1, &g_fring[c->fence % NFRING], VK_TRUE, UINT64_MAX); if (r != VK_SUCCESS) vk_device_lost("GPU fence wait", r); }
         if (g_shadow_pools && c->rslot >= 0) pools_copy_back(&g_slot[c->rslot]);
         if (g_tsq && c->slot >= 0) { uint64_t t[2]; if (vkGetQueryPoolResults(V.dev, g_tsq, 2 * (uint32_t)c->slot, 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] > t[0])
             { uint64_t ns = (uint64_t)((double)(t[1] - t[0]) * V.props.limits.timestampPeriod); g_gpu_ns += ns; int k = (int)(c->frame % 64);
@@ -1425,6 +1481,7 @@ static void *completion_main(void *a) {
         if (g_prereset > 0 && c->rslot >= 0) { vksub_t *s = &g_slot[c->rslot];   // its command buffers reset here (slot_recycle); the slot is not taken before g_done passes this fence
             if (s->fence == c->fence) { for (int i = 0; i < s->nmain_alloc; i++) vkResetCommandBuffer(s->mains[i], 0); for (int i = 0; i < s->nup_alloc; i++) vkResetCommandBuffer(s->ups[i], 0); } }
         pthread_mutex_lock(&g_done_mu); if (c->fence > g_done) __atomic_store_n(&g_done, c->fence, __ATOMIC_RELEASE); pthread_cond_broadcast(&g_done_cv); pthread_mutex_unlock(&g_done_mu);
+        __atomic_store_n(&g_done_ns, pool_ns(), __ATOMIC_RELAXED);
         free(c->ops); free(c);
     }
     return NULL;
@@ -1466,13 +1523,15 @@ uint64_t mtl_sub_commit(void) {
         fe = g_fring[f % NFRING]; VKCHK(vkResetFences(V.dev, 1, &fe)); si.pNext = NULL; si.signalSemaphoreCount = 0;
     }
     struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0); pthread_mutex_lock(&g_vk_queue_mu); VkResult r = vkQueueSubmit(V.q, 1, &si, fe); pthread_mutex_unlock(&g_vk_queue_mu); clock_gettime(CLOCK_MONOTONIC, &t1); g_ns_submit += (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000000ll + (t1.tv_nsec - t0.tv_nsec));
-    if (r) { void vk_crumbs_report(void); vk_crumbs_report(); die("[vk] vkQueueSubmit: %d (device lost?)", r); }
+    if (r) vk_device_lost("vkQueueSubmit", r);
     s->fence = f;
+    sub_note(f, (uint32_t)ncb);
     cpend *c = calloc(1, sizeof *c); c->fence = f; c->frame = __atomic_load_n(&g_cur_frame, __ATOMIC_RELAXED); c->n = s->npost; c->rslot = g_cur; c->slot = s->no_ts ? -1 : g_cur; s->no_ts = 0;
     c->npass = g_npass[g_cur]; memcpy(c->pmeta, g_pmeta[g_cur], sizeof(pass_meta) * (size_t)c->npass); c->noq = s->noq;
     if (s->npost) { c->ops = malloc(s->npost * sizeof *c->ops); memcpy(c->ops, s->post, s->npost * sizeof *c->ops); }
     pthread_mutex_lock(&g_cmu); if (g_ct) g_ct->next = c; else g_ch = c; g_ct = c; pthread_cond_signal(&g_ccv); pthread_mutex_unlock(&g_cmu);
-    s->npost = 0; g_cur = -1;
+    s->npost = 0;
+    pthread_mutex_lock(&g_df_mu); g_cur = -1; pthread_mutex_unlock(&g_df_mu);   // (after the submission: a free from here on waits for it, df_add)
     pthread_mutex_unlock(&g_sub_lock);
     return f;
 }
@@ -1488,3 +1547,61 @@ int mtl_wait(uint64_t fence, uint64_t timeout_ns) {
 }
 void mtl_finish(void) { mtl_wait(g_fence, ~0ull); }
 void mtl_drain(void) { mtl_finish(); vk_pipeline_cache_save(); }
+
+// A device lost, reported once: which submissions the GPU had not finished and what they held, what happened since a little before the oldest of them (vk_ev), the
+// driver's fault report (VK_EXT_device_fault: a page fault's address and kind, or a hang), and the crumbs (DM_VK_CRUMBS=1: the last pass the GPU finished). The first
+// thread to meet it reports; another one that meets it meanwhile (the completion thread's wait and the replay's submit both fail) waits for the process to end
+void vk_device_lost(const char *where, int result) {
+    static _Atomic int once;
+    if (atomic_exchange(&once, 1)) for (;;) pause();
+    uint64_t now = pool_ns(), done = vk_fence_done(), dns = __atomic_load_n(&g_done_ns, __ATOMIC_RELAXED), tl = 0; int tlr = -1;
+    if (V.has_timeline && vkGetSemaphoreCounterValue) tlr = vkGetSemaphoreCounterValue(V.dev, g_timeline, &tl);
+    VKLOG("[RED] [lost] device lost at %s (%d) on thread %d: submissions committed up to %llu; the completion thread passed %llu, %.0f ms ago; the timeline semaphore reads %llu (%d)",
+          where, result, (int)gettid(), (unsigned long long)g_fence, (unsigned long long)done, dns ? (now - dns) / 1e6 : -1.0, (unsigned long long)tl, tlr);
+    uint64_t ns_sub = __atomic_load_n(&g_nsubr, __ATOMIC_ACQUIRE), oldest = now; int shown = 0;
+    for (uint64_t i = ns_sub > SUBR_N ? ns_sub - SUBR_N : 0; i < ns_sub; i++) { const subrec_t *r = &g_subr[i % SUBR_N];
+        if (r->fence + 3 <= done) continue;   // the last three the GPU finished, for contrast, and every one after them
+        if (r->fence > done && r->ns < oldest) oldest = r->ns;
+        VKLOG("[lost] submission %llu (%s): committed %.0f ms ago on thread %u, frame %llu, %u command buffers: %u draws, %u of them with linked pipelines; %u pipelines linked, %u whole ones took over",
+              (unsigned long long)r->fence, r->fence <= done ? "finished" : "NOT finished", (now - r->ns) / 1e6, r->tid, (unsigned long long)r->frame, r->ncb, r->draws, r->fast, r->links, r->takeovers); shown++; }
+    if (!shown) VKLOG("[lost] no submission recorded after the last finished one");
+    uint64_t ne = atomic_load(&g_nev), from = oldest > 3000000000ull ? oldest - 3000000000ull : 0; int nl = 0, skipped = 0; uint64_t kinds[8] = {0};
+    for (uint64_t i = ne > EV_N ? ne - EV_N : 0; i < ne; i++) { const vkev_t *e = &g_ev[i % EV_N]; int k = __atomic_load_n(&e->kind, __ATOMIC_ACQUIRE); if (k >= 0 && k < 8) kinds[k]++; }
+    VKLOG("[lost] the last %llu events: %llu pipelines linked, %llu whole ones took over, %llu pools made, %llu dropped, %llu objects freed from another thread while the replay recorded, %llu pools' images dropped, %llu frees while a slot was recycled",
+          (unsigned long long)(ne < EV_N ? ne : EV_N), (unsigned long long)kinds[VKEV_LINK], (unsigned long long)kinds[VKEV_TAKEOVER], (unsigned long long)kinds[VKEV_POOL_ADD], (unsigned long long)kinds[VKEV_POOL_DEL],
+          (unsigned long long)kinds[VKEV_XFREE], (unsigned long long)kinds[VKEV_IMG_DROP], (unsigned long long)kinds[VKEV_RECYCLE_FREE]);
+    for (uint64_t i = ne > EV_N ? ne - EV_N : 0; i < ne; i++) {
+        const vkev_t *e = &g_ev[i % EV_N]; int k = __atomic_load_n(&e->kind, __ATOMIC_ACQUIRE);
+        if (k < 0 || e->ns < from) continue;
+        if (nl >= 160) { skipped++; continue; }
+        char b[300]; double ago = e->ns <= now ? (now - e->ns) / 1e6 : 0; unsigned long long a = e->a, bb = e->b, c = e->c, sz = bb & ((1ull << 56) - 1); int how = (int)(bb >> 56);
+        if (k == VKEV_LINK) snprintf(b, sizeof b, "pipeline linked at a draw: shaders %016llx %016llx, pipeline %#llx", a, bb, c);
+        else if (k == VKEV_TAKEOVER) snprintf(b, sizeof b, "whole pipeline took over from the linked one: shaders %016llx %016llx, pipeline %#llx", a, bb, c);
+        else if (k == VKEV_POOL_ADD) snprintf(b, sizeof b, "memory pool made: %#llx +%#llx, %s, buffer %#llx", a, sz, how == 0 ? "copied" : how == 2 ? "a slab's slot" : "zero-copy", c);
+        else if (k == VKEV_POOL_DEL) snprintf(b, sizeof b, "memory pool dropped: %#llx +%#llx, buffer %#llx %s", a, sz, c, how == 1 ? "kept for reuse" : how == 2 ? "(its slab slot given back)" : "freed after the open submission");
+        else if (k == VKEV_XFREE) snprintf(b, sizeof b, "%s %#llx freed from another thread while the replay records (into the open submission's list; %llu such frees so far)", ev_free_kind(a), bb, c);
+        else if (k == VKEV_IMG_DROP) snprintf(b, sizeof b, "images of a dropped pool: pool %#llx, %llu images", a, bb);
+        else if (k == VKEV_RECYCLE_FREE) snprintf(b, sizeof b, "%s %#llx freed while a slot was recycled (waited for every submission first)", ev_free_kind(a), bb);
+        else snprintf(b, sizeof b, "event %d %#llx %#llx %#llx", k, a, bb, c);
+        VKLOG("[lost]   %.1f ms ago, thread %u, submission %llu open: %s", ago, e->tid, (unsigned long long)e->open, b); nl++;
+    }
+    if (skipped) VKLOG("[lost]   (%d more events in that time not shown)", skipped);
+    if (V.has_fault && g_fault_info) {
+        VkDeviceFaultCountsEXT n = {.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+        VkResult fr = g_fault_info(V.dev, &n, NULL);
+        VKLOG("[lost] the driver's fault report: %d, %u addresses, %u vendor records", fr, n.addressInfoCount, n.vendorInfoCount);
+        if (fr >= 0) {
+            VkDeviceFaultAddressInfoEXT ad[16]; VkDeviceFaultVendorInfoEXT vd[16]; memset(ad, 0, sizeof ad); memset(vd, 0, sizeof vd);
+            if (n.addressInfoCount > 16) n.addressInfoCount = 16; if (n.vendorInfoCount > 16) n.vendorInfoCount = 16; n.vendorBinarySize = 0;
+            VkDeviceFaultInfoEXT fi; memset(&fi, 0, sizeof fi); fi.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT; fi.pAddressInfos = n.addressInfoCount ? ad : NULL; fi.pVendorInfos = n.vendorInfoCount ? vd : NULL;
+            fr = g_fault_info(V.dev, &n, &fi);
+            static const char *const at[] = {"none", "a read of an invalid address", "a write to an invalid address", "execution at an invalid address", "instruction pointer unknown", "instruction pointer invalid", "instruction pointer at the fault"};
+            VKLOG("[lost] fault (%d): %s", fr, fi.description);
+            for (uint32_t i = 0; i < n.addressInfoCount; i++) VKLOG("[lost]   address %#llx (precision %#llx): %s", (unsigned long long)ad[i].reportedAddress, (unsigned long long)ad[i].addressPrecision,
+                                                                     (unsigned)ad[i].addressType < 7 ? at[ad[i].addressType] : "?");
+            for (uint32_t i = 0; i < n.vendorInfoCount; i++) VKLOG("[lost]   vendor: %s (code %#llx, data %#llx)", vd[i].description, (unsigned long long)vd[i].vendorFaultCode, (unsigned long long)vd[i].vendorFaultData);
+        }
+    } else VKLOG("[lost] no fault report from the driver (VK_EXT_device_fault %s)", V.has_fault ? "did not load" : "not enabled");
+    { void vk_crumbs_report(void); vk_crumbs_report(); }
+    die("[vk] %s failed: %d (device lost)", where, result);
+}
