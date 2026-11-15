@@ -170,3 +170,30 @@ int nvn_tbuf_rows(uint64_t n, uint32_t bpb, uint32_t align, uint32_t *w, uint32_
     *row = (uint32_t)r;
     return *h == 1 || r == (uint64_t)NVN_TBUF_ROW * bpb;   // several rows must lie back to back, as the wrapped address assumes
 }
+
+// nvnTextureBuilderGetSparseTileLayout / nvnTextureGetSparseTileLayout: the NVNtextureSparseTileLayout (8 words) of a texture. Disgaea 4 (main+0x5a76c8) sizes a buffer from
+// width/height (align_up(texWidth, width) * bpp/8 * align_up(texHeight, height)), so they must be real powers of two; width 0 means "no tiles" and the game skips the sizing.
+// The shapes are the standard 64 KB sparse tile shapes in blocks, picked by bytes per block; width/height are in texels (blocks * block size).
+// out: [0] numTiledLevels, [1] tile width, [2] tile height, [3] tile depth, [4..7] reserved (0)
+void nvn_sparse_tile_layout(const nvn_texdesc *d, int32_t out[8]) {
+    for (int i = 0; i < 8; i++) out[i] = 0;
+    int bw, bh, bpb = nvn_fmt_bpb(d->format, &bw, &bh);
+    int idx = bpb == 1 ? 0 : bpb == 2 ? 1 : bpb == 4 ? 2 : bpb == 8 ? 3 : bpb == 16 ? 4 : -1;
+    if (idx < 0 || d->samples > 1) return;
+    static const int s2d[5][2] = {{256,256},{256,128},{128,128},{128,64},{64,64}};      // tile width x height in blocks, 2D and every other non-3D target
+    static const int s3d[5][3] = {{64,32,32},{32,32,32},{32,32,16},{32,16,16},{16,16,16}};   // width x height x depth in blocks, 3D (target 2)
+    int is3d = d->target == 2;   // NVN_TEXTURE_TARGET_3D
+    int tw = (is3d ? s3d[idx][0] : s2d[idx][0]) * bw, th = (is3d ? s3d[idx][1] : s2d[idx][1]) * bh, td = is3d ? s3d[idx][2] : 1;
+    out[1] = tw; out[2] = th; out[3] = td;
+    unsigned levels = d->levels ? d->levels : 1;
+    int n = 0;
+    for (unsigned i = 0; i < levels; i++) {
+        uint32_t w = d->width >> i, h = d->height >> i, z = d->depth >> i;
+        if (!w) w = 1;
+        if (!h) h = 1;
+        if (!z) z = 1;
+        if (w < (uint32_t)tw || h < (uint32_t)th || (is3d && z < (uint32_t)td)) break;
+        n++;
+    }
+    out[0] = n;
+}

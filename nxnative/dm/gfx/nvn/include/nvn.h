@@ -54,9 +54,13 @@ typedef struct {
 } NVNdeviceBuilder;
 
 typedef struct {
-    // TODO: reverse and define this as it looks like it's not an opaque type.
-    char dummy[1];
+    int32_t numTiledLevels;
+    int32_t width;    // tile size in texels
+    int32_t height;
+    int32_t depth;
+    int32_t reserved[4];
 } NVNtextureSparseTileLayout;
+_Static_assert(sizeof(NVNtextureSparseTileLayout) == 0x20, "NVNtextureSparseTileLayout is 0x20 bytes");
 
 typedef struct {
     // TODO: reverse and define this as it looks like it's not an opaque type.
