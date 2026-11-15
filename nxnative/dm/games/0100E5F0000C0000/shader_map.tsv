@@ -1,0 +1,17 @@
+# kind: evidence  Disgaea 5: Alliance of Vengeance shaders (provisional profile) (BNSH / BAHS in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)
+# column 5 records where each key first appears; this game has no PC version to pair with
+package	index	stage	dm_ctl_sha16	source
+vs_main.bin	0	vertex	608516adac496f0a	main#BNSH@0x5cbb50#var0
+ps_main.bin	0	pixel	b445d5fbab40be7d	main#BNSH@0x5cbb50#var0
+vs_main.bin	1	vertex	69c73c96197c8302	main#BNSH@0x5ced68#var0
+ps_main.bin	1	pixel	796c5b1a458dcc80	main#BNSH@0x5ced68#var0
+ps_main.bin	2	pixel	8df6f45bea6f5c32	main#BNSH@0x5d1f78#var0
+vs_main.bin	2	vertex	a97336371de1b2cf	main#BNSH@0x5d1f78#var0
+vs_main.bin	3	vertex	5048eb0149b53be4	main#BNSH@0x5d5198#var0
+ps_main.bin	3	pixel	551c08e4af439e25	main#BNSH@0x5d5198#var0
+ps_main.bin	4	pixel	696fe09bdbede1b1	main#BNSH@0x5d8328#var0
+vs_main.bin	4	vertex	ca9a165dfd624ccb	main#BNSH@0x5d8328#var0
+ps_main.bin	5	pixel	805a0711339365ee	main#BNSH@0x5db558#var0
+vs_main.bin	5	vertex	821aa7bae501f4d8	main#BNSH@0x5db558#var0
+vs_main.bin	6	vertex	a61fa5d53a3a4900	main#BNSH@0x5de6c8#var0
+ps_main.bin	6	pixel	cfbdc66939008c67	main#BNSH@0x5de6c8#var0

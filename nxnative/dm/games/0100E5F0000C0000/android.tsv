@@ -1,0 +1,11 @@
+# Disgaea 5: Alliance of Vengeance (update 1.0.3 = v196608, SDK 1.7.1 — the oldest SDK the runtime has run) on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android")
+# nn::gfx with seven BNSH programs in main (14 shaders, shader_split.py); modules main, subsdk0-4, sdk. What it needed in the core, all gated on its SDK:
+# the audio renderer served by the host (SDK 1.x has only the audren:u client: hle_audren_srv.c / hle_audren_upd.c, phase 1 protocol + phase 2 mixer), NVIDIA's NvOsAlloc heap
+# given the game's allocator (hle_nv.c: the opening movie's stagefright allocates through it and crashed on its 16 KB default), SDK 1's two-argument movie::Decoder and its
+# output numbering (hle_movie.c), and real H.264 packet times kept for MediaCodec (movie_avc.c: the movie's B-frames showed out of order under made-up times).
+# Retroid Pocket Nova (QCS8550, Adreno 740, Turnip T30), 2026-11-15: logo, opening movie with sound, title, new game, field and battle, played by the user: picture, sound
+# effects, music and voices all correct; 60 fps (frame work ~4 ms, GPU ~0.4 ms). Left: a few pictures still out of order late in the opening movie (~30 of 600)
+status	playable
+tested	v196608 Retroid Pocket Nova (QCS8550, Adreno 740, Turnip T30, Android 13)
+package	org.nx2a.t0100e5f0000c0000
+orientation	landscape

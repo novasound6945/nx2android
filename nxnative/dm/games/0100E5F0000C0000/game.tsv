@@ -1,0 +1,35 @@
+# Game profile from the survey (profile_guess.py), memory and modules unchanged; brought up on Android 2026-11-15 (android.tsv)
+# Disgaea 5: Alliance of Vengeance, SDK 1, survey <NSP folder>/0100E5F0000C0000_survey/survey.md
+
+# ---- Identity ----
+title_id	0100E5F0000C0000
+program_id	0100E5F0000C0000
+
+# ---- App ----
+name	Disgaea 5: Alliance of Vengeance
+ipa	Disgaea5AllianceOfVengeance.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v196608	1.0.3	main=48f474f4a87011d37e2ce7f015216fe6	subsdk0=94961ef6ab576dd094f9c108e6a0f6f2	subsdk1=79a2b23a1b8772fdd6a2bd7317ea1fa0	subsdk2=ff25661ada3996273198b2a08dd2a337	subsdk3=9216d186124767ab6fcbaf066cc195de	subsdk4=f7a7de249fae913e1762f74b65ab321a	sdk=75aa20bb0048b998c88b70e293b5e9ca
+package	v196608
+shader_versions	v196608
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 subsdk1 subsdk2 subsdk3 subsdk4 sdk
+romfs_marker	Data/Anime/ANM_HI_JP.dat
+zip_store	.dat:.mp4:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB − 149 MB of bss (counted as used memory): a 3072 MB heap region
+mem_reserve	0xf0000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	Disgaea 5: Alliance of Vengeance shaders (provisional profile)
