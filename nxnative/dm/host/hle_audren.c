@@ -30,10 +30,14 @@ void dm_pcmout_wait(void *k, int ms);
 enum { P_DEVICE = 0x2c, P_MODE = 0x30, P_SIZE = 0x40, FRAME_MAX = 1024, NBUF = 4 };
 static void *gsym(const char *n) { void *p = guest_sym(n); if (!p) die("audren: missing SDK symbol %s", n); return p; }
 static void cpu_manual(uint8_t *dst, const uint8_t *src) { memcpy(dst, src, P_SIZE); *(int32_t *)(dst + P_DEVICE) = 1; *(int32_t *)(dst + P_MODE) = 1; }
+// SDK 1.x has no in-process renderer to switch to (dm_audren_served, hle_audren_srv.c): the work buffer size and OpenAudioRenderer go to the SDK as the game called them, and
+// its client talks to the host's audren:u. Its parameter is 0x34 bytes with the revision at +0x30, where cpu_manual writes the execution mode
+int dm_audren_served(void);
 
 HLE_FORCE("_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererParameterE", "renderer work buffer size: computed for CPU rendering + manual execution",
           size_t, h_ar_WorkSize, const uint8_t *param) {
     static size_t (*orig)(const uint8_t *); if (!orig) orig = gsym("_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererParameterE");
+    if (dm_audren_served()) return orig(param);
     uint8_t p[P_SIZE]; cpu_manual(p, param); size_t n = orig(p);
     { static int once; if (!once++) LOG("audren: work buffer %#zx", n); }
     return n;
@@ -116,6 +120,7 @@ static Result ar_open(void **handle, void *ev, const uint8_t *param, void *work,
     if (!orig_ev) orig_ev = gsym("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleEPNS_2os11SystemEventERKNS0_22AudioRendererParameterEPvm");
     if (!orig) orig = gsym("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleERKNS0_22AudioRendererParameterEPvm");
     if (t_in_open) return orig(handle, param, work, sz);
+    if (dm_audren_served()) return ev ? orig_ev(handle, ev, param, work, sz) : orig(handle, param, work, sz);   // the SDK's client, to the host's audren:u
     uint8_t p[P_SIZE]; cpu_manual(p, param);
     LOG("audren: OpenAudioRenderer%s rate %d samples per frame %d mix buffers %d submixes %d voices %d sinks %d effects %d splitters %d (original device %d mode %d → CPU / manual) work buffer %p+%#zx",
         ev ? "" : " (no event)", *(int32_t *)param, *(int32_t *)(param + 4), *(int32_t *)(param + 8), *(int32_t *)(param + 0xc), *(int32_t *)(param + 0x10), *(int32_t *)(param + 0x14),

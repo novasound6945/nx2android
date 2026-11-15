@@ -10,12 +10,15 @@
 // Message layout (Atmosphère / libnx): HIPC header {u16 type, counts of X / A / B / W descriptors; u32 data words, receive list, special header flag}, the special header and descriptors,
 // then the data words, whose CMIF part starts 16-byte aligned to the buffer: in a domain session the domain header {u8 type, u8 objects, u16 size, u32 object, u32, u32 token} first,
 // then {"SFCI", version, command, token} and the arguments. The response is the same with {u32 objects, 3 × u32} and {"SFCO", version, result, token}
+// audren:u (the audio renderer) is served on SDKs whose renderer is only in the service (dm_audren_served): its requests are decoded into an sf_call (hle_sf.h) for
+// hle_audren_srv.c, with the buffer descriptors, raw output, copied handles and out objects (new sessions whose handles are moved to the client) the others do not need
 #include "hle.h"
+#include "hle_sf.h"
 #include <pthread.h>
 
 #define SF_H0 0xd0000u   // session handles: outside the kernel handle table (0x1000 + slot, 4096 slots, hle_thread.c)
 #define SF_MAX 64
-static struct { char name[16]; int used, domain; unsigned seen; } g_sf[SF_MAX];
+static struct { char name[16]; int used, domain; unsigned seen; void *obj; } g_sf[SF_MAX];   // obj: the host state of a session an out object opened (sf_call.obj)
 static pthread_mutex_t g_sf_mu = PTHREAD_MUTEX_INITIALIZER;
 static const char *const sf_served[] = {"olsc:u", "bt", "btm:u"};
 int svc_thread(int num, uint64_t *regs);
@@ -30,14 +33,15 @@ static int sf_slot(uint32_t h) {
     unsigned i = h - SF_H0;
     return i < SF_MAX && g_sf[i].used ? (int)i : -1;
 }
-static uint32_t sf_new(const char *name, int domain) {
+static uint32_t sf_new_obj(const char *name, int domain, void *obj) {
     pthread_mutex_lock(&g_sf_mu);
     unsigned i = 0; while (i < SF_MAX && g_sf[i].used) i++;
     if (i == SF_MAX) die("sf: more than %d host service sessions", SF_MAX);
-    strlcpy(g_sf[i].name, name, sizeof g_sf[i].name); g_sf[i].used = 1; g_sf[i].domain = domain; g_sf[i].seen = 0;
+    strlcpy(g_sf[i].name, name, sizeof g_sf[i].name); g_sf[i].used = 1; g_sf[i].domain = domain; g_sf[i].seen = 0; g_sf[i].obj = obj;
     pthread_mutex_unlock(&g_sf_mu);
     return SF_H0 + i;
 }
+static uint32_t sf_new(const char *name, int domain) { return sf_new_obj(name, domain, NULL); }
 
 HLE_FORCE("_ZN2nn2sf4hipc31InitializeHipcServiceResolutionEv", "service name resolution (connects to sm); the host resolves the names it serves itself", Result, h_sf_InitRes, void) { return RES_OK; }
 HLE_FORCE("_ZN2nn2sf4hipc29FinalizeHipcServiceResolutionEv", "service name resolution (sm)", void, h_sf_FinRes, void) {}
@@ -45,13 +49,19 @@ HLE_FORCE("_ZN2nn2sf4hipc20ConnectToHipcServiceEPNS_3svc6HandleEPKc", "connect t
           uint32_t *out, const char *name) {
     for (size_t k = 0; k < sizeof sf_served / sizeof *sf_served; k++)
         if (!strncmp(name, sf_served[k], 8)) { *out = sf_new(sf_served[k], 0); LOG("sf: %s → host session %#x", sf_served[k], *out); return RES_OK; }
+    if (!strncmp(name, "audren:u", 8) && dm_audren_served()) { *out = sf_new("audren:u", 0); LOG("sf: audren:u → host session %#x (the host's audio renderer service)", *out); return RES_OK; }
     LOG("[RED] sf: the game connects to service %.8s itself, which the host does not serve", name);
     return 0xe15u;   // sm ResultNotRegistered
 }
 HLE_FORCE("_ZN2nn2sf4hipc24CloseClientSessionHandleENS_3svc6HandleE", "close a session (kernel handle) → the host session", void, h_sf_Close, uint32_t h) {
     int i = sf_slot(h);
     if (i < 0) { LOG("[RED] sf: CloseClientSessionHandle on %#x, not a host session", h); return; }
-    pthread_mutex_lock(&g_sf_mu); g_sf[i].used = 0; pthread_mutex_unlock(&g_sf_mu);
+    char name[16]; void *obj; int last = 1;
+    pthread_mutex_lock(&g_sf_mu);
+    memcpy(name, g_sf[i].name, sizeof name); obj = g_sf[i].obj; g_sf[i].used = 0; g_sf[i].obj = NULL;
+    for (unsigned k = 0; obj && k < SF_MAX; k++) if (g_sf[k].used && g_sf[k].obj == obj) last = 0;   // a duplicated session still holds the object
+    pthread_mutex_unlock(&g_sf_mu);
+    if (obj && last && !strncmp(name, "audren:", 7)) sf_audren_close(name, obj);
 }
 // Control requests: the pointer buffer is the server's receive buffer for X descriptors (none: the host reads them in place), the domain conversion makes the session's object 1, a duplicate
 // is a new session to the same object
@@ -68,10 +78,59 @@ HLE_FORCE("_ZN2nn2sf4hipc6client22ConvertSessionToDomainEPNS0_4cmif18CmifDomainO
 HLE_FORCE("_ZN2nn2sf4hipc6client16DuplicateSessionEPNS_3svc6HandleES4_", "control request: clone a session → a new host session to the same service", Result, h_sf_Dup, uint32_t *out, uint32_t h) {
     int i = sf_slot(h);
     if (i < 0) { LOG("[RED] sf: DuplicateSession on %#x, not a host session", h); return RES_FAIL; }
-    *out = sf_new(g_sf[i].name, g_sf[i].domain); return RES_OK;
+    *out = sf_new_obj(g_sf[i].name, g_sf[i].domain, g_sf[i].obj); return RES_OK;
 }
 HLE_FORCE("_ZN2nn2sf4hipc6client18DuplicateSessionExEPNS_3svc6HandleES4_j", "control request: clone a session (with a tag) → a new host session to the same service", Result, h_sf_DupEx,
           uint32_t *out, uint32_t h, unsigned tag) { (void)tag; return h_sf_Dup(out, h); }
+
+// The decoded path (hle_sf.h). Descriptors: X {u32 index:6, address bits 36-41:6, bits 32-35:4, size:16; u32 address low}; A / B / W {u32 size low; u32 address low;
+// u32 mode:2, address bits 36-57:22, size bits 32-35:4, address bits 32-35:4}. All of it, and the raw arguments, is read before the answer goes over the message buffer
+static Result sf_serve(int i, uint32_t *m, uint64_t size, int dom, size_t hin, size_t dend, uint32_t ver, unsigned cmd, int trace) {
+    uint8_t *base = (uint8_t *)m;
+    if (dom) { LOG("[RED] sf: %s was converted to a domain, which its host service does not take", g_sf[i].name); return 0xe401u; }
+    sf_call c; memset(&c, 0, sizeof c);
+    unsigned nx = m[0] >> 16 & 15, na = m[0] >> 20 & 15, nb = m[0] >> 24 & 15, nw = m[0] >> 28 & 15;
+    uint32_t *p = m + 2;
+    if (m[1] >> 31) {
+        uint32_t sh = *p++; unsigned nc = sh >> 1 & 15, nm = sh >> 5 & 15;
+        if (sh & 1) p += 2;   // the process ID (the kernel's to fill)
+        for (unsigned k = 0; k < nc; k++) if (c.ncopy_in < 8) c.copy_in[c.ncopy_in++] = p[k];
+        p += nc;
+        for (unsigned k = 0; k < nm; k++) if (c.nmove_in < 8) c.move_in[c.nmove_in++] = p[k];
+        p += nm;
+    }
+    for (unsigned k = 0; k < nx; k++, p += 2)
+        if (c.nx < 8) c.x[c.nx++] = (sf_buf){p[1] | (uint64_t)(p[0] >> 12 & 15) << 32 | (uint64_t)(p[0] >> 6 & 63) << 36, p[0] >> 16};
+    for (unsigned k = 0; k < na + nb + nw; k++, p += 3) {
+        sf_buf d = {p[1] | (uint64_t)(p[2] >> 28) << 32 | (uint64_t)(p[2] >> 2 & 0x3fffff) << 36, p[0] | (uint64_t)(p[2] >> 24 & 15) << 32};
+        if (k < na) { if (c.na < 8) c.a[c.na++] = d; }
+        else if (k < na + nb) { if (c.nb < 8) c.b[c.nb++] = d; }
+    }
+    uint8_t in[0x100]; size_t ib = hin + 16, n = dend > ib ? dend - ib : 0;
+    if (n > sizeof in) n = sizeof in;
+    if (ib + n > size) n = size > ib ? (size_t)size - ib : 0;
+    memcpy(in, base + ib, n);
+    c.in = in; c.in_n = n; c.iface = g_sf[i].name; c.obj = g_sf[i].obj; c.cmd = cmd;
+    Result result = sf_audren(&c);
+    uint32_t moved[2]; unsigned nm = 0;
+    for (unsigned k = 0; k < c.nobjs && k < 2; k++) moved[nm++] = sf_new_obj(c.objs[k].iface, 0, c.objs[k].obj);
+    if (trace) LOG("sf: %s command %u (%zu bytes in, %u copied and %u moved handles, %u X / %u A / %u B buffers): result %#x, %zu bytes out, %u copied handles, %u objects",
+                   g_sf[i].name, cmd, n, c.ncopy_in, c.nmove_in, c.nx, c.na, c.nb, result, c.out_n, c.ncopy_out, nm);
+    // The answer: a special header with the handles (copied, then moved) when there are any, then the CMIF part 16-byte aligned to the buffer
+    size_t end = size < 0x1000 ? size : 0x1000;
+    memset(base, 0, end);
+    uint32_t *q = m + 2;
+    if (c.ncopy_out || nm) {
+        m[1] = 0x80000000u; *q++ = c.ncopy_out << 1 | nm << 5;
+        for (unsigned k = 0; k < c.ncopy_out; k++) *q++ = c.copy_out[k];
+        for (unsigned k = 0; k < nm; k++) *q++ = moved[k];
+    }
+    size_t ds = (size_t)((uint8_t *)q - base), cm = (ds + 15) & ~(size_t)15;
+    m[1] |= (uint32_t)((end - ds) / 4 < 0x3ff ? (end - ds) / 4 : 0x3ff);
+    uint32_t *o = (uint32_t *)(base + cm); o[0] = 0x4f434653; o[1] = ver; o[2] = result; o[3] = 0;   // "SFCO"
+    if (c.out_n) memcpy(o + 4, c.out, c.out_n < sizeof c.out ? c.out_n : sizeof c.out);
+    return RES_OK;
+}
 
 HLE_FORCE("_ZN2nn2sf4hipc15SendSyncRequestENS_3svc6HandleEPvm", "send a request on a session (svcSendSyncRequest) → answered by the host for its sessions", Result, h_sf_Send,
           uint32_t h, uint32_t *m, uint64_t size) {
@@ -90,9 +149,11 @@ HLE_FORCE("_ZN2nn2sf4hipc15SendSyncRequestENS_3svc6HandleEPvm", "send a request 
     uint32_t magic = *(uint32_t *)(base + hin), ver = *(uint32_t *)(base + hin + 4), cmd = *(uint32_t *)(base + hin + 8);
     static int trace = -1; if (trace < 0) trace = getenv("DM_SF_TRACE") && atoi(getenv("DM_SF_TRACE"));
     if (trace) { char hx[3 * 0x80 + 1] = ""; for (unsigned k = 0; k < 0x80 && k < size; k++) snprintf(hx + 3 * k, 4, "%02x ", base[k]); LOG("sf: %s request: %s", g_sf[i].name, hx); }
+    if (type == 2 && !strncmp(g_sf[i].name, "audren:", 7)) return RES_OK;   // CMIF Close: a proxy released, its handle is closed next (CloseClientSessionHandle)
     if (type != 4 && type != 6) { LOG("[RED] sf: %s: HIPC message type %u not served", g_sf[i].name, type); return 0xe401u; }
     if (dtype == 2) { memset(base, 0, 16); return RES_OK; }   // a domain object closed: nothing to answer
     if (magic != 0x49434653) { LOG("[RED] sf: %s: request without SFCI (%#x)", g_sf[i].name, magic); return 0xe401u; }
+    if (!strncmp(g_sf[i].name, "audren:", 7)) return sf_serve(i, m, size, dom, hin, data + (size_t)ndw * 4, ver, cmd, trace);
     unsigned key = (obj & 0xff) << 16 | (cmd & 0xffff);   // log each object / command once
     pthread_mutex_lock(&g_sf_mu); int first = g_sf[i].seen != key; g_sf[i].seen = key; pthread_mutex_unlock(&g_sf_mu);
     uint32_t handle = 0, special = 0, child = 0; int acquired = 0; Result result = RES_OK;
