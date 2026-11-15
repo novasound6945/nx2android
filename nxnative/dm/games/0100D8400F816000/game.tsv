@@ -7,7 +7,7 @@ program_id	0100D8400F816000
 
 # ---- App ----
 name	마계전기 디스가이아 4 리턴
-ipa	4.ipa
+ipa	Disgaea4Return.ipa
 app_category	public.app-category.games
 
 # ---- Versions ----
