@@ -32,6 +32,7 @@
 #   · Monolith archives (Xenoblade Chronicles 3: bf3.arh index + bf3.ard data): HCPS shader archives (a control section and a code area per stage, vertex / pixel per program) in the files and in
 #       their xbc1 streams (zstd / zlib), see arh_entries, ard_shaders and spch_shaders
 #   · control sections loose in main, in no GLSLC output or BNSH file (Advance Wars 1+2: Re-Boot Camp's Bink 2 shaders): paired with their code areas by data records or adjacency, see raw_shaders
+#   · NMPL shader objects (Nippon Ichi Software's Nmpl engine, Disgaea 4 Return: 'NMPL_NVN' … 'SHADER', a header, reflection, control section and code area each; 65 in main's data), see nmpl_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -800,6 +801,29 @@ def adrp_targets(d, lo, hi):
                 break
     return out
 
+NMPL = b'NMPL_NVN'
+def nmpl_shaders(d, label):
+    """Nippon Ichi Software's Nmpl engine shader objects (Disgaea 4 Return, SDK 7: 65 back to back in main's .data from main+0x7e6490, the engine's whole set, Nmpl::Gra::CGraShaderNx; none in its
+    RomFS, whose NSAC archives of LZS entries hold models, textures and effects): 'NMPL_NVN', u16 (0x1cc1 in all 65), 'SHADER', then u32 words: +0x10 reflection offset (0x30, the header's
+    length), +0x14 control offset, +0x18 code offset, +0x1c reflection length, +0x20 control length (0x850 or 0x838), +0x24 code length, +0x28 (0, 0x40000 for the one 0x1100-byte pixel shader:
+    perhaps its scratch memory), +0x2c (0x6e or 0); the reflection (uniform block, attribute and varying names: GLOBAL_UB, in_position, to_texcoord, …) runs from +0x30 to the control section,
+    the code area follows it, and the next object starts where the code ends. One stage each, by the SPH (12 vertex, 52 pixel, 1 geometry), with no program table beside them, so they are
+    paired as single-stage programs. raw_shaders saw only their control sections, without a code area (the code takes each object's address, not its control section's), and left them all
+    out: the split found no shader. The words are checked against each other before the bytes count as an object, so the same 8 bytes in other data add nothing; an object whose control and
+    code fail the triple check is a red line"""
+    out = []
+    for m in re.finditer(re.escape(NMPL), d):
+        b = m.start()
+        if d[b + 10:b + 16] != b'SHADER' or b + 0x30 > len(d): continue
+        ro, co, ko, rl, cl, kl = struct.unpack_from('<6I', d, b + 0x10)
+        if ro != 0x30 or not (ro + rl <= co and co + cl <= ko) or b + ko + kl > len(d) or d[b + co:b + co + 4] != CTL_MAGIC: continue
+        ctl, code = d[b + co:b + co + cl], d[b + ko:b + ko + kl]
+        st = glslc_stage(ctl, code)
+        why = 'its code area has no stage header' if not st else check(label, st, ctl, code)
+        if why: red(f'{label} NMPL shader @{b:#x}: {why}')
+        out.append((f'{label}#NMPL@{b:#x}', st, ctl, code))
+    return out
+
 def raw_shaders(d, label, known=()):
     """Control sections in main that are in no GLSLC output and no BNSH file: a shader compiled offline whose control section and code area the code hands to nvnShaderData itself (Advance Wars 1+2:
     Re-Boot Camp, Unity 2020.2 with Bink 2: the movie player's 32: 2 vertex, 22 pixel and 8 compute shaders; without them its movies drew white). Most are 0x20-byte records in data {code area
@@ -1379,6 +1403,7 @@ def scan_blob(d, label, out):
         if m.start() + size <= len(d) and d[m.start() + 0x60:m.start() + 0x64] == b'grsc': out.extend(bnsh_shaders(d, m.start(), label))
     if MGFX in d: out.extend(mgfx_shaders(d, label))
     if b'SLCT' in d: out.extend(slct_loose(d, label))   # Monolith SLCTs outside an HCPS (Xenoblade Chronicles 3's main)
+    if NMPL in d: out.extend(nmpl_shaders(d, label))   # Nippon Ichi's Nmpl shader objects (Disgaea 4 Return's main)
 
 def group(label):
     """source group (second half of the package file name)"""
@@ -1391,10 +1416,10 @@ def ps_inputs(code):
     """Generic attributes a pixel shader reads: SPH words 6–13 are the input map, 8 bits for each of the 32 attributes (Ryujinx ShaderHeader.ImapTypes), non-zero = read; the translated MSL inputs are exactly user(locn<attribute>)"""
     return {i for i in range(32) if struct.unpack_from('<I', code, 0x30 + 4 * (6 + (i >> 2)))[0] >> ((i & 3) * 8) & 0xff}
 
-SINGLE_STAGE = ('#GLSLC@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#NMPL@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
-# archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); and control sections loose in main
-# (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs
+# archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
+# (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; and Nippon Ichi's Nmpl shader objects (Disgaea 4 Return, nmpl_shaders), one stage each with no program table
 def separable_pairs(keys):
     """Single-stage programs (13 Sentinels: each GLSLC output becomes a program with one stage, and BindProgram's stage bits combine vertex and pixel programs per draw; Unreal combines its shaders per draw
     from the pipeline state) have their real pairs only at draw time. vs_pad uses only the union of the locations the paired pixel shaders read, so every single-stage vertex shader is paired with
@@ -1503,7 +1528,7 @@ def scan_file(args):
         import unityfs
         try: unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NMPL not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside
@@ -1632,7 +1657,7 @@ def main():
                                             ('MSHD', any('#MSHD#' in r[4] for r in rows)), ('GLSLC', any('#GLSLC@' in r[4] for r in rows)), ('RE Engine SDF', any('#SDF#' in r[4] for r in rows)),
                                             ('MT Framework SPK', any('#MTSPK@' in r[4] for r in rows)), ('MonoGame MGFX', any('#MGFX@' in r[4] for r in rows)),
                                             ('PlatinumGames shader objects', any('#PGSO' in r[4] for r in rows)), ('Monolith SLCT', any('#HCPS@' in r[4] or '#SLCT@' in r[4] for r in rows)),
-                                            ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
+                                            ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows)), ('Nmpl shader objects', any('#NMPL@' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
         f.write('# column 5 records where each key first appears; this game has no PC version to pair with\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')
