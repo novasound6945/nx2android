@@ -17,6 +17,13 @@ env	DM_VK_BIND_ALIAS=52fcbb4ca2a78907:2=3:4=3
 # The rate is held at 60, not adapted: the field's frame work sits at the period (p50 16.9 ms on the Retroid Pocket 6), so the adaptive rate stepped down to 40 and back
 # all session, which the player saw as the frame rate jumping. The pause menu's Frame rate limit (settings.txt rate=) still wins: its Auto is this pin (front_android.c rate_apply)
 env	DM_FPS_PIN=60
+# The GPU at its highest clock (DM_GPU_TURBO, perf_android.c). The game waits for each frame's GPU work before it submits the next, so the GPU idles while the frame is
+# replayed and reads about 74% busy, and its governor keeps it at 401 of 680 MHz: 8.1 ms of GPU work, and frames of 33 ms whenever game + replay + GPU passed the period.
+# Retroid Pocket 6, its normal performance mode, docked, Mabe Village, 10 minutes each: without it the 10 s windows' p90 went past 30 ms in 18 of 58, with it in 0 of 64; the
+# hottest CPU zone 49-50 °C without, 51-53 °C with (+2.2 °C on average; fan at 100%). Not measured: the battery drain (it was charging). Off: a row "DM_GPU_TURBO=0" after
+# the pack's in env.txt, or "env DM_GPU_TURBO=0" through DM_CTL. The setting is the device's: the app gives it back in the background and at its end, and sets its own at
+# the start; a force-stopped app leaves it on until the next start (perf_android.c)
+env	DM_GPU_TURBO=1
 status	experimental
 tested	v131072 Retroid Pocket 6 (Snapdragon 8 Gen 2, Adreno 740, Turnip T30, Android 13)
 package	org.nx2a.t01006bb00c6f0000
