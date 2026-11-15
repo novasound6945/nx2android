@@ -92,6 +92,7 @@ static VkSemaphore g_timeline;
 enum { NFRING=4 }; static VkFence g_fring[NFRING];
 static VkResult result; static int reads, waits;
 #define die(...) do { assert(!reads); _exit(91); } while (0)
+#define vk_device_lost(where, r) do { (void)(where); (void)(r); assert(!reads); _exit(91); } while (0)   /* the report, then the stop */
 static int mtl_wait(uint64_t f, uint64_t t) { (void)f; (void)t; assert(0); return 0; }
 static VkResult vkWaitSemaphores(VkDevice dev, const VkSemaphoreWaitInfo *wi, uint64_t timeout) {
     (void)dev; assert(wi->semaphoreCount==1 && *wi->pValues==1 && timeout==UINT64_MAX); waits++; return result;
