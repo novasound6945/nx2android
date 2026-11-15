@@ -11,6 +11,9 @@
 # Retroid Pocket 6 (QCS8550, Adreno 740, Turnip T30), 2026-11-15: boot (7 cold starts after the main+0x1c16c cut, none crashed), opening and title movies (VP9 on c2.qti.vp9.decoder),
 # file select in Korean, Mabe Village from a save at 40-52 fps with sound. Left: a new game to Marin and Tarin's house not run here; the field's frame work is one game thread at
 # 100% (frame work p50 17-19 ms); black slivers at grass tips and a fluorescent map on its first opening reported by the user, not reproduced yet
+# The rate is held at 60, not adapted: the field's frame work sits at the period (p50 16.9 ms on the Retroid Pocket 6), so the adaptive rate stepped down to 40 and back
+# all session, which the player saw as the frame rate jumping. The pause menu's Frame rate limit (settings.txt rate=) still wins: its Auto is this pin (front_android.c rate_apply)
+env	DM_FPS_PIN=60
 status	experimental
 tested	v131072 Retroid Pocket 6 (Snapdragon 8 Gen 2, Adreno 740, Turnip T30, Android 13)
 package	org.nx2a.t01006bb00c6f0000
