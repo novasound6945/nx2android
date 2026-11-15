@@ -206,10 +206,15 @@ static uint32_t style_of(uint32_t id) { return player_of(id) < 0 ? 0 : id == NPA
 static int32_t ax(uint64_t v, int i) { return (int16_t)(v >> (16 * i)); }
 static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? -b : b) ? a : b; }   // whichever of two sources is deflected more
 
-// Style update events bound per npad (BindNpadStyleSetUpdateEvent, No1..No8 by id): signalled when a player's controller comes or goes, as the hid
+// Style update events bound per npad (BindNpadStyleSetUpdateEvent: No1..No8 by id, then Handheld and Other): signalled when a player's controller comes or goes, as the hid
 // service does. The front end reports from its own thread, where an event cannot be bound, so only a bound one is signalled (one the game destroyed is not bound any more)
-static void *_Atomic g_style_ev[DM_PLAYERS];
-static void style_changed(uint32_t id) { void *ev = id < DM_PLAYERS ? atomic_load(&g_style_ev[id]) : NULL; if (ev) hle_signal_bound_system_event(ev); }
+static void *_Atomic g_style_ev[DM_PLAYERS + 2];
+static int ev_slot(uint32_t id) { return id < DM_PLAYERS ? (int)id : id == NPAD_HANDHELD ? DM_PLAYERS : id == 0x10 ? DM_PLAYERS + 1 : -1; }
+static void style_changed(uint32_t id) { int k = ev_slot(id); void *ev = k >= 0 ? atomic_load(&g_style_ev[k]) : NULL; if (ev) hle_signal_bound_system_event(ev); }
+// The operation mode changed (hle_oe.c dm_set_opmode): player 1's controller moves between No1 (docked) and Handheld, so both npads' style update events fire, as on the
+// Switch when the Joy-Cons are attached or taken off. The Legend of Zelda: Link's Awakening (SDK 8) picks the controller it reads when the event comes: switched to handheld
+// while running, it kept reading No1, which had gone, and took no input at all (Retroid Pocket 6); started in handheld it read Handheld, whose event was signalled at its bind
+void hle_hid_opmode_changed(void) { style_changed(NPAD_NO1); style_changed(NPAD_HANDHELD); }
 static void note_merged(void) {   // logs the players whose npad the game does not support, when that changes
     static _Atomic uint32_t last; uint32_t m = unsupported_players(), one = (uint32_t)one_player();
     if (atomic_exchange(&last, m | one << 31) == (m | one << 31)) return;
@@ -483,7 +488,7 @@ HLE_FORCE("_ZN2nn3hid23MergeSingleJoyAsDualJoyERKjS2_", "merge single Joy-Cons; 
 HLE_FORCE("_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", "controller style update event: bound, signaled once for a connected controller and on connect / disconnect", void, h_hid_BindStyleEv,
           const uint32_t *id, void *ev, int clear) {
     hle_bind_system_event(ev, clear);
-    if (*id < DM_PLAYERS) atomic_store(&g_style_ev[*id], ev);
+    int k = ev_slot(*id); if (k >= 0) atomic_store(&g_style_ev[k], ev);
     if (style_of(*id)) hle_signal_system_event(ev);
 }
 // The Switch's player LEDs by npad (No1 1, No2 1-2, No3 1-3, No4 1-4, No5 1+4, No6 1+3, No7 1+3+4, No8 2+3; bit 0 = LED 1); Handheld and Other light LED 1 as before
