@@ -64,6 +64,17 @@ int vk_shader_stage(uint64_t key) { bundle_auto(); const bent *e = g_bundle ? fi
 // did (Float64 rewritten to a second Shader, the interlock ones dropped without looking at execution modes). Both are folded into vk_bundle_hash, so a shader
 // preparation made from other modules is not trusted (gfx_vk_gpl.inc vk_gpl.id)
 #define SPV_XF_VER 1u   // a change to what these transforms do: every device prepares its shader parts again
+// Which stages' constant buffers are dynamic uniform buffers (vk_shader's set layouts). 1 (default): every stage's, but with graphics pipeline libraries (V.gpl) only the
+// vertex stage's. A library is compiled against a layout in which the other part's sets are VK_NULL_HANDLE, and Turnip (purple T30, the Retroid Pocket Nova's and 6's
+// driver) does not move the fragment set's dynamic slots past the vertex set's when it fast-links the parts: a linked pipeline's fragment shader read the vertex
+// stage's buffers and offsets. Dark Souls: Remastered's objects flashed magenta and grey while linked pipelines drew (2026-11-15, DM_VK_DYN_UBO=0 cleared it), and
+// Fire Emblem Engage hung the GPU (device lost: the submission with the new links still unfinished 2 s later) at the first battle scene of a session whose
+// pipelines were all linked at draws (DM_VK_NOPREWARM=1, as on a first run): 2 of 2 runs with every stage dynamic, 0 of 2 with this (one on for 11 minutes and
+// 664 links). The vertex stage is set 0 in every layout, so with dynamic slots there alone each part's base is 0 and the link cannot misplace them (the geometry
+// stage, set 2, would meet the same fault behind the fragment set); the fragment and geometry sets are made again when their buffers move (descriptor sets, CPU:
+// Engage's descriptor sets 0.8 → 1.4 ms a frame on the replay thread, still 60 fps), as every stage's are with DM_VK_DYN_UBO=0. DM_VK_DYN_UBO (start-up): 0 none, 2 every stage's also with
+// libraries (as before; A/B)
+int vk_dyn_ubo_mode(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_VK_DYN_UBO"); m = e ? (atoi(e) == 0 ? 0 : atoi(e) == 2 ? 2 : 1) : 1; } return m; }
 static int g_xf_clip, g_xf_caps; static unsigned g_xf_nclip, g_xf_ncaps; static pthread_mutex_t g_xf_mu = PTHREAD_MUTEX_INITIALIZER;
 static void spv_xf_once(void) {
     const char *e = getenv("DM_VK_SPV_CLIPCULL"); int clip = !(e && !atoi(e));
@@ -384,8 +395,9 @@ static vkshader_t *vk_shader_q(uint64_t key, int stage, int quiet) {
     // The game's constant buffers and the driver segment are dynamic uniform buffers: their offset is given when the set is bound, so a set matches any draw's
     // with the same buffers (Unity updates a constant buffer before nearly every draw, and each update is a shadow at a new offset: NEO made a new set for
     // 94% of its draws, 5 ms a frame). Up to half the device's limit per stage, as the vertex and fragment sets share a pipeline layout. DM_VK_DYN_UBO=0: none.
-    static int dyn_on = -1; if (dyn_on < 0) { const char *e = getenv("DM_VK_DYN_UBO"); dyn_on = !(e && !atoi(e)); }
-    uint32_t dynmax = dyn_on ? V.props.limits.maxDescriptorSetUniformBuffersDynamic / 2 : 0;
+    // With graphics pipeline libraries (V.gpl) only the vertex stage's are: see vk_dyn_ubo_mode
+    int dm = vk_dyn_ubo_mode();
+    uint32_t dynmax = dm == 0 || (dm == 1 && V.gpl && stage != 0 && stage != 5) ? 0 : V.props.limits.maxDescriptorSetUniformBuffersDynamic / 2;
     VkDescriptorSetLayoutBinding lb[96]; uint32_t nl = 0;
     for (int i = 0; i < s->nbind && nl < 96; i++) {
         const dmsv_bind *b = &s->b[i];
@@ -730,8 +742,8 @@ VkPipelineLayout vk_pipeline_layout_gfx(VkDescriptorSetLayout sets[5], int nsets
 VkPipelineLayout vk_pipeline_layout_lib(VkDescriptorSetLayout sets[5], int nsets) { return layout_get(sets, nsets, 2 | 4); }
 // The bundle file's hash (vk_gpl.h gpl_hash64) and its shader count, for the shader preparation's reuse mark (gfx_vk_exec.c vk_gpl_prepare); 0 without a bundle
 #include "vk_gpl.h"
-static void bundle_hash_once(void) {   // with the load-time clean-ups' version and switches (spv_xf): other modules, another mark
-    spv_xf(); uint32_t xf[3] = {SPV_XF_VER, (uint32_t)g_xf_clip, (uint32_t)g_xf_caps};
+static void bundle_hash_once(void) {   // with the load-time clean-ups' version and switches (spv_xf): other modules, another mark; and the dynamic uniform buffers' stages (other set layouts)
+    spv_xf(); uint32_t xf[4] = {SPV_XF_VER, (uint32_t)g_xf_clip, (uint32_t)g_xf_caps, (uint32_t)vk_dyn_ubo_mode() | 0x44590000u};
     g_bundle_h = gpl_hash64(g_bundle, g_bundle_len) ^ gpl_hash64(xf, sizeof xf) * 0x9E3779B97F4A7C15ull; }
 uint64_t vk_bundle_hash(uint32_t *nshaders) {
     bundle_auto(); static pthread_once_t once = PTHREAD_ONCE_INIT;
