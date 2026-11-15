@@ -1,0 +1,8 @@
+# Fire Emblem Engage (update 2.0.0 = v327680; Unity 2020.3.18f1, IL2CPP, SDK 12.3.7) on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android")
+# Not brought up on Android yet: the iOS profile measured on the Mac up to the title screen. Its data is 206,899 files (15.6 GB, base + update + 2 DLC), 205,000 of them
+# of at most 1 MB (5.3 GB): pushed one by one over adb (each file made on the device through Android's FUSE layer) the install ran at ~1 MB/s, 9-14 h, and a download
+# from the data server would make one request per file. So the pack keeps those files in 64 MB tar bundles that the app unpacks itself (data_bundles), the rest on its own
+status	experimental
+package	org.nx2a.t0100a6301214e000
+orientation	landscape
+data_bundles	1048576	67108864

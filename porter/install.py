@@ -5,10 +5,15 @@
 # access over adb, and the installer writes DM_ROMFS=<folder> into the device's env.txt under ROMFS_MARK. The pack's env.txt is the same on every device, and the folder is
 # a fact of one device, so the row is the installer's, not the pack's: a later install without --romfs-at carries it over from the device's env.txt (and checks the folder
 # again), and --romfs-at app moves the RomFS back into the files folder. The DLC (aoc/) stays in the files folder: small for most games, and laid out by the port.
+# A pack with bundles (android.tsv data_bundles: datapack.py): its bundles go into the files folder's bundles/ as they are, one transfer each, and the app takes the files
+# out at its next start (dm/android/datasync.h), as it writes its own folder without the cost adb pays for each file (Android's FUSE layer); the files the pack has on their
+# own go as before, then files.json (the list the app unpacks by) and the manifest last. A bundle is pushed only when the device lacks one of its files at its size, and
+# one the device has at its size (an earlier push, not unpacked yet) is kept when its MD5 is the pack's, so a rerun goes on where the last one stopped. --romfs-at is not
+# offered for such a pack (its RomFS is in its bundles).
 import hashlib, posixpath, re, shlex, tempfile, zipfile
 from pathlib import Path
 
-from porter import datapack
+from porter import datapack, publish
 from porter.adb import Adb, AdbError, long_path
 from porter.upstream import BuildError, PROG, say
 
@@ -80,6 +85,16 @@ def romfs_mismatch(folder, want, have, n=5, changed=()):
     return f'{folder} is not this pack\'s RomFS ({len(want):,} files): ' + '; '.join(parts) if parts else ''
 
 
+def bundle_plan(fj, have):
+    """A pack with bundles on a device: (the bundles it needs, by index: those holding a file the device lacks at its size; of them, those the device has already at their
+    size). fj: the pack's files.json, have: remote_sizes of the files folder"""
+    full = [True] * len(fj['bundles'])
+    for f in fj['files']:
+        if 'bundle' in f and have.get(f['path']) != f['size']: full[f['bundle']] = False
+    need = [k for k, ok in enumerate(full) if not ok]
+    return need, [k for k in need if have.get(fj['bundles'][k]['path']) == fj['bundles'][k]['size']]
+
+
 def apk_asks_access(apk):   # whether the APK asks for All files access: one made before mkapk.py did cannot be given it (`appops set` takes, but FUSE checks the permission)
     try:
         with zipfile.ZipFile(apk) as z: m = z.read('AndroidManifest.xml')
@@ -98,8 +113,13 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
     files = datapack.files_folder(man['package'])
     target = romfs_target(romfs_at, files)
     if romfs_push and not target: raise BuildError('--romfs-push needs --romfs-at <a folder on the device outside the app\'s files folder>')
+    bund = datapack.bundled(man)
+    no_romfs_at = f'{man["name"]}\'s pack keeps its small files in bundles (android.tsv data_bundles), which the app unpacks into its files folder: --romfs-at is not offered for it'
+    if bund and target: raise BuildError(f'{no_romfs_at}; install without --romfs-at')
     adb = Adb(adb_exe, serial, log=say)
-    PROG.stage('install', step='finding the device')
+    PROG.stage('install', step='listing the pack' if bund else 'finding the device')
+    fj = publish.manifest(data) if bund else None   # files.json, by which the app unpacks the bundles (the port wrote it: its hashes are kept, nothing is read again)
+    if bund: PROG.set(step='finding the device')
     pushing = False
     try:
         dev = adb.pick()
@@ -112,6 +132,7 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
         was = device_romfs(adb.read_text(f'{files}/env.txt'))   # an earlier --romfs-at install's folder
         if romfs_at is None and was:
             target = romfs_target(was, files)
+            if target and bund: raise BuildError(f'{no_romfs_at}, and an earlier install had the app read its RomFS from {target}: install with --romfs-at app')
             if target: say(f'the app reads its RomFS from {target} (an earlier install\'s --romfs-at; --romfs-at app moves it into its files folder)')
         rom = datapack.romfs_sizes(data) if target else {}
         missing = other = changed = []; there = {}
@@ -140,6 +161,11 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
             if push := sum(rom[r] for r in missing + other + changed):
                 if adb.same_volume('/sdcard', target): need += push
                 elif (tfree := adb.free_bytes(target)) is not None and push > tfree: raise BuildError(f'{target}\'s volume has {tfree / 2**30:.1f} GB free; the RomFS needs {push / 2**30:.1f} GB more')
+        elif bund:   # the bundles it pushes and the files it pushes on their own, and room for one bundle's files while the app unpacks (each bundle goes once its files are out)
+            bneed, bthere = bundle_plan(fj, have)
+            loose = [f for f in fj['files'] if 'bundle' not in f]
+            need = sum(fj['bundles'][k]['size'] for k in bneed if k not in bthere) + sum(f['size'] for f in loose if have.get(f['path']) != f['size']) \
+                + max((fj['bundles'][k]['size'] for k in bneed), default=0)
         else: need = man['bytes'] - sum(have.values())
         if free is not None and need > free: raise BuildError(f'the device has {free / 2**30:.1f} GB free; the game needs {need / 2**30:.1f} GB more')
         if target and not replace_signer and adb.installed(man['package']):   # an update: the grant (the app's uid's, which the update keeps) before the APK goes in
@@ -162,9 +188,11 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
             say(f'{state}: the app reads its RomFS from {target}')
         PROG.set(step='pushing the game data', done=0, total=man['bytes'] - sum(rom.values()), unit='B'); pushing = True
         have = adb.remote_sizes(files)   # again: an install with --replace-signer uninstalls first, and Android deletes the files folder with the app
-        adb.push_tree(data, files, keep=datapack.KEEP_ON_DEVICE, skip=(datapack.MANIFEST,) + (('env.txt',) if target else ()), exclude=(datapack.ROMFS,) if target else (),
+        base, bkeep = push_bundles(adb, data, files, fj, have, lambda d, t, note: PROG.set(done=d, total=t, note=note)) if bund else (0, set())
+        adb.push_tree(data, files, keep=datapack.KEEP_ON_DEVICE, skip=(datapack.MANIFEST,) + (('env.txt',) if target else ()) + ((publish.FILES,) if bund else ()),
+                      exclude=(datapack.ROMFS,) if target else (datapack.BUNDLES,) if bund else (),
                       verify=lambda rel: rel.split('/', 1)[0] not in ('RomFS', 'aoc'),   # the game's own files change only with their version
-                      progress=lambda d, t, note: PROG.set(done=d, total=t, note=note), have=have)
+                      progress=lambda d, t, note: PROG.set(done=base + d, total=base + t, note=note), have=have)
         if target and (missing or other or changed):   # --romfs-push: the pack's RomFS into the folder (changed: pushed again when their MD5 differs), then the folder checked again
             PROG.set(step=f'pushing the RomFS into {target}', done=0, total=sum(rom[r] for r in missing + other + changed), unit='B')
             again = set(changed)
@@ -176,7 +204,10 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
                 env = Path(t) / 'env.txt'; env.write_text(env_with_romfs((data / 'env.txt').read_text(encoding='utf-8'), target), encoding='utf-8', newline='\n')
                 adb.push_file(env, f'{files}/env.txt')
         elif was and romfs_at == APP: say(f'the app reads its RomFS from its files folder again; {was} is left as it is')
-        stale = [rel for rel in have if datapack.owned(rel) and not (target and rel.startswith(datapack.ROMFS + '/')) and not (data / rel).is_file()]   # the push only adds the pack's own files, which are never stale
+        if bund:   # the pack's files are its list's (the bundled ones are not in the pack folder); a bundle the device has that the app does not need goes too
+            listed = {f['path'] for f in fj['files']}
+            stale = [rel for rel in have if (datapack.owned(rel) and rel not in listed) or (rel.startswith(datapack.BUNDLES + '/') and rel not in bkeep)]
+        else: stale = [rel for rel in have if datapack.owned(rel) and not (target and rel.startswith(datapack.ROMFS + '/')) and not (data / rel).is_file()]   # the push only adds the pack's own files, which are never stale
         if stale:   # an older version's files, which the game would still find
             PROG.set(step=f'removing {len(stale):,} stale files')
             for i in range(0, len(stale), 64): adb.shell(f'cd {shlex.quote(files)} && rm -f ' + ' '.join(shlex.quote(r) for r in stale[i:i + 64]))
@@ -184,6 +215,7 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
             PROG.set(step='removing the RomFS copy in the files folder')
             adb.shell(f'rm -rf {shlex.quote(f"{files}/{datapack.ROMFS}")}', timeout=1200)
             say(f'removed the earlier copy of the RomFS from the app\'s files folder ({len(old):,} files, {sum(have[r] for r in old) / 2**30:.1f} GB)')
+        if bund: adb.push_file(data / publish.FILES, f'{files}/{publish.FILES}')   # the list the app unpacks by, once everything it names is on the device
         adb.push_file(data / datapack.MANIFEST, f'{files}/{datapack.MANIFEST}')   # last: a pack on the device with its manifest is a complete one
     except AdbError as e:
         try: gone = pushing and adb.serial in [s for s, st, _ in adb.devices() if st == 'device'] and not adb.installed(man['package'])   # a device that went away is not an uninstall
@@ -192,4 +224,30 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
             raise BuildError(f'{man["package"]} was uninstalled on the device while its data was being pushed ({e})') from e
         raise BuildError(str(e)) from e
     PROG.end(f'{man["name"]} on {model or dev}')
-    say(f'installed: open "{man["name"]}" on the device')
+    say(f'installed: open "{man["name"]}" on the device' + (' (it unpacks its bundles at its first start)' if bund else ''))
+
+
+def push_bundles(adb, data, files, fj, have, progress=None):
+    """The bundles the device needs (bundle_plan) into its files folder's bundles/, one transfer each; one the device has at its size is kept when its MD5 is the pack's
+    (pushed by an install that stopped, or not unpacked yet). progress(done, total, note) after each. Returns (the bytes pushed, the bundles the device keeps: their paths)"""
+    bun = fj['bundles']; need, there = bundle_plan(fj, have)
+    got = adb.remote_md5(files, [bun[k]['path'] for k in there]) if there else {}
+    kept = {k for k in there if got.get(bun[k]['path']) == hashlib.md5(Path(long_path(data / bun[k]['path'])).read_bytes()).hexdigest()}
+    todo = [k for k in need if k not in kept]; total = sum(bun[k]['size'] for k in todo)
+    say(f'{len(todo):,} of the pack\'s {len(bun):,} bundles to push, {total / 2**20:,.0f} MB ({len(kept):,} already on the device, {len(bun) - len(need):,} whose files it has)')
+    q = shlex.quote(f'{files}/{datapack.BUNDLES}')
+    # a bundles folder an APK from before 2026-11-15 made (it began downloading bundles itself) is the app's alone (drwxr-s---): adb's shell can neither write in it nor
+    # empty it. Said so at once, before a push that cannot land is tried three times
+    if todo and adb.shell(f'[ -e {q} ] && [ ! -w {q} ] && echo locked; true', check=False).strip() == 'locked':
+        raise AdbError(f'{files}/{datapack.BUNDLES} was made by the app itself (it began downloading bundles from its server) and adb cannot write in it: start the app '
+                       'with its server reachable and let it finish (it removes the folder), or clear the app\'s data, then install again')
+    if todo: adb.shell(f'mkdir -p {q}')
+    done = 0
+    for i, k in enumerate(todo):
+        adb.push_whole(data / bun[k]['path'], f'{files}/{bun[k]["path"]}'); done += bun[k]['size']
+        if progress: progress(done, total, f'bundle {i + 1:,}/{len(todo):,}')
+    if todo:
+        now = adb.remote_sizes(f'{files}/{datapack.BUNDLES}')
+        short = [bun[k]['path'] for k in todo if now.get(bun[k]['path'].split('/', 1)[1]) != bun[k]['size']]
+        if short: raise AdbError(f'{len(short)} bundles are not on the device at their size after the push ({", ".join(short[:3])}): install again (it goes on from there)')
+    return total, {bun[k]['path'] for k in need}

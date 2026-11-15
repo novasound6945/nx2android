@@ -57,6 +57,7 @@ For a pack served with `--data-url` (docs/ARCHITECTURE.md, "The data from a web 
 - `Get-SFTPItem` downloads; use `Get-SFTPPathAttribute` to read a size.
 - The default operation timeout cut a 2.9 GB file off mid-upload while the script reported success.
 - So after every upload compare each file's size with `files.json`, and hash-check the large files on the server against `files.json` (SHA-256) before announcing a pack. Upload `files.json` last.
+- A pack with bundles (`files.json` format 2, `android.tsv` `data_bundles`) has its small files only inside `bundles/bNNNN.tar` on the server: check the `bundles` entries (size, SHA-256) and the `files` entries without a `bundle` index, not every `files` path (the bundled ones are not on the server on their own).
 
 ## Finish
 

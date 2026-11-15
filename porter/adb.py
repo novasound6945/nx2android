@@ -292,6 +292,9 @@ class Adb:
                 if progress: progress(done, f'{len(part):,} files')
         return done
 
+    def push_whole(self, local, dst):   # one file in one transfer, as it is (a data pack's bundle, up to its 64 MB: datapack.py); a push cut short leaves it short, which a rerun pushes again
+        with short_paths([local]) as (q,): self.run('push', '-Z', q, dst, timeout=max(self.timeout, 600))
+
     def push_file(self, local, dst, chunk=64 << 20, progress=None):
         """One file in pieces of chunk bytes, joined on the device; pieces already there are kept, so an interrupted push resumes. progress(done, size, note)"""
         local = Path(local); size = local.stat().st_size; n = max(1, (size + chunk - 1) // chunk)

@@ -51,6 +51,9 @@ class Device(Adb):
     def push_file(self, local, dst, **kw):
         self.fs[dst] = Path(local).stat().st_size; self.ops.append(('push_file', dst))
         if dst.endswith('.txt'): self.text[dst] = Path(local).read_text(encoding='utf-8')
+    def push_whole(self, local, dst):   # (its MD5 is the file's now)
+        self.fs[dst] = Path(local).stat().st_size; self.ops.append(('push_whole', dst))
+        if self.md5 is not False: self.md5[dst] = hashlib.md5(Path(local).read_bytes()).hexdigest()
     def shell(self, script, **kw):
         self.ops.append(('shell', script))
         if script.startswith('appops get'): return 'No operations.\nDefault mode: default\n' if self.access == 'default' else f'Uid mode: MANAGE_EXTERNAL_STORAGE: {self.access}\n'
@@ -224,6 +227,81 @@ class RomfsAt(unittest.TestCase):
                                  'android.permission.ACCESS_WIFI_STATE': None, 'android.permission.CHANGE_WIFI_MULTICAST_STATE': None})
         app = next(a for tag, a in els if tag == 'application')
         self.assertIs(app['requestLegacyExternalStorage'], True); self.assertIs(app['debuggable'], False)
+
+
+class Bundles(unittest.TestCase):
+    """A pack with bundles (android.tsv data_bundles): the bundles the device needs go as they are, the files the pack has on their own as before, no small file and no
+    tar unpacked by the device; files.json before the manifest; a rerun pushes only what is still missing"""
+    def setUp(self):
+        import types
+        from porter import publish
+        self.t = Path(tempfile.mkdtemp(prefix='nx2a_test_bund_')); self.real, PROG.mode = install.Adb, 'off'
+        src = self.t / 'src'
+        for i in range(40): p = src / f'RomFS/d{i % 3}/f{i:02d}.bin'; p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(bytes([i]) * (100 + i * 37))
+        (src / 'RomFS/big.bin').write_bytes(b'b' * 5000); (src / 'mods').mkdir(); (src / 'mods/main').write_bytes(b'm' * 300)
+        prof = types.SimpleNamespace(name='Test Game', id='0100000000AAA000', package=PKG, env=[], settings={}, requires=[], bundles=(2000, 8192))
+        self.data = self.t / 'Test-data'
+        datapack.build(self.data, profile=prof, version='v65536', display='1.1.0', patched=src / 'mods', romfs=src / 'RomFS', shaders=None)
+        self.fj = publish.manifest(self.data); self.apk = apk_file(self.t / 'Test.apk')
+        self.bun = [b['path'] for b in self.fj['bundles']]
+        self.assertGreater(len(self.bun), 2)
+
+    def tearDown(self): install.Adb = self.real; shutil.rmtree(self.t, ignore_errors=True)
+
+    def run_on(self, dev, **kw):
+        install.Adb = lambda exe, serial=None, log=print: dev
+        install.install(self.apk, self.data, 'adb', **kw)
+        return dev
+
+    def members(self, k): return [f for f in self.fj['files'] if f.get('bundle') == k]
+
+    def test_fresh(self):   # every bundle, the files on their own, files.json then the manifest; no bundled file and no device-side tar
+        dev = self.run_on(Device())
+        self.assertEqual(sorted(o[1] for o in dev.ops if o[0] == 'push_whole'), [f'{FILES}/{b}' for b in self.bun])
+        for f in self.fj['files']:
+            self.assertEqual(f'{FILES}/{f["path"]}' in dev.fs, 'bundle' not in f, f['path'])   # the bundled files come out of their bundles on the device, at the app's start
+        self.assertEqual(dev.step('shell', 'tar -xf'), -1)
+        order = [max(i for i, o in enumerate(dev.ops) if o[0] == 'push_whole'), dev.step('push_tree', FILES), dev.step('push_file', 'files.json'), dev.step('push_file', datapack.MANIFEST)]
+        self.assertEqual(order, sorted(order)); self.assertNotIn(-1, order)
+
+    def test_rerun_pushes_what_is_missing(self):   # a bundle whose files the device has, or one already on it with the pack's MD5, is not pushed again; another MD5 is
+        fs = {f'{FILES}/{f["path"]}': f['size'] for f in self.members(0)}
+        fs[f'{FILES}/{self.bun[1]}'] = (self.data / self.bun[1]).stat().st_size; fs[f'{FILES}/{self.bun[2]}'] = (self.data / self.bun[2]).stat().st_size
+        md5 = {f'{FILES}/{self.bun[1]}': hashlib.md5((self.data / self.bun[1]).read_bytes()).hexdigest(), f'{FILES}/{self.bun[2]}': '0' * 32}
+        dev = self.run_on(Device(fs, md5=md5))
+        pushed = {o[1] for o in dev.ops if o[0] == 'push_whole'}
+        self.assertEqual(pushed, {f'{FILES}/{b}' for b in self.bun[2:]})
+        self.assertIn(f'{FILES}/{self.bun[1]}', dev.fs)   # kept for the app to unpack
+        dev.ops.clear(); self.run_on(dev)   # again: nothing pushed (the device has every bundle at its size and MD5)
+        self.assertEqual([o for o in dev.ops if o[0] == 'push_whole'], [])
+
+    def test_stale(self):   # the device's files the list lacks go, its bundled files stay; a bundle the device does not need goes
+        fs = {f'{FILES}/{f["path"]}': f['size'] for f in self.members(0)} | {f'{FILES}/RomFS/old.bin': 3, f'{FILES}/{self.bun[0]}': 10, f'{FILES}/bundles/b9999.tar': 5, f'{FILES}/log.txt': 9}
+        dev = self.run_on(Device(fs))
+        rm = ' '.join(o[1] for o in dev.ops if o[0] == 'shell' and 'rm -f' in o[1])
+        for gone in ('RomFS/old.bin', self.bun[0], 'bundles/b9999.tar'): self.assertIn(gone, rm)
+        for kept in [f['path'] for f in self.members(0)] + ['log.txt']: self.assertNotIn(kept, rm)
+
+    def test_bundles_folder_the_app_made(self):   # a bundles folder adb's shell cannot write (an older APK made it): a clear error before any bundle is pushed
+        class Locked(Device):
+            def shell(self, script, **kw): return 'locked\n' if '[ ! -w' in script else super().shell(script, **kw)
+        dev = Locked({f'{FILES}/bundles/b0000.tar.part': 5})
+        with self.assertRaisesRegex(BuildError, 'made by the app itself'): self.run_on(dev)
+        self.assertEqual([o for o in dev.ops if o[0] == 'push_whole'], [])
+
+    def test_plan(self):   # bundle_plan: the bundles holding a file the device lacks at its size, and which of them it has at their size
+        have = {f['path']: f['size'] for f in self.fj['files'] if f.get('bundle') != 1} | {self.bun[1]: self.fj['bundles'][1]['size']}
+        self.assertEqual(install.bundle_plan(self.fj, have), ([1], [1]))
+        have[self.members(2)[0]['path']] += 1
+        self.assertEqual(install.bundle_plan(self.fj, have), ([1, 2], [1]))
+
+    def test_no_romfs_at(self):   # the RomFS is in the bundles: --romfs-at refused before the device is touched, and an earlier install's folder too
+        dev = Device()
+        with self.assertRaisesRegex(BuildError, 'bundles'): self.run_on(dev, romfs_at=DUMP)
+        self.assertEqual(dev.ops, [])
+        env = {f'{FILES}/env.txt': install.env_with_romfs('DM_LANG=en-US\n', DUMP)}
+        with self.assertRaisesRegex(BuildError, '--romfs-at app'): self.run_on(Device(text=env))
+        self.run_on(Device(text=env), romfs_at='app')
 
 
 if __name__ == '__main__':

@@ -58,6 +58,8 @@ When the game boots on the device:
    setting      overlay=1 / rumble=1 / docked=0   (pause-menu defaults → settings.txt)
    env          KEY=VALUE                  (a host switch the game needs → env.txt)
    overlay      <control> <x> <y> [<r>]    (moves one control of dm/android/overlay_default.tsv)
+   data_bundles <max file bytes> <bundle bytes>   (small game files in tar bundles the app unpacks: only for a game of
+                                              hundreds of thousands of small files, Fire Emblem Engage 1048576 67108864)
    ```
    `android.tsv` is not part of the shader keys: editing it re-translates nothing.
    On Turnip (graphics pipeline libraries on), a game whose vertex and fragment sets both hold dynamic uniform buffers draws objects in wrong colours for a few frames while a pipeline is built: give it `env DM_VK_DYN_UBO=0` (Dark Souls: Remastered), and check from empty caches (`switch-android-port`'s playbook). The first launch also shows a shader preparation screen (see device-loop.md).

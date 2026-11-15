@@ -16,6 +16,10 @@
 #                aspect_variant: a screen narrower than 3:2, or DM_ASPECT / settings aspect=4:3). porter rewrites the modules once more with DM_PATCH_VARIANT=<name> (the
 #                profile's patches.py reads it) into the data pack's mods-<name>/ beside mods/ (no variant), and writes the row's env rows to env-<name>.txt, which the app
 #                applies after env.txt when it runs that variant
+#   data_bundles <max file bytes> <bundle bytes>: the data pack keeps the game's files of at most <max file bytes> (under RomFS/, aoc/, sysdata/) in tar bundles of up to
+#                <bundle bytes> (bundles/bNNNN.tar) instead of one file each, which the app unpacks itself (porter/datapack.py, dm/android/datasync.h): for a game of so many
+#                small files that creating each one on the device over adb (Android's FUSE layer) or downloading each one takes hours (Fire Emblem Engage: 205,000 of its
+#                207,000 files are under 1 MB)
 # Usage: android_profile.py header <id> <out.h> (android_profile.h for the host: the gamepad layouts, written only when it changes); android_profile.py list;
 #   android_profile.py <id> [<key>] (the profile's keys, or one key's value); android_profile.py theme <id> (the gamepad theme pack porter puts in the APK)
 # From Python: import android_profile; p = android_profile.load(<id>) (None without android.tsv); p.status, p.package, p.settings, p.env, p.overlay_table();
@@ -34,7 +38,8 @@ SETTINGS = {'overlay': ('0', '1'), 'rumble': ('0', '1'), 'docked': ('0', '1'), '
             'rate': ('0', '60', '40', '30')}                                                       # the frame rate limit, 0 auto (front_android.c RATE_STEPS)
 REQUIRES = ('bcn',)
 KINDS = {'stick_l': 'OV_STICK_L', 'stick_r': 'OV_STICK_R', 'button': 'OV_BUTTON', 'dpad': 'OV_DPAD', 'menu': 'OV_MENU'}
-SINGLE = ('status', 'tested', 'package', 'orientation', 'requires', 'sysdata')
+SINGLE = ('status', 'tested', 'package', 'orientation', 'requires', 'sysdata', 'data_bundles')
+BUNDLE_MAX = 1 << 30   # data_bundles: the largest bundle (the app downloads one whole and reads it twice, its SHA-256 then its files, before deleting it)
 REPEAT = ('setting', 'env', 'overlay', 'variant')
 VARIANTS = ('4x3',)   # the variants the app knows how to pick (front_android.c aspect_variant)
 
@@ -101,6 +106,10 @@ class AndroidProfile:
     def requires(self): return self.get('requires').split()
     @property
     def sysdata(self): return [int(t, 16) for t in self.get('sysdata').split()]   # title IDs
+    @property
+    def bundles(self):   # (max file bytes, bundle bytes) of data_bundles, None without the row (every file of the pack on its own, as before)
+        v = self.get('data_bundles').split()
+        return (int(v[0]), int(v[1])) if len(v) == 2 and all(x.isdigit() for x in v) else None
 
     @property
     def settings(self):   # {'overlay': '1', ...}: the defaults the data pack's settings.txt starts with
@@ -129,6 +138,8 @@ class AndroidProfile:
         if self.get('orientation', 'landscape') not in ('landscape', 'any'): bad.append('orientation: landscape or any')
         bad += [f'requires {r!r}: one of {", ".join(REQUIRES)}' for r in self.requires if r not in REQUIRES]
         bad += [f'sysdata {t!r}: a 16-digit hex title ID' for t in self.get('sysdata').split() if not re.fullmatch(r'[0-9A-Fa-f]{16}', t)]
+        if self.get('data_bundles') and not (self.bundles and 0 < self.bundles[0] < self.bundles[1] <= BUNDLE_MAX):
+            bad.append(f'data_bundles {self.get("data_bundles")!r}: <max file bytes> <bundle bytes>, 0 < max file < bundle <= {BUNDLE_MAX}')
         for v in self.values('setting'):
             k, eq, val = v.partition('=')
             if not eq or k not in SETTINGS or val not in SETTINGS[k]: bad.append(f'setting {v!r}: ' + ', '.join(f'{n}={"|".join(vs)}' for n, vs in SETTINGS.items()))

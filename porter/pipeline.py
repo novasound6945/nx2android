@@ -809,14 +809,18 @@ class Port:
                              files={**self.fps_files, **font_files}, variants={v: (d, self.ap.variants[v]) for v, d in getattr(self, 'variants', {}).items()},
                              progress=lambda what: PROG.set(step=f'linking {what}'))
         self.data_path = dst; self.result['data'] = str(dst)
-        PROG.end(f'{man["files"]:,} files, {man["bytes"] / 2**30:.1f} GB' + (f', variants {", ".join(man["variants"])}' if man.get('variants') else ''))
-        if self.o.data_url:   # --data-url: the pack's files.json, which the app compares with its own (porter/publish.py); the folder goes to the server as it is
+        b = man.get('bundles')
+        PROG.end(f'{man["files"]:,} files, {man["bytes"] / 2**30:.1f} GB' + (f', variants {", ".join(man["variants"])}' if man.get('variants') else '')
+                 + (f', {b["files"]:,} of them in {b["count"]:,} bundles ({b["tar_bytes"] / 2**30:.1f} GB)' if b else ''))
+        # --data-url: the pack's files.json, which the app compares with its own (porter/publish.py); the folder goes to the server as it is. A pack with bundles has it
+        # in any case: the app unpacks them by it (also when porter install pushed them)
+        if self.o.data_url or b:
             from porter import publish
             PROG.add(1); PROG.stage('publish', step='hashing the files')
             fj = publish.manifest(dst, progress=lambda d, t: PROG.set(done=d, total=t, unit='B'))
             self.result['files_json'] = str(dst / publish.FILES)
-            say(f'upload {dst} as it is to {self.o.data_url} (the app downloads it from there)')
-            PROG.end(f'{publish.FILES}: {len(fj["files"]):,} files, {fj["bytes"] / 2**30:.1f} GB')
+            if self.o.data_url: say(f'upload {dst} as it is to {self.o.data_url} (the app downloads it from there)')
+            PROG.end(f'{publish.FILES}: {len(fj["files"]):,} files, {fj["bytes"] / 2**30:.1f} GB' + (f', format {fj["format"]}: {len(fj["bundles"]):,} bundles' if b else ''))
 
     def button_font(self):
         """The stand-in for the system's Nintendo extension shared font: the controller-button icons in game text (U+E0E0 = A; Super Mario Bros. Wonder's menus showed '?' without it), which

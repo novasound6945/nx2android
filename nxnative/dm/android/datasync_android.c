@@ -6,6 +6,8 @@
 // The screen: no game is running yet, so the window gets a small GLES 2 picture (libEGL / libGLESv2 opened here): EGL leaves the window when its surface is destroyed,
 // and the game's Vulkan swapchain can take it after (a window drawn with ANativeWindow_lock stays the CPU's and Vulkan cannot connect to it).
 // The front end (front_android.c) starts the game when the sync ends: done, nothing to do, or no server and a whole pack in the files folder (offline play)
+// An APK without the asset runs the sync too when its files folder has a bundles folder (a pack whose small files porter install pushed in bundles: datasync.h), with
+// no server: the bundles are unpacked, then the game starts
 // The same screen shows the shader preparation (dm_prep_begin: gfx_vk_gpl.inc vk_gpl_prepare), after the sync or without one, before the game starts
 #include "dm.h"
 #include "datasync.h"
@@ -148,17 +150,20 @@ static void draw(canvas *c, const ds_progress *p, int status, int wait_s, const 
     fill(c, 0, 0, c->w, c->h, RGB(18, 20, 26));
     ctext(c, ko ? "게임 데이터" : "Game data", y, 3, RGB(235, 238, 245)); y += 36;
     const char *ph = p->phase == DS_PH_CONNECT ? (ko ? "서버에 연결하는 중" : "Connecting to the server") : p->phase == DS_PH_CHECK ? (ko ? "가지고 있는 파일 확인 중" : "Checking the files on the device")
-                   : p->phase == DS_PH_DOWNLOAD ? (ko ? "받는 중" : "Downloading") : (ko ? "마무리하는 중" : "Finishing");
+                   : p->phase == DS_PH_DOWNLOAD ? (ko ? "받는 중" : "Downloading") : p->phase == DS_PH_UNPACK ? (ko ? "묶음 파일을 푸는 중" : "Extracting the bundles")
+                   : (ko ? "마무리하는 중" : "Finishing");
     ctext(c, ph, y, 2, RGB(170, 180, 200)); y += 26;
     int bw = c->w - 80, bx = 40; double f = p->total ? (double)p->done / (double)p->total : 0; if (f > 1) f = 1;
     fill(c, bx, y, bw, 12, RGB(50, 55, 68)); fill(c, bx, y, (int)(bw * f), 12, RGB(90, 160, 255)); y += 34;
     snprintf(t, sizeof t, "%.0f / %.0f MB  (%d%%)", p->done / 1048576.0, p->total / 1048576.0, (int)(f * 100)); ctext(c, t, y, 2, RGB(235, 238, 245)); y += 24;
     if (p->phase == DS_PH_DOWNLOAD && speed > 0) { dur(a, sizeof a, (double)(p->total - p->done) / speed, ko); snprintf(t, sizeof t, ko ? "%.1f MB/s, 남은 시간 %s" : "%.1f MB/s, %s left", speed / 1048576.0, a); ctext(c, t, y, 2, RGB(170, 180, 200)); }
+    if (p->phase == DS_PH_UNPACK) { snprintf(t, sizeof t, ko ? "파일 %d / %d개" : "%d / %d files", p->file_no, p->files); ctext(c, t, y, 2, RGB(170, 180, 200)); }   // the bundle on the line below
     y += 24;
-    if (p->file[0]) { snprintf(t, sizeof t, "%d/%d  %.60s", p->file_no, p->files, p->file); ctext(c, t, y, 1, RGB(120, 130, 150)); }
+    if (p->file[0]) { if (p->phase == DS_PH_UNPACK) snprintf(t, sizeof t, "%.60s", p->file); else snprintf(t, sizeof t, "%d/%d  %.60s", p->file_no, p->files, p->file); ctext(c, t, y, 1, RGB(120, 130, 150)); }
     y += 30;
     if (status >= 0) {
         const char *w = status == DS_ERR_NET ? (ko ? "서버에 연결할 수 없습니다 (네트워크를 확인해 주세요)" : "The server cannot be reached (check the network)")
+                      : status == DS_ERR_LOCAL ? (ko ? "기기에 있는 게임 데이터가 모자랍니다. 다시 설치해 주세요" : "The game data on the device is incomplete: install it again")
                       : status == DS_ERR_SPACE ? (ko ? "저장 공간이 부족합니다" : "Not enough storage space")
                       : status == DS_ERR_PACKAGE ? (ko ? "서버의 데이터가 이 앱의 것이 아닙니다" : "The server's data is not this app's")
                       : status == DS_ERR_DATA ? (ko ? "받은 파일이 손상되었습니다. 다시 받습니다" : "A downloaded file was damaged; it is downloaded again")
@@ -280,10 +285,10 @@ void dm_sync_window(ANativeWindow *w) {   // on_window_created (w) and on_window
 // ---- the sync thread ----
 static void *sync_thread(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "datasync");
-    JavaVM *vm = S.act->vm; jhttp h = {0}; int rc = DS_OFFLINE;
-    if ((*vm)->AttachCurrentThread(vm, &h.E, NULL) != JNI_OK || jhttp_init(&h)) LOG("[RED] data: no Java for the download: the game starts with the data the app has");
+    JavaVM *vm = S.act->vm; jhttp h = {0}; int rc = DS_OFFLINE, net = S.base[0] != 0;   // !net: no server, only the folder's bundles to unpack (dm_sync_begin)
+    if (net && ((*vm)->AttachCurrentThread(vm, &h.E, NULL) != JNI_OK || jhttp_init(&h))) LOG("[RED] data: no Java for the download: the game starts with the data the app has");
     else {
-        ds_ctx c = {.root = S.root, .package = S.package, .fetch = http_fetch, .fu = &h, .free_bytes = free_bytes, .note = sync_note, .log = sync_log};
+        ds_ctx c = {.root = S.root, .package = S.package, .fetch = net ? http_fetch : NULL, .fu = &h, .free_bytes = free_bytes, .note = sync_note, .log = sync_log};
         int delay = 2;
         for (int round = 1;; round++) {
             pthread_mutex_lock(&S.mu); S.status = -1; S.msg[0] = 0; pthread_mutex_unlock(&S.mu);
@@ -292,12 +297,14 @@ static void *sync_thread(void *a) {
             if (c.pr.phase == DS_PH_DOWNLOAD && c.pr.done) delay = 2;   // it moved on: the next break waits from the start again
             LOG("[RED] data: try %d failed (%d): %s; again in %d s", round, rc, c.err, delay);
             for (int s = delay; s > 0; s--) { pthread_mutex_lock(&S.mu); S.status = rc; S.wait_s = s; snprintf(S.msg, sizeof S.msg, "%s", c.err); pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); sleep(1); }
-            delay = rc == DS_ERR_PACKAGE || rc == DS_ERR_SPACE ? 30 : delay * 2 > 60 ? 60 : delay * 2;
+            delay = rc == DS_ERR_PACKAGE || rc == DS_ERR_SPACE || rc == DS_ERR_LOCAL ? 30 : delay * 2 > 60 ? 60 : delay * 2;   // (DS_ERR_LOCAL: until an install pushes what is missing)
         }
         LOG("%s", rc == DS_DONE ? "data: downloaded, the files folder holds the server's pack" : rc == DS_UPTODATE ? "data: the files folder holds the server's pack already"
             : "data: no server, the files folder holds a whole pack: the game starts with it");
-        if (h.buf) (*h.E)->DeleteGlobalRef(h.E, h.buf);
-        (*vm)->DetachCurrentThread(vm);
+        if (net) {
+            if (h.buf) (*h.E)->DeleteGlobalRef(h.E, h.buf);
+            (*vm)->DetachCurrentThread(vm);
+        }
     }
     pthread_mutex_lock(&S.mu); S.finished = rc ? rc : 1; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
     return NULL;
@@ -313,21 +320,30 @@ static int package_name(ANativeActivity *act, char *out, size_t cap) {
     const char *u = (*E)->GetStringUTFChars(E, s, NULL); if (!u) return -1;
     snprintf(out, cap, "%s", u); (*E)->ReleaseStringUTFChars(E, s, u); return 0;
 }
-// 1: the APK has a data server, the sync runs and done() is called on the main thread once the game may start; 0: none, start the game now
+// 1: the APK has a data server (or the files folder has bundles to unpack), the sync runs and done() is called on the main thread once the game may start; 0: none, start the game now
 int dm_sync_begin(ANativeActivity *act, const char *root, void (*done)(void)) {
     AAsset *as = act->assetManager ? AAssetManager_open(act->assetManager, "nx2a/source.bin", AASSET_MODE_BUFFER) : NULL;
-    if (!as) return 0;
-    char cred[512]; const void *b = AAsset_getBuffer(as); int bad = !b || ds_source(b, (size_t)AAsset_getLength(as), S.base, sizeof S.base, cred, sizeof cred);
-    AAsset_close(as);
-    if (bad) { LOG("[RED] data: the APK's nx2a/source.bin cannot be read: the game starts with the data the app has"); return 0; }
-    if (cred[0]) { char b64[sizeof S.auth - 8]; if (strlen(cred) * 4 / 3 + 8 < sizeof b64) { ds_base64(b64, cred, strlen(cred)); snprintf(S.auth, sizeof S.auth, "Basic %s", b64); memset(b64, 0, sizeof b64); } }
-    memset(cred, 0, sizeof cred);
+    int unpack = ds_bundles_dir(root);   // bundles porter install pushed: unpacked before the game starts, with a server or without
+    if (!as && !unpack) return 0;
+    if (as) {
+        char cred[512]; const void *b = AAsset_getBuffer(as); int bad = !b || ds_source(b, (size_t)AAsset_getLength(as), S.base, sizeof S.base, cred, sizeof cred);
+        AAsset_close(as);
+        if (bad) {
+            S.base[0] = 0; memset(cred, 0, sizeof cred);
+            LOG("[RED] data: the APK's nx2a/source.bin cannot be read: the game starts with the data the app has%s", unpack ? " (once its bundles are unpacked)" : "");
+            if (!unpack) return 0;
+        } else {
+            if (cred[0]) { char b64[sizeof S.auth - 8]; if (strlen(cred) * 4 / 3 + 8 < sizeof b64) { ds_base64(b64, cred, strlen(cred)); snprintf(S.auth, sizeof S.auth, "Basic %s", b64); memset(b64, 0, sizeof b64); } }
+            memset(cred, 0, sizeof cred);
+        }
+    }
     if (package_name(act, S.package, sizeof S.package)) { LOG("[RED] data: the app's package is not known: the game starts with the data the app has"); return 0; }
     snprintf(S.root, sizeof S.root, "%s", root);
     S.done = done;
     ALooper *lp = ALooper_forThread();
     if (!lp || pipe(S.pipe) || ALooper_addFd(lp, S.pipe[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, sync_ready, NULL) != 1) { LOG("[RED] data: no looper on the main thread: the game starts with the data the app has"); return 0; }
-    LOG("data: the app's data comes from %s%s", S.base, S.auth[0] ? " (Basic authentication)" : "");
+    if (S.base[0]) LOG("data: the app's data comes from %s%s", S.base, S.auth[0] ? " (Basic authentication)" : "");
+    else LOG("data: no data server; the bundles in the files folder are unpacked before the game starts");
     G.ok = !gl_load(); if (!G.ok) LOG("[RED] data: no EGL / GLES 2: the download runs without its screen");
     pthread_mutex_lock(&S.mu); S.act = act; pthread_mutex_unlock(&S.mu);
     pthread_t t;
