@@ -170,6 +170,7 @@ typedef struct {
     int wmem;                           // gfx_vk_exec.c shader_wmem: 1 it writes memory (stores to storage buffers or images, atomics), 2 not, 0 not known yet
 } vkshader_t;
 vkshader_t *vk_shader(uint64_t key, int stage);   // NULL when the bundle has no such shader
+int vk_dyn_ubo_mode(void);   // DM_VK_DYN_UBO: 0 no dynamic uniform buffers, 1 (default) only the vertex stage's with graphics pipeline libraries, 2 every stage's (gfx_vk_shader.c)
 vkshader_t *vk_shader_gs_topo(vkshader_t *gs, VkPrimitiveTopology topo);   // the geometry shader translated for the draw's input primitive (shader_vk.py gs_variant_key); gs when there is none
 VkShaderModule vk_shader_module(vkshader_t *s, uint64_t um, uint64_t im, uint32_t xo, int fd);   // the module, or its variant (integer views; extra outputs; fd: bit 0 fragment depth written,
                                                                                                  // bit 1 dual source, bits 4-7 the NVN alpha function tested, its reference the push constant below)
