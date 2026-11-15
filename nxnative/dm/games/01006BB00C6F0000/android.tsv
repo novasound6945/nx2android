@@ -1,0 +1,5 @@
+# The Legend of Zelda: Link's Awakening (update 1.1.0 = v131072, SDK 8.2.0) on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android")
+# Grezzo's engine on NintendoWare, NVN 53, lower-left window origin; 9,698 shaders from the bfsha archives, effects and layouts (game.tsv). Bring-up on the Retroid Pocket 6
+status	experimental
+package	org.nx2a.t01006bb00c6f0000
+orientation	landscape
