@@ -12,8 +12,10 @@
 # (MelonSpeedruns and Rodrigo, 2019) does the same by replacing postprocess.bfsha, whose shader keys the host's bundle would not match
 env	DM_VK_BIND_ALIAS=52fcbb4ca2a78907:2=3:4=3
 # Retroid Pocket 6 (QCS8550, Adreno 740, Turnip T30), 2026-11-15: boot (7 cold starts after the main+0x1c16c cut, none crashed), opening and title movies (VP9 on c2.qti.vp9.decoder),
-# file select in Korean, Mabe Village from a save at 40-52 fps with sound. Left: a new game to Marin and Tarin's house not run here; the field's frame work is one game thread at
-# 100% (frame work p50 17-19 ms); black slivers at grass tips and a fluorescent map on its first opening reported by the user, not reproduced yet
+# file select in Korean, Mabe Village from a save at 40-52 fps with sound; 2026-11-16: a new game on an empty file to Marin and Tarin's house (Korean text, 59-60 fps, no [RED];
+# naming the file writes its save at once), the title's dark frames in a 150 s screen recording are the movies' own (the same frame for frame in both loops of 119.2 s).
+# Left: the field's frame work is one game thread at 100% (frame work p50 17-19 ms); black slivers at grass tips and a fluorescent map on its first opening reported by the
+# user, not reproduced here (the c9da25e uniform fix is in)
 # The rate is held at 60, not adapted: the field's frame work sits at the period (p50 16.9 ms on the Retroid Pocket 6), so the adaptive rate stepped down to 40 and back
 # all session, which the player saw as the frame rate jumping. The pause menu's Frame rate limit (settings.txt rate=) still wins: its Auto is this pin (front_android.c rate_apply)
 env	DM_FPS_PIN=60
