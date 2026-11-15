@@ -1,8 +1,17 @@
 # Fire Emblem Engage (update 2.0.0 = v327680; Unity 2020.3.18f1, IL2CPP, SDK 12.3.7) on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android")
-# Not brought up on Android yet: the iOS profile measured on the Mac up to the title screen. Its data is 206,899 files (15.6 GB, base + update + 2 DLC), 205,000 of them
-# of at most 1 MB (5.3 GB): pushed one by one over adb (each file made on the device through Android's FUSE layer) the install ran at ~1 MB/s, 9-14 h, and a download
-# from the data server would make one request per file. So the pack keeps those files in 64 MB tar bundles that the app unpacks itself (data_bundles), the rest on its own
-status	experimental
+# Its data is 206,899 files (15.6 GB, base + update + 2 DLC), 205,000 of them of at most 1 MB (5.3 GB): pushed one by one over adb (each file made on the device through
+# Android's FUSE layer) the install ran at ~1 MB/s, 9-14 h, and a download from the data server would make one request per file. So the pack keeps those files in 64 MB
+# tar bundles that the app unpacks itself (data_bundles), the rest on its own: 89 bundles (5.5 GB) and 1,496 files. Retroid Pocket Nova over the LAN, the first sync of
+# an app that unpacked on one thread: 38 minutes (the list checked 3:45, the bundles 96 s, the large files 8:23, 103,656 small files unpacked 24 minutes); the unpack now
+# runs on 8 threads in place (the files folder is f2fs with dirsync there, ~13 ms a file made): 42,031 files in 1:51.
+# Retroid Pocket Nova (QCS8550, Adreno 740, Turnip T30), 2026-11-15, Korean: title, Continue, chapters 1 and 2, story scenes, the maps, battles and their battle scenes,
+# played by the user and run with the battles delegated: 60 fps, 0 frames dropped on screen (p99 16.67 ms), GPU p50 4-5 ms; a first start's shader preparation 17 s.
+# Its device lost at scene changes (three in 30 minutes: the GPU hung on the new linked pipelines of a scene) was Turnip's fast link reading the fragment stage's
+# dynamic uniform buffers at the vertex stage's slots, fixed in the core (gfx_vk_shader.c vk_dyn_ubo_mode, c9da25e): with every pipeline linked at its draw
+# (DM_VK_NOPREWARM=1) 2 of 2 runs lost the device at the first battle scene before, 0 of 3 after, a first start with empty caches among them; about 40 minutes since.
+# Left: textures sometimes feel late to appear (not measured), and once the grass of a battle scene darkened and came back (seen before the fix, not since checked)
+status	playable
+tested	v327680 Retroid Pocket Nova (QCS8550, Adreno 740, Turnip T30, Android 13)
 package	org.nx2a.t0100a6301214e000
 orientation	landscape
 data_bundles	1048576	67108864
