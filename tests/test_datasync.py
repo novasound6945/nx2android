@@ -57,9 +57,9 @@ def fixture(old=False):   # the harness, once a run; old: with the datasync.h of
 
 def sync(server, root, *a, old=False):
     r = subprocess.run([str(fixture(old)), str(server), str(root), PKG, *map(str, a)], capture_output=True, text=True, encoding='utf-8')
-    lines = r.stdout.splitlines(); last = (lines or [''])[-1].split(' ', 6)
+    lines = r.stdout.splitlines(); last = (lines or [''])[-1].split(' ', 10)
     if last[:1] != ['result']: return dict(result=None, text=r.stdout + r.stderr + f'\n(exit {r.returncode & 0xffffffff:#x})', fetched=[])
-    return dict(result=last[1], files=int(last[3]), bytes=int(last[5]), err=last[6][4:] if len(last) > 6 else '', text=r.stdout,
+    return dict(result=last[1], files=int(last[3]), bytes=int(last[5]), space_need=int(last[7]), space_free=int(last[9]), err=last[10][4:] if len(last) > 10 else '', text=r.stdout,
                 fetched=[ln.split(' ')[1] for ln in lines if ln.startswith('fetch ')])
 
 
@@ -226,8 +226,14 @@ class Sync(unittest.TestCase):
         self.assertEqual(x['result'], 'DONE', x['text']); self.whole(r); self.assertGreater(i, 3)
         self.assertLess(got, total + (i + 1) * (self.server / publish.FILES).stat().st_size + 1, 'bytes downloaded again')
 
-    def test_space(self):
-        x = sync(self.server, self.root('space'), '--free', 100_000); self.assertEqual(x['result'], 'ERR_SPACE', x['text'])
+    def test_space(self):   # not enough room: refused before anything is downloaded, with how much more is needed and how much is free (the screen says them in the
+        # app's language: datasync_android.c); the room counted is what comes down and one bundle's files beside the bundles, with a margin of 64 MB
+        x = sync(self.server, self.root('space'), '--free', 100_000); self.assertEqual(x['result'], 'ERR_SPACE', x['text']); self.assertEqual(x['fetched'], [publish.FILES])
+        sizes = [b['size'] for b in self.fj['bundles']]
+        want = sum(f['size'] for f in self.fj['files'] if 'bundle' not in f) + sum(sizes) + max(sizes) + (64 << 20)
+        self.assertEqual((x['space_need'], x['space_free']), (want - 100_000, 100_000), x['text'])
+        self.assertIn(f'{(want - 100_000) / 2**30:.1f} GB more space is needed', x['err'])   # (the log's English, as before)
+        y = sync(self.server, self.root('space2')); self.assertEqual((y['result'], y['space_need'], y['space_free']), ('DONE', 0, 0), y['text'])   # (room: none set)
 
     def test_old_app(self):   # an app from before bundles on a pack with them: its first download is a bundled file's, an HTTP 404 it stops at, nothing else downloaded
         if not fixture(old=True): self.skipTest(f'no {BEFORE[:8]} in this clone')

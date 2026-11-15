@@ -146,7 +146,8 @@ static void dur(char *o, size_t n, double s, int ko) {
     else { if (m >= 60) snprintf(o, n, "%dh %dm", m / 60, m % 60); else if (m) snprintf(o, n, "%dm %ds", m, x); else snprintf(o, n, "%ds", x); }
 }
 static void draw(canvas *c, const ds_progress *p, int status, int wait_s, const char *msg, double speed) {
-    int ko = korean(), y = c->h / 2 - 70; char t[400], a[64];
+    // (30 px higher with the storage line below the retry: the block then ends 24 px lower, which a 640 x 360 canvas (a 16:9 screen) cut off)
+    int ko = korean(), y = c->h / 2 - 70 - (status == DS_ERR_SPACE ? 30 : 0); char t[400], a[64];
     fill(c, 0, 0, c->w, c->h, RGB(18, 20, 26));
     ctext(c, ko ? "게임 데이터" : "Game data", y, 3, RGB(235, 238, 245)); y += 36;
     const char *ph = p->phase == DS_PH_CONNECT ? (ko ? "서버에 연결하는 중" : "Connecting to the server") : p->phase == DS_PH_CHECK ? (ko ? "가지고 있는 파일 확인 중" : "Checking the files on the device")
@@ -171,6 +172,7 @@ static void draw(canvas *c, const ds_progress *p, int status, int wait_s, const 
         ctext(c, w, y, 2, RGB(255, 150, 120)); y += 22;
         if (msg[0]) { ctext(c, msg, y, 1, RGB(200, 140, 120)); y += 16; }
         snprintf(t, sizeof t, ko ? "%d초 후 다시 시도합니다" : "Trying again in %d s", wait_s); ctext(c, t, y + 6, 2, RGB(170, 180, 200));
+        if (status == DS_ERR_SPACE) ctext_fit(c, ko ? "공간을 비우면 자동으로 이어서 받습니다" : "Free some space: the download resumes by itself", y + 36, 2, RGB(170, 180, 200));   // (each try checks the space again)
     }
 }
 static void draw_prep(canvas *c, int done, int total, double el) {   // el: seconds since the parts began
@@ -296,7 +298,9 @@ static void *sync_thread(void *a) {
             if (rc == DS_DONE || rc == DS_UPTODATE || rc == DS_OFFLINE) break;
             if (c.pr.phase == DS_PH_DOWNLOAD && c.pr.done) delay = 2;   // it moved on: the next break waits from the start again
             LOG("[RED] data: try %d failed (%d): %s; again in %d s", round, rc, c.err, delay);
-            for (int s = delay; s > 0; s--) { pthread_mutex_lock(&S.mu); S.status = rc; S.wait_s = s; snprintf(S.msg, sizeof S.msg, "%s", c.err); pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); sleep(1); }
+            char msg[256]; snprintf(msg, sizeof msg, "%s", c.err);   // (the log keeps c.err in English; the screen says how much space in the app's language)
+            if (rc == DS_ERR_SPACE && korean()) snprintf(msg, sizeof msg, "%.1fGB가 더 필요합니다 (남은 공간 %.1fGB)", c.space_need / 1073741824.0, c.space_free / 1073741824.0);
+            for (int s = delay; s > 0; s--) { pthread_mutex_lock(&S.mu); S.status = rc; S.wait_s = s; snprintf(S.msg, sizeof S.msg, "%s", msg); pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); sleep(1); }
             delay = rc == DS_ERR_PACKAGE || rc == DS_ERR_SPACE || rc == DS_ERR_LOCAL ? 30 : delay * 2 > 60 ? 60 : delay * 2;   // (DS_ERR_LOCAL: until an install pushes what is missing)
         }
         LOG("%s", rc == DS_DONE ? "data: downloaded, the files folder holds the server's pack" : rc == DS_UPTODATE ? "data: the files folder holds the server's pack already"

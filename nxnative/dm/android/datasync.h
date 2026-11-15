@@ -313,6 +313,7 @@ typedef struct {
     void (*note)(void *u, const ds_progress *p); void *nu;         // progress, from the sync's own thread
     void (*log)(void *u, const char *msg); void *lu;
     ds_progress pr; char err[256];
+    uint64_t space_need, space_free;   // DS_ERR_SPACE: the bytes more that are needed, and the bytes free (the screen says them in the app's language; err is the log's)
 } ds_ctx;
 #define DS_LOG(c, ...) do { if ((c)->log) { char _m[512]; snprintf(_m, sizeof _m, __VA_ARGS__); (c)->log((c)->lu, _m); } } while (0)
 static void ds_note(ds_ctx *c) { if (c->note) c->note(c->nu, &c->pr); }
@@ -702,7 +703,10 @@ static int ds_apply(ds_ctx *c, const ds_list *l, const ds_list *known, const cha
     if (!nneed) goto out;
     if (c->free_bytes) {   // what comes down, and one bundle's files beside the bundles (each bundle is deleted once its files are out)
         uint64_t fr = c->free_bytes(c->bu, c->root), need_b = (fetch ? want + bwant - parts : 0) + maxb + (64u << 20);
-        if (fr < need_b) { snprintf(c->err, sizeof c->err, "%.1f GB more space is needed; the device has %.1f GB free", (need_b - fr) / 1073741824.0, fr / 1073741824.0); rc = DS_ERR_SPACE; goto out; }
+        if (fr < need_b) {
+            c->space_need = need_b - fr; c->space_free = fr;
+            snprintf(c->err, sizeof c->err, "%.1f GB more space is needed; the device has %.1f GB free", (need_b - fr) / 1073741824.0, fr / 1073741824.0); rc = DS_ERR_SPACE; goto out;
+        }
     }
     if (local_id && ((fetch && (nown || nbdl)) || strcmp(local_id, l->id))) {   // the folder is no longer one whole pack until the new list is written: an app without the
         // server must not start a mix of two packs (only the folder's own bundles of the folder's own list taken out: still that pack)
@@ -779,7 +783,7 @@ out:
 // c->err (DS_ERR_NET: try again later; a part already downloaded is kept). c->fetch NULL: no server at all (an APK without --data-url whose files folder has bundles to
 // unpack: front_android.c runs the sync then only): DS_OFFLINE once they are, DS_ERR_LOCAL when the folder still lacks files
 static int ds_sync(ds_ctx *c) {
-    memset(&c->pr, 0, sizeof c->pr); c->err[0] = 0; c->pr.phase = DS_PH_CONNECT; ds_note(c);
+    memset(&c->pr, 0, sizeof c->pr); c->err[0] = 0; c->space_need = c->space_free = 0; c->pr.phase = DS_PH_CONNECT; ds_note(c);
     ds_list local, prev, srv; char *lraw = NULL; size_t lrn = 0; int looked = 0;
     int have_local = !ds_list_load(c, DS_LIST, &local, &lraw, &lrn), have_prev = !ds_list_load(c, DS_PREV, &prev, NULL, NULL);
     int pending = have_local && ds_pending(c, &local);   // bundles in the folder (porter install's, or an unpack that stopped): their files are taken out before the game starts

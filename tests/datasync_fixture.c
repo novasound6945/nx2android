@@ -2,7 +2,7 @@
 // bytes; '-' is a server that cannot be reached, 'none' no server at all (ds_ctx.fetch NULL: an APK ported without --data-url). -DDS_H="<path>" builds it with another
 // datasync.h (an app from before bundles).
 // datasync_fixture <server dir|-|none> <root> <package> [--break BYTES] [--free BYTES]
-// Prints "fetch <path> <from>" for each file the server sent, then: result <R> fetched_files <n> fetched_bytes <b> [err <c->err>]
+// Prints "fetch <path> <from>" for each file the server sent, then: result <R> fetched_files <n> fetched_bytes <b> space_need <B> space_free <B> [err <c->err>]
 #include <locale.h>
 #ifdef DS_H
 #include DS_H
@@ -50,7 +50,11 @@ int main(int argc, char **argv) {
     }
     ds_ctx c = {.root = argv[2], .package = argv[3], .fetch = none ? NULL : fetch, .fu = &s, .free_bytes = use_free ? freeb : NULL, .bu = &fr, .log = logf_};
     int rc = ds_sync(&c);
-    printf("result %s fetched_files %d fetched_bytes %llu%s%s\n", rc >= 0 && rc < (int)(sizeof NAMES / sizeof *NAMES) ? NAMES[rc] : "?", s.files, (unsigned long long)s.sent,
-           c.err[0] ? " err " : "", c.err);
+    unsigned long long need = 0, fr0 = 0;
+#ifdef DS_FORMAT   // (a datasync.h from before these: 0)
+    need = c.space_need; fr0 = c.space_free;
+#endif
+    printf("result %s fetched_files %d fetched_bytes %llu space_need %llu space_free %llu%s%s\n", rc >= 0 && rc < (int)(sizeof NAMES / sizeof *NAMES) ? NAMES[rc] : "?",
+           s.files, (unsigned long long)s.sent, need, fr0, c.err[0] ? " err " : "", c.err);
     return 0;
 }
