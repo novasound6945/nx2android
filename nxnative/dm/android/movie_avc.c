@@ -30,19 +30,22 @@ struct mavc {
     // sorts the pictures it holds by time, then showed the P-frame before them (a picture from ahead, then the three before it) whenever several were held at once: 20 to 100 pictures
     // in 600 went back in time, "previous and next frames mixed". Real times keep them in presentation order, and the queue stays sorted by them
     int64_t last_in; int synth; struct { int64_t c, g; } pmap[64]; int npmap;
+    int64_t last_out;                   // the latest time of a picture handed out (mavc_take)
+    long back_out, none; int nq_max;    // mavc_stats: pictures handed out with a time before one handed out already, takes that found none while inputs were in the codec, the deepest queue
     long ntr_in, ntr_out;        // DM_MOVIE_TRACE: the first inputs and pictures, one line each
 };
 static int avc_trace(void) { static int on = -1; if (on < 0) on = getenv("DM_MOVIE_TRACE") != NULL; return on; }
 
-mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); a->last_in = INT64_MIN; return a; }
-static void close_codec(mavc *a) { if (a->mc) { AMediaCodec_stop(a->mc); AMediaCodec_delete(a->mc); a->mc = NULL; } a->nin = a->nout = 0; a->eos_sent = 0; a->last_in = INT64_MIN; a->npmap = 0; }
+mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); a->last_in = a->last_out = INT64_MIN; return a; }
+static void close_codec(mavc *a) { if (a->mc) { AMediaCodec_stop(a->mc); AMediaCodec_delete(a->mc); a->mc = NULL; } a->nin = a->nout = 0; a->eos_sent = 0; a->last_in = a->last_out = INT64_MIN; a->npmap = 0; }
 void mavc_drop(mavc *a) {
     for (int i = 0; i < a->nq; i++) free(a->q[i].nv12);
     a->nq = 0;
-    if (a->mc) { AMediaCodec_flush(a->mc); a->nin = a->nout = 0; a->eos_sent = 0; a->last_in = INT64_MIN; a->npmap = 0; }   // a seek: pictures in the codec belong to the old position
+    if (a->mc) { AMediaCodec_flush(a->mc); a->nin = a->nout = 0; a->eos_sent = 0; a->last_in = a->last_out = INT64_MIN; a->npmap = 0; }   // a seek: pictures in the codec belong to the old position
 }
 void mavc_free(mavc *a) { if (!a) return; mavc_drop(a); close_codec(a); free(a->au); free(a); }
 int mavc_queued(const mavc *a) { return a->nq; }
+void mavc_stats(mavc *a, long *back, long *none, int *nq_max) { *back = a->back_out; *none = a->none; *nq_max = a->nq_max; a->nq_max = 0; }
 int mavc_held(const mavc *a) { return a->nq + (a->mc && !a->eos_sent && a->nin > a->nout ? (int)(a->nin - a->nout) : 0); }
 void mavc_set_rgba(mavc *a) { a->rgba = 1; }
 
@@ -228,11 +231,28 @@ static void nv12_rgba(const uint8_t *y, const uint8_t *uv, int pw, int ph, uint8
         }
     }
 }
+// The earliest time of an input still in the codec after the last picture handed out (an entry at or before it is one the codec dropped or gave late), for mavc_take's log
+static int64_t earliest_pending(const mavc *a) {
+    int64_t m = INT64_MAX;
+    for (int i = 0; i < a->npmap; i++) if (a->pmap[i].g > a->last_out && a->pmap[i].g < m) m = a->pmap[i].g;
+    return m;
+}
 int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts_us) {
     if (flush) finish(a);
     else if (!a->nq && a->mc && a->nin > a->nout) drain(a, 4000);   // a picture is in the codec's pipeline: give it a few milliseconds
-    if (!a->nq) return 0;
+    if (a->nq > a->nq_max) a->nq_max = a->nq;
+    if (!a->nq) { if (a->mc && a->nin > a->nout) a->none++; return 0; }
     uint8_t *pic = a->q[0].nv12; int pw = a->q[0].w, ph = a->q[0].h; if (pts_us) *pts_us = a->q[0].pts;
+    // A picture handed out with a time before one handed out already (real times only: made-up ones keep the codec's order). c2.qti.avc.decoder gave Disgaea 5's opening
+    // movie (I P B B B, real times) in presentation order: none in 2 runs of 5,400 pictures on the Retroid Pocket Nova; the pictures it showed out of order came from the
+    // game's own output queue (hle_movie.c, "Disgaea 5 1.0.3's movie player"). Counted for md_pace, the first ones logged with the queue and what is still in the codec
+    if (!a->synth && a->last_out != INT64_MIN && a->q[0].pts < a->last_out && ++a->back_out <= 8) {
+        char qs[200]; int o = 0; for (int i = 0; i < a->nq && o < 180; i++) o += snprintf(qs + o, sizeof qs - (size_t)o, " %lld", (long long)(a->q[i].pts / 1000));
+        int64_t ep = earliest_pending(a);
+        LOG("[movie] AVC: picture time %lld µs handed out after %lld (%ld so far): queue (ms)%s, %ld in the codec, earliest still in it %lld, %d time entries%s",
+            (long long)a->q[0].pts, (long long)a->last_out, a->back_out, qs, a->nin - a->nout, (long long)(ep == INT64_MAX ? -1 : ep), a->npmap, flush ? ", flushing" : "");
+    }
+    if (a->q[0].pts > a->last_out) a->last_out = a->q[0].pts;
     memmove(a->q, a->q + 1, --a->nq * sizeof a->q[0]);
     const uint8_t *uv = pic + (size_t)pw * ph;
     if (a->rgba) nv12_rgba(pic, uv, pw, ph, dst, w, h);

@@ -71,7 +71,8 @@ typedef struct {
     int w, h, fmt_sent, started, in_eos;          // in_eos: an end-of-stream packet was sent; no input until Flush / Stop (h_movie_AcqIn)
     uint8_t *in[MD_NIN]; int infree[MD_NIN], ninfree;                     // queue of free input indices
     int inown[MD_NIN]; uint64_t instale[MD_NIN];                          // inown: acquired by the client and not sent yet; instale: when a Flush / Stop found it held (the client may still send it), 0 if not
-    struct { int used, pic; int64_t pts; uint32_t flags; uint8_t *frm; size_t cap, bytes; } out[MD_NOUT];   // pic: frm holds a decoded picture (audio: bytes of PCM); cap: bytes in frm
+    struct { int used, pic; int64_t pts; uint32_t flags; uint8_t *frm; size_t cap, bytes; uint64_t seq; } out[MD_NOUT];   // pic: frm holds a decoded picture (audio: bytes of PCM); cap: bytes in frm; seq: order in which it was queued (md_pace)
+    uint64_t oseq;                                                        // outputs queued so far
     int outq[MD_NOUT], noutq;                                             // queue of ready output indices
     struct { int in, off, size; int64_t pts; uint32_t flags; } pend[MD_NIN]; int npend;   // input packets waiting to be decoded (in arrival order)
     // Decoding: dmu lets only one guest thread take and decode packets at a time (packets enter libvpx in order); wmu / wcv hand one job to the host thread and wait for it
@@ -89,7 +90,8 @@ typedef struct {
     unsigned long ncall[24];
     // Video pacing as the client sees it (md_pace, one line per 600 pictures): presents between successive GetOutputBuffer calls, pictures whose time goes backwards,
     // and how many outputs the client held (acquired, not released) at each one
-    struct { uint64_t frame; int64_t pts; unsigned long n, gap[4], back, held_sum, held1; int held; } pace;
+    struct { uint64_t frame; int64_t pts; unsigned long n, gap[4], back, held_sum, held1; int held;
+             uint64_t seq, ns; unsigned long ooo, skip, stale, dbl, dt[5]; } pace;   // the client's order: outputs read after one queued later, after skipping one, read while not held, released twice; intervals between reads
 } mdec_t;
 
 static struct {
@@ -207,6 +209,50 @@ static void movie_ring_wait(const uint64_t *regs) {
     static _Atomic int nlong; if (dt > 50000000ull && nlong++ < 8) LOG("[movie] waited %.1f ms on the player request ring", dt / 1e6);
 }
 __attribute__((constructor)) static void movie_ring_gates(void) { gate_obs_set(OBS_MOVIE_RING_LINK, movie_ring_wait); gate_obs_set(OBS_MOVIE_RING_UNLINK, movie_ring_wait); }
+// Disgaea 5 1.0.3's movie player keeps the outputs it acquired in two std::vector queues of {index, time, flags} (player at main+0x7c9d5e8: video +0x430, audio +0x448). Its
+// main thread takes the front entry once a frame under a mutex (main+0x1ecbac: +0xa68 video, +0xa10 audio), reads that output, releases it, copies the picture and erases the
+// entry (it reads end, moves the rest down, stores what it read minus one); its decoder event thread (main+0x1ebdd0) appends what AcquireOutputBufferIndex gives with no lock
+// at all. An append that lands inside an erase loses the new entry and doubles the last one. The doubled index is read again a frame later, when the host has already
+// refilled that released output with the newest picture (a released output is filled at once, ReleaseOutputBufferIndex decodes the next packet), and released again: the
+// output's own entry then reads a newer picture still, and so on, a chain that showed a picture from about 15 frames ahead every 14 to 16 frames for the rest of the movie
+// (the opening movie on the Retroid Pocket Nova: pictures read before one queued earlier 0 / 18 / 78 / 112 / 120 / 95 / 137 / 73 per 600 as chains piled up, each with one
+// picture skipped; the decoder's own order intact, reads evenly 16.7 ms apart). On the Switch the decoder fills a released output some milliseconds later, after the erase;
+// here the event thread's append comes while the main thread copies the picture and erases. Observation gates (the game's patches.py) put both sides under one host lock:
+// the event thread from the start of an output event to its next wait (OBS_MOVIE_QUEUE_PUSH, then DONE at its loop head), the main thread from its own lock to its unlock
+// (POP, DONE). Lock order: the game's mutex, then this one (the event thread takes no game lock in between). DM_MOVIE_QUEUE_LOCK=0 leaves the gates observing only: an index
+// found twice in a queue as the main thread takes it is still counted (md_pace)
+static pthread_mutex_t g_mq_mu = PTHREAD_MUTEX_INITIALIZER; static __thread int t_mq_held;
+static _Atomic unsigned long g_mq_wait, g_mq_dup[2];
+static int mq_lock_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("DM_MOVIE_QUEUE_LOCK"); on = !e || atoi(e) != 0;
+        LOG("[movie] Disgaea 5 movie queues: %s", on ? "the event thread's appends and the main thread's takes under one host lock" : "DM_MOVIE_QUEUE_LOCK=0, the gates only observe"); }
+    return on;
+}
+static void mq_take(void) {
+    if (t_mq_held || !mq_lock_on()) return;
+    if (pthread_mutex_trylock(&g_mq_mu)) { g_mq_wait++; pthread_mutex_lock(&g_mq_mu); }
+    t_mq_held = 1;
+}
+static void mq_push(const uint64_t *regs) { (void)regs; mq_take(); }
+static void mq_done(const uint64_t *regs) { (void)regs; if (t_mq_held) { t_mq_held = 0; pthread_mutex_unlock(&g_mq_mu); } }
+static void mq_check(const uint8_t *vec, int k) {   // the queue {begin, end} at vec: an output index in it twice
+    uint64_t b = ((const volatile uint64_t *)vec)[0], e = ((const volatile uint64_t *)vec)[1];
+    if (!b || e < b || (e - b) % 0x18 || (e - b) / 0x18 > 64) return;
+    int n = (int)((e - b) / 0x18); const uint8_t *p = (const uint8_t *)b;
+    for (int i = 0; i < n; i++) for (int j = i + 1; j < n; j++) if (*(const int32_t *)(p + 0x18 * i) == *(const int32_t *)(p + 0x18 * j)) {
+        unsigned long c = ++g_mq_dup[k];
+        if (c <= 4) { char s[600]; int o = 0; for (int m = 0; m < n && o < 560; m++) o += snprintf(s + o, sizeof s - (size_t)o, " %d:%lld", *(const int32_t *)(p + 0x18 * m), (long long)(*(const int64_t *)(p + 0x18 * m + 8) / 1000));
+            LOG("[movie] Disgaea 5 %s output queue holds index %d twice (entries %d and %d of %d; index:ms%s)", k ? "audio" : "video", *(const int32_t *)(p + 0x18 * i), i, j, n, s); }
+        return;
+    }
+}
+static void mq_pop(const uint64_t *regs) {   // x23 = the player, x19 = the mutex just locked (+0xa68 video, +0xa10 audio)
+    mq_take();
+    uint64_t g = regs[23], m = regs[19];
+    if (m == g + 0xa68) mq_check((const uint8_t *)(g + 0x430), 0); else if (m == g + 0xa10) mq_check((const uint8_t *)(g + 0x448), 1);
+}
+__attribute__((constructor)) static void movie_queue_gates(void) { gate_obs_set(OBS_MOVIE_QUEUE_PUSH, mq_push); gate_obs_set(OBS_MOVIE_QUEUE_POP, mq_pop); gate_obs_set(OBS_MOVIE_QUEUE_DONE, mq_done); }
 // log the first 12 calls one by one, then every 2^k-th (DM_MOVIE_TRACE=1: every call, with the calling thread and the decoder: Unity drives a movie's audio and video decoders from one thread)
 static int md_trace_all(void) { static int on = -1; if (on < 0) on = getenv("DM_MOVIE_TRACE") != NULL; return on; }
 #define MD_TRACE(d, slot, fmt, ...) do { unsigned long n_ = ++(d)->ncall[slot]; if (md_trace_all()) LOG("[movie] [%p] [%p] " fmt, (void *)pthread_self(), (void *)(d), ##__VA_ARGS__); \
@@ -485,7 +531,7 @@ static void md_pump(mdec_t *d) {
             d->out[s].used = 1; pthread_mutex_unlock(&d->mu);
             d->jslot = s; d->jflush = 1; md_job(d, MDJ_TAKE); int got = d->jgot, left = d->avc ? mavc_queued(d->avc) : 0;
             pthread_mutex_lock(&d->mu);
-            d->out[s].pic = got; d->out[s].pts = got ? d->jpts_out : 0; d->out[s].flags = left ? 0 : 4; d->outq[d->noutq++] = s;
+            d->out[s].pic = got; d->out[s].pts = got ? d->jpts_out : 0; d->out[s].flags = left ? 0 : 4; d->out[s].seq = ++d->oseq; d->outq[d->noutq++] = s;
             if (!left) d->avc_drain = 0;
             pthread_mutex_unlock(&d->mu);
             md_event(d, 1);
@@ -509,7 +555,7 @@ static void md_pump(mdec_t *d) {
         pthread_mutex_lock(&d->mu);
         d->infree[d->ninfree++] = pk.in;
         int ready = got || eos;   // an end-of-stream packet without a picture still yields an output to carry the flag back
-        if (ready) { d->out[slot].pic = got; d->out[slot].pts = got && (avc || d->type == MD_TYPE_AAC) ? d->jpts_out : pk.pts; d->out[slot].flags = more ? pk.flags & ~4u : pk.flags; d->outq[d->noutq++] = slot; }
+        if (ready) { d->out[slot].pic = got; d->out[slot].pts = got && (avc || d->type == MD_TYPE_AAC) ? d->jpts_out : pk.pts; d->out[slot].flags = more ? pk.flags & ~4u : pk.flags; d->out[slot].seq = ++d->oseq; d->outq[d->noutq++] = slot; }
         else d->out[slot].used = 0;
         if (more) d->avc_drain = 1;
         int ineos = d->in_eos;
@@ -758,7 +804,7 @@ static void md_tail(mdec_t *d) {
     d->out[s].used = 1; pthread_mutex_unlock(&d->mu);
     d->jslot = s; d->jflush = 1; md_job(d, MDJ_TAIL); int got = d->jgot, more = md_held(d);
     pthread_mutex_lock(&d->mu);
-    if (got) { d->out[s].pic = 1; d->out[s].pts = d->jpts_out; d->out[s].flags = 0; d->outq[d->noutq++] = s; } else d->out[s].used = 0;
+    if (got) { d->out[s].pic = 1; d->out[s].pts = d->jpts_out; d->out[s].flags = 0; d->out[s].seq = ++d->oseq; d->outq[d->noutq++] = s; } else d->out[s].used = 0;
     pthread_mutex_unlock(&d->mu); pthread_mutex_unlock(&d->dmu);
     if (!got) return;
     static int once[2]; if (!once[d->type == MD_TYPE_AVC]++) LOG("[movie] %s: no packet for %llu ms, what the decoder still held goes out (first case)", d->type == MD_TYPE_AVC ? "H.264" : "AAC", (unsigned long long)(idle / 1000000));
@@ -843,18 +889,38 @@ static int md_out_tex(mdec_t *d, int i, void *buf) {
 }
 // One picture handed to the client in CPU mode: how many presents passed since the previous one (a player that takes one picture a frame shows mostly 1; a player whose logic
 // thread runs beside a render thread that presents shows pairs of 0 and 2 wherever the present lands on either side of the call, as Disgaea 5's does, main+0x1e47e4 handing each
-// frame to its render loop main+0x1e4530: equal counts of 0 and 2 are that phase, not lost pictures), whether its time went backwards (a picture shown out of order: Disgaea 5's
-// B-frames under made-up codec times, movie_avc.c), and how many outputs the client held then (its queue of decoded pictures; 1 or none is a player about to run dry)
-static void md_pace(mdec_t *d, int64_t pts) {
-    uint64_t f = dm_guest_frame();
+// frame to its render loop main+0x1e4530: equal counts of 0 and 2 are that phase, not lost pictures; the milliseconds between reads tell: Disgaea 5's are 12-21 ms for 597 to
+// 600 of 600, one picture per 16.7 ms frame, drawn by the same frame, main+0x1ecf08), whether its time went backwards and whether it was read in another order than the
+// outputs were queued (a client that reads them out of order: Disgaea 5's output queue race, "Disgaea 5 1.0.3's movie player" above; the decoder's own order is counted
+// apart, movie_avc.c), and how many outputs the client held then (its queue of decoded pictures; 1 or none is a player about to run dry)
+__attribute__((weak)) void mavc_stats(mavc *a, long *back, long *none, int *nq_max) { (void)a; *back = *none = 0; *nq_max = 0; }
+static void md_pace(mdec_t *d, int i) {
+    uint64_t f = dm_guest_frame(), t = now_ns();
     pthread_mutex_lock(&d->mu);
-    if (d->pace.n) { uint64_t g = f - d->pace.frame; d->pace.gap[g > 3 ? 3 : g]++; if (pts < d->pace.pts) d->pace.back++; }
-    d->pace.frame = f; d->pace.pts = pts; d->pace.held_sum += (unsigned long)d->pace.held; d->pace.held1 += d->pace.held <= 1;
+    int64_t pts = d->out[i].pts; uint64_t seq = d->out[i].seq; int held = d->out[i].used;
+    if (d->pace.n) {
+        uint64_t g = f - d->pace.frame; d->pace.gap[g > 3 ? 3 : g]++;
+        uint64_t ms = (t - d->pace.ns) / 1000000; d->pace.dt[ms < 4 ? 0 : ms < 12 ? 1 : ms < 21 ? 2 : ms < 29 ? 3 : 4]++;
+        int back = pts < d->pace.pts, ooo = seq <= d->pace.seq;
+        d->pace.back += back; d->pace.ooo += ooo; d->pace.skip += seq > d->pace.seq + 1; d->pace.stale += !held;
+        static int nlog; if ((back || !held) && nlog++ < 24)
+            LOG("[movie] video output %d read: time %lld after %lld, queued %llu-th after the %llu-th%s", i, (long long)pts, (long long)d->pace.pts, (unsigned long long)seq,
+                (unsigned long long)d->pace.seq, held ? "" : ", not held by the client (released already)");
+    }
+    d->pace.frame = f; d->pace.ns = t; d->pace.pts = pts; if (seq > d->pace.seq) d->pace.seq = seq;
+    d->pace.held_sum += (unsigned long)d->pace.held; d->pace.held1 += d->pace.held <= 1;
     unsigned long n = ++d->pace.n;
     if (n % 600 == 0) {
+        long dback = 0, dnone = 0; int dq = 0; if (d->avc) mavc_stats(d->avc, &dback, &dnone, &dq);
         LOG("[movie] video pacing, pictures %lu-%lu: presents since the previous picture 0: %lu, 1: %lu, 2: %lu, 3+: %lu; time going backwards %lu; outputs held by the client %.1f on average, 1 or none %lu times; time %.3f s",
             n - 599, n, d->pace.gap[0], d->pace.gap[1], d->pace.gap[2], d->pace.gap[3], d->pace.back, d->pace.held_sum / 600.0, d->pace.held1, pts / 1e6);
-        memset(d->pace.gap, 0, sizeof d->pace.gap); d->pace.back = d->pace.held_sum = d->pace.held1 = 0;
+        LOG("[movie] video pacing, pictures %lu-%lu: read after one queued later %lu, after skipping one %lu, read while not held %lu, released twice %lu; ms between reads <4: %lu, 4-12: %lu, 12-21: %lu, 21-29: %lu, 29+: %lu; "
+            "decoder (so far): out of time order %ld, empty takes %ld; deepest queue in these 600: %d",
+            n - 599, n, d->pace.ooo, d->pace.skip, d->pace.stale, d->pace.dbl, d->pace.dt[0], d->pace.dt[1], d->pace.dt[2], d->pace.dt[3], d->pace.dt[4], dback, dnone, dq);
+        if (gate_obs_present(OBS_MOVIE_QUEUE_POP))
+            LOG("[movie] Disgaea 5 movie queues (so far): an index twice in the video queue %lu times, in the audio queue %lu times; appends and takes that waited for the other thread %lu",
+                (unsigned long)g_mq_dup[0], (unsigned long)g_mq_dup[1], (unsigned long)g_mq_wait);
+        memset(d->pace.gap, 0, sizeof d->pace.gap); memset(d->pace.dt, 0, sizeof d->pace.dt); d->pace.back = d->pace.held_sum = d->pace.held1 = d->pace.ooo = d->pace.skip = d->pace.stale = d->pace.dbl = 0;
     }
     pthread_mutex_unlock(&d->mu);
 }
@@ -881,7 +947,7 @@ HLE_FORCE("_ZN5movie7Decoder15GetOutputBufferEiPNS_6BufferE", "movie decoder: ge
     if (d->out[i].pic && d->out[i].frm) memcpy(p, d->out[i].frm, need);
     else { memset(p, 16, (size_t)stride * slice); memset(p + (size_t)stride * slice, 128, need - (size_t)stride * slice); }
     G.set_range(buf, 0, (int)need);
-    md_pace(d, d->out[i].pts);
+    md_pace(d, i);
     MD_TRACE(d, 12, "GetOutputBuffer index %d → %zu bytes%s", i, need, d->out[i].pic ? "" : " (black frame)");
     return 0;
 }
@@ -895,6 +961,7 @@ HLE_FORCE("_ZN5movie7Decoder24ReleaseOutputBufferIndexEi", "movie decoder: relea
     if (i < 0 || i >= d->nout) return 0x100b;
     pthread_mutex_lock(&d->mu);
     if (d->out[i].used && d->pace.held > 0) d->pace.held--;
+    if (!d->out[i].used && !MD_AUDIO(d) && d->started) { d->pace.dbl++; static int nlog; if (nlog++ < 8) LOG("[movie] video output %d released while not held (queued %llu-th)", i, (unsigned long long)d->out[i].seq); }
     d->out[i].used = 0; d->out[i].pic = 0;
     int queued = d->npend, drain = d->avc_drain;
     pthread_mutex_unlock(&d->mu);
