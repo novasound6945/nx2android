@@ -957,7 +957,7 @@ static uint64_t g_cur_frame;   // (defined with the GPU time per frame, below)
 // freed from another thread than the one recording, images of a dropped pool (gfx_vk_tex.c vk_tex_drop_pool). A ring written lock-free from any thread: a report
 // may show an entry torn by a write racing it, which costs a line, not the report. And the last submissions with what they held (sub_note, the replay thread)
 typedef struct { uint64_t ns, open, a, b, c; uint32_t tid; int kind; } vkev_t;
-enum { EV_N = 512, SUBR_N = 64 };
+enum { EV_N = 2048, SUBR_N = 64 };
 static vkev_t g_ev[EV_N]; static _Atomic uint64_t g_nev;
 uint32_t g_sub_draws, g_sub_fast_draws, g_sub_links, g_sub_takeovers;
 typedef struct { uint64_t fence, ns, frame; uint32_t tid, ncb, draws, fast, links, takeovers; } subrec_t;
@@ -1567,13 +1567,16 @@ void vk_device_lost(const char *where, int result) {
     if (!shown) VKLOG("[lost] no submission recorded after the last finished one");
     uint64_t ne = atomic_load(&g_nev), from = oldest > 3000000000ull ? oldest - 3000000000ull : 0; int nl = 0, skipped = 0; uint64_t kinds[8] = {0};
     for (uint64_t i = ne > EV_N ? ne - EV_N : 0; i < ne; i++) { const vkev_t *e = &g_ev[i % EV_N]; int k = __atomic_load_n(&e->kind, __ATOMIC_ACQUIRE); if (k >= 0 && k < 8) kinds[k]++; }
-    VKLOG("[lost] the last %llu events: %llu pipelines linked, %llu whole ones took over, %llu pools made, %llu dropped, %llu objects freed from another thread while the replay recorded, %llu pools' images dropped, %llu frees while a slot was recycled",
+    VKLOG("[lost] the last %llu events: %llu pipelines linked, %llu whole ones took over, %llu pools made, %llu dropped, %llu objects freed from another thread while the replay recorded, %llu pools' images dropped, %llu frees while a slot was recycled, %llu images evicted",
           (unsigned long long)(ne < EV_N ? ne : EV_N), (unsigned long long)kinds[VKEV_LINK], (unsigned long long)kinds[VKEV_TAKEOVER], (unsigned long long)kinds[VKEV_POOL_ADD], (unsigned long long)kinds[VKEV_POOL_DEL],
-          (unsigned long long)kinds[VKEV_XFREE], (unsigned long long)kinds[VKEV_IMG_DROP], (unsigned long long)kinds[VKEV_RECYCLE_FREE]);
-    for (uint64_t i = ne > EV_N ? ne - EV_N : 0; i < ne; i++) {
+          (unsigned long long)kinds[VKEV_XFREE], (unsigned long long)kinds[VKEV_IMG_DROP], (unsigned long long)kinds[VKEV_RECYCLE_FREE], (unsigned long long)kinds[VKEV_EVICT]);
+    uint64_t first = ne > EV_N ? ne - EV_N : 0, inwin = 0;   // the newest 160 of the window are shown: those nearest the device lost
+    for (uint64_t i = first; i < ne; i++) { const vkev_t *e = &g_ev[i % EV_N]; if (__atomic_load_n(&e->kind, __ATOMIC_ACQUIRE) >= 0 && e->ns >= from) inwin++; }
+    if (inwin > 160) VKLOG("[lost]   (%llu older events in that time not shown)", (unsigned long long)(inwin - 160));
+    for (uint64_t i = first; i < ne; i++) {
         const vkev_t *e = &g_ev[i % EV_N]; int k = __atomic_load_n(&e->kind, __ATOMIC_ACQUIRE);
         if (k < 0 || e->ns < from) continue;
-        if (nl >= 160) { skipped++; continue; }
+        if (inwin-- > 160) { skipped++; continue; }
         char b[300]; double ago = e->ns <= now ? (now - e->ns) / 1e6 : 0; unsigned long long a = e->a, bb = e->b, c = e->c, sz = bb & ((1ull << 56) - 1); int how = (int)(bb >> 56);
         if (k == VKEV_LINK) snprintf(b, sizeof b, "pipeline linked at a draw: shaders %016llx %016llx, pipeline %#llx", a, bb, c);
         else if (k == VKEV_TAKEOVER) snprintf(b, sizeof b, "whole pipeline took over from the linked one: shaders %016llx %016llx, pipeline %#llx", a, bb, c);
@@ -1582,10 +1585,11 @@ void vk_device_lost(const char *where, int result) {
         else if (k == VKEV_XFREE) snprintf(b, sizeof b, "%s %#llx freed from another thread while the replay records (into the open submission's list; %llu such frees so far)", ev_free_kind(a), bb, c);
         else if (k == VKEV_IMG_DROP) snprintf(b, sizeof b, "images of a dropped pool: pool %#llx, %llu images", a, bb);
         else if (k == VKEV_RECYCLE_FREE) snprintf(b, sizeof b, "%s %#llx freed while a slot was recycled (waited for every submission first)", ev_free_kind(a), bb);
+        else if (k == VKEV_EVICT) snprintf(b, sizeof b, "image evicted (a newer texture over its memory): pool %#llx +%#llx, %llux%llu nvn format %#llx, %llu samples", a, bb, c & 0xffff, c >> 16 & 0xffff, c >> 32 & 0xffff, c >> 48 & 0xff);
         else snprintf(b, sizeof b, "event %d %#llx %#llx %#llx", k, a, bb, c);
         VKLOG("[lost]   %.1f ms ago, thread %u, submission %llu open: %s", ago, e->tid, (unsigned long long)e->open, b); nl++;
     }
-    if (skipped) VKLOG("[lost]   (%d more events in that time not shown)", skipped);
+    (void)skipped;
     if (V.has_fault && g_fault_info) {
         VkDeviceFaultCountsEXT n = {.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
         VkResult fr = g_fault_info(V.dev, &n, NULL);

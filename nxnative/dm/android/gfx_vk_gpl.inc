@@ -35,7 +35,7 @@ static VkPipeline gpl_make(VkGraphicsPipelineLibraryFlagsEXT part, VkGraphicsPip
     VkGraphicsPipelineLibraryCreateInfoEXT li = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT, (void *)ci->pNext, part};
     ci->pNext = &li; ci->flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR; ci->basePipelineIndex = -1;
     if (gpl_lto()) ci->flags |= VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT;
-    VkPipeline p = VK_NULL_HANDLE; VkResult r = vkCreateGraphicsPipelines(V.dev, cache, 1, ci, NULL, &p);
+    VkPipeline p = VK_NULL_HANDLE; VkResult r = PSERIAL(vkCreateGraphicsPipelines(V.dev, cache, 1, ci, NULL, &p));
     if (cache) vk_pipeline_cache_changed();
     if (r) { static int n; if (n++ < 16) VKLOG("[RED] GPL: a pipeline library (part %#x) failed (%d)", (unsigned)part, r); return VK_NULL_HANDLE; }
     return p;
@@ -178,7 +178,7 @@ static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout) {
         VkPipelineLibraryCreateInfoKHR li = {VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR, NULL, 4, lib};
         VkGraphicsPipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &li}; ci.layout = layout; ci.basePipelineIndex = -1;
         if (gpl_lto()) ci.flags |= VK_PIPELINE_CREATE_LINK_TIME_OPTIMIZATION_BIT_EXT;
-        VkResult r = vkCreateGraphicsPipelines(V.dev, gpl_lto() ? V.pcache : VK_NULL_HANDLE, 1, &ci, NULL, &p);
+        VkResult r = PSERIAL(vkCreateGraphicsPipelines(V.dev, gpl_lto() ? V.pcache : VK_NULL_HANDLE, 1, &ci, NULL, &p));
         if (gpl_lto() && V.pcache) vk_pipeline_cache_changed();
         if (r) { p = VK_NULL_HANDLE; static int n; if (n++ < 16) VKLOG("[RED] GPL: linking failed (%d): shaders %016llx %016llx %016llx: built as before", r, (unsigned long long)k->key[0], (unsigned long long)k->key[1], (unsigned long long)k->key[2]); } }
     else { static int n; if (n++ < 16) VKLOG("[RED] GPL: a part is missing (vertex input %d, pre-rasterization %d, fragment %d, output %d): shaders %016llx %016llx %016llx: built as before",

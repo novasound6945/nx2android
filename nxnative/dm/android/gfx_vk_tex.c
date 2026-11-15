@@ -339,7 +339,9 @@ static void evict_overlaps(uint64_t pool, int64_t off, int64_t size) {
         vkimg_t *o = g_by_key.vals[i]; if (!o || o->pool != pool || o->off >= off + size || off >= o->off + o->size || g_tex_frame - o->used < EVICT_KEEP) continue;
         memcpy(&ks[n++], g_by_key.keys + (size_t)i * g_by_key.klen, sizeof(akey));
     }
-    for (int j = 0; j < n; j++) { vkimg_t *o = nvn_hm_get(&g_by_key, &ks[j]); if (!o) continue; nvn_hm_del(&g_by_key, &ks[j]); img_drop(o); g_img_evicted++; }
+    for (int j = 0; j < n; j++) { vkimg_t *o = nvn_hm_get(&g_by_key, &ks[j]); if (!o) continue; nvn_hm_del(&g_by_key, &ks[j]);
+        vk_ev(VKEV_EVICT, pool, (uint64_t)o->off, (uint64_t)o->w | (uint64_t)o->h << 16 | (uint64_t)(o->nvn_format & 0xffff) << 32 | (uint64_t)(o->samples & 0xff) << 48);   // (vk_device_lost)
+        img_drop(o); g_img_evicted++; }
 }
 static vkimg_t *vk_tex_(const tex_t *t);
 vkimg_t *vk_tex(const tex_t *t) { extern int g_prof_on; extern uint64_t g_prof_ns[8]; struct timespec a, b; if (g_prof_on) clock_gettime(CLOCK_MONOTONIC, &a);

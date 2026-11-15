@@ -98,7 +98,7 @@ uint64_t vk_fence_done(void);   // the highest submission fence the GPU has comp
 // A device lost (VK_ERROR_DEVICE_LOST) is reported once, with what led to it, and the process stops: the submissions the GPU had not finished, the recent events of
 // vk_ev, the driver's fault report (VK_EXT_device_fault) and the crumbs (DM_VK_CRUMBS=1). Any thread that meets one calls it; the others wait for the first
 __attribute__((noreturn)) void vk_device_lost(const char *where, int result);
-enum { VKEV_LINK, VKEV_TAKEOVER, VKEV_POOL_ADD, VKEV_POOL_DEL, VKEV_XFREE, VKEV_IMG_DROP, VKEV_RECYCLE_FREE };
+enum { VKEV_LINK, VKEV_TAKEOVER, VKEV_POOL_ADD, VKEV_POOL_DEL, VKEV_XFREE, VKEV_IMG_DROP, VKEV_RECYCLE_FREE, VKEV_EVICT };
 void vk_ev(int kind, uint64_t a, uint64_t b, uint64_t c);   // a recent event for vk_device_lost's report (any thread, lock-free)
 extern uint32_t g_sub_draws, g_sub_fast_draws, g_sub_links, g_sub_takeovers;   // this submission's draws, those with a linked pipeline, pipelines linked and whole ones that took over (gfx_vk_exec.c; replay thread)
 

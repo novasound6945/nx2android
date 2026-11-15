@@ -90,6 +90,11 @@ static int g_atest = 1;   // DM_VK_ALPHA_TEST (live): NVN's alpha test in fragme
 enum { LRZ_READ = 2, LRZ_SWITCH = 4, LRZ_CUT = 8, LRZ_ALL = 14, LRZ_CUT_RD = 16, LRZ_CORNER = 32 };   /* LRZ_CUT_RD: only read at a cut; LRZ_CORNER: the last texel, not the first (tests) */   // DM_VK_LRZ_TOUCH bits: the read before a load pass, the write-back on a depth switch, the write-back at a cut
 static int g_x_nosetc, g_x_nodrvc, g_x_landcut, g_x_nokeep, g_x_nobc, g_x_cutany, g_lrz_touch, g_xfb_on = 1, g_x_nogs, g_spv_alt, g_x_nodispbar; int g_x_noshc;   // g_xfb_on: DM_VK_XFB=0 captures no transform feedback (A/B)
 static int g_x_nosetmemo, g_x_setverify;   // DM_VK_X_NOSETMEMO=1 (live, A/B): no per-stage set memo; DM_VK_X_SETVERIFY=1 (live): one memo hit in 64 checked (see stage_set)
+// DM_VK_X_PIPE_SERIAL=1 (start-up, diagnosis): one pipeline (whole, library part, link, compute) made at a time across the replay, background, prewarm and preparation
+// threads, to tell a driver race in pipeline creation from the rest (Fire Emblem Engage lost the device within a second of pipelines made on several threads at once)
+static pthread_mutex_t g_pserial_mu = PTHREAD_MUTEX_INITIALIZER;
+static int pipe_serial(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_X_PIPE_SERIAL"); v = e && atoi(e); if (v) VKLOG("pipelines made one at a time (DM_VK_X_PIPE_SERIAL)"); } return v; }
+#define PSERIAL(call) ({ int ps_ = pipe_serial(); if (ps_) pthread_mutex_lock(&g_pserial_mu); VkResult pr_ = (call); if (ps_) pthread_mutex_unlock(&g_pserial_mu); pr_; })
 static int g_vbound = 1;   // DM_VK_VBOUND (see vbuf_bound)
 // DM_VK_PROF_SLOW=1 (live): a submission whose replay took over 40 ms logs where it went: pipelines built on the replay thread, textures (vk_tex: images made and
 // packaged uploads, the latter also apart), the copied pools' sync before it, shader modules, and the rest
@@ -1243,7 +1248,7 @@ static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshade
     if (!prp && !V.has_dynrender) { build_end(bs); return (VkPipeline)1; }   // no compatible render pass and no dynamic rendering: no valid pipeline (pass_commit skips such passes)
     VkGraphicsPipelineCreateInfo ci = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, prp ? NULL : &rci, 0, ns, ss, &vi, &ia, NULL, &vs, &rs, &ms, &ds, &cb, &dy, layout, prp, 0, VK_NULL_HANDLE, -1};
     if (bs >= 0) g_build[bs].phase = 2;
-    VkResult r = vkCreateGraphicsPipelines(V.dev, V.pcache, 1, &ci, NULL, &p);
+    VkResult r = PSERIAL(vkCreateGraphicsPipelines(V.dev, V.pcache, 1, &ci, NULL, &p));
     vk_pipeline_cache_changed();
     build_end(bs);
     static uint64_t n; uint64_t c = __atomic_add_fetch(&n, 1, __ATOMIC_RELAXED);
@@ -2256,7 +2261,7 @@ static VkPipeline compute_build(vkshader_t *cs, uint64_t um, uint64_t im) {   //
     static int alt = -1; if (alt < 0) { const char *e = getenv("DM_VK_SPV_ALT"); alt = e && atoi(e); }
     VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(VK_SHADER_STAGE_COMPUTE_BIT, cs->local), 0, VK_SHADER_STAGE_COMPUTE_BIT, vk_shader_module(cs, um, im, alt && !um && !im ? 1u << 31 : 0, 0), "main", NULL}, vk_pipeline_layout(dsl, 1), VK_NULL_HANDLE, -1};   // (pNext: DM_VK_SUBGROUP_PIN)
     if (bs >= 0) g_build[bs].phase = 2;
-    VkResult r = vkCreateComputePipelines(V.dev, V.pcache, 1, &ci, NULL, &p); build_end(bs);
+    VkResult r = PSERIAL(vkCreateComputePipelines(V.dev, V.pcache, 1, &ci, NULL, &p)); build_end(bs);
     vk_pipeline_cache_changed();
     if (r) { LOG("[RED] [vk] compute pipeline failed: %016llx", (unsigned long long)cs->key); p = (VkPipeline)1; }
     return p;
