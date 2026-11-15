@@ -1,0 +1,39 @@
+# Game profile from the survey (profile_guess.py), memory and modules unchanged; brought up on Android 2026-11-15 (android.tsv)
+# 마계전기 디스가이아 4 리턴, SDK 7, survey <NSP folder>/0100D8400F816000_survey/survey.md
+
+# ---- Identity ----
+title_id	0100D8400F816000
+program_id	0100D8400F816000
+
+# ---- App ----
+name	마계전기 디스가이아 4 리턴
+ipa	4.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v1	1.1.0	main=d40672c88eca79bcb4f5b5849d6a3c60	subsdk0=baee264d3658fc6b6b581e5cbb662e3a	sdk=e30d2170165e907aba457c79fd83383d
+package	v1
+shader_versions	v1
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/DATA/ANM_HI.dat
+zip_store	.bin:.dat:.fad:.mp4:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	마계전기 디스가이아 4 리턴 shaders (provisional profile)
+
+# ---- After the rewrite ----
+# the rewritten modules are larger than the default 64 MB of used memory (Age of Calamity: 66.6 MB → 72 MB)
+mem_used	0x4c00000

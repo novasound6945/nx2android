@@ -1778,7 +1778,10 @@ static int prepare_draw(int prim, int indexed) {
     k.raster_discard = S.rast_discard; k.alt = (uint32_t)g_spv_alt; k.cull = g_no_cull ? 0 : S.poly.cull;
     // counter-clockwise front faces in Vulkan's framebuffer: Vulkan's clip space has y down, Metal's up (nvn_mtl.m: CCW when (front == CCW) != lower left), and the
     // lower-left origin mode flips the viewport again, so CCW when (front == CCW) == lower left. Taken as given, upper-left games (NEO) culled their ground and walls
-    k.front = ((S.poly.front == NVN_FRONT_FACE_CCW) == (g_lower_left != 0)) != (g_flipy != 0); k.mode = S.poly.mode; k.depth_clamp = S.depth_clamp;
+    // DM_VK_FRONT_INVERT=1 (game profile): the other winding. Disgaea 4 Return (upper-left, front CCW, the map's floor panels culled BACK) lost every floor top this way and
+    //   showed the lava sea under its characters; with no culling (DM_VK_NOCULL) the floors drew. Why it differs from the other upper-left games is not known yet
+    static int front_inv = -1; if (front_inv < 0) { const char *e = getenv("DM_VK_FRONT_INVERT"); front_inv = e && atoi(e); }
+    k.front = (((S.poly.front == NVN_FRONT_FACE_CCW) == (g_lower_left != 0)) != (g_flipy != 0)) != front_inv; k.mode = S.poly.mode; k.depth_clamp = S.depth_clamp;
     k.bias_en = (S.poly.offset_en & (S.poly.mode == 0 ? 1 : S.poly.mode == 1 ? 2 : 4)) != 0;
     if (var == 2) k.bias_en = 0;
     if (var == 8) k.raster_discard = 1;   // no fragment shader in the pipeline
