@@ -273,7 +273,11 @@ static int ds_complete(const ds_ctx *c, const ds_list *l) {   // every file of t
     for (int i = 0; i < l->n; i++) {
         if (!strcmp(l->f[i].path, "settings.txt")) continue;   // the player's (it may have been rewritten since)
         ds_path(p, sizeof p, c, ds_local_name(l->f[i].path));
-        if (ds_size(p) != (int64_t)l->f[i].size) return 0;
+        if (ds_size(p) == (int64_t)l->f[i].size) continue;
+        // a pack installed over adb (porter install) has the pack's env.txt as env.txt itself, and no env.pack.txt: Tales of Eternia Remastered so installed
+        // waited on its server's HTTP 404 (no pack published yet) instead of starting from its whole pack, 2026-11-15
+        if (!strcmp(l->f[i].path, "env.txt")) { ds_path(p, sizeof p, c, "env.txt"); if (ds_size(p) >= 0) continue; }
+        return 0;
     }
     return 1;
 }
