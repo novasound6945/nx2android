@@ -144,6 +144,7 @@ static void replay_uclamp(void) {
     static int cur = -1; int tid = g_replay_tid; if (!tid) return;
     const char *e = getenv("DM_REPLAY_UCLAMP"); int want = e ? atoi(e) : 0; if (want < 0) want = 0; if (want > 1024) want = 1024;
     if (want == cur) return;
+    if (cur < 0 && !want) { cur = 0; return; }   // off from the start: nothing to take back (the call itself is refused on the Retroid Pocket 6, a red line at every start)
     struct dm_sched_attr a; memset(&a, 0, sizeof a); a.size = sizeof a;
     a.sched_flags = 0x08 | 0x10 | 0x20;   // SCHED_FLAG_KEEP_POLICY | KEEP_PARAMS | UTIL_CLAMP_MIN
     a.sched_util_min = (uint32_t)want;

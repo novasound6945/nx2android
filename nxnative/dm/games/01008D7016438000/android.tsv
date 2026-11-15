@@ -1,0 +1,34 @@
+# 13 Sentinels: Aegis Rim on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android")
+# Vanillaware's engine on NVN, update v65536 (1.10, SDK 11.4.3), 751 shaders, all translated; BC7 textures; CRI ADX2 sound through AudioOut (6 channels), its small
+# movies H.264 through the SDK's movie library. On the Y700 (2026-10-28): the title, a new game's prologue, the tutorial battle and the start of Juro Kurabe's
+# story with its movie, driven with DM_CTL, then a 20-minute play soak in that story (one process, 18 of 72,900 frames dropped, no red log line, footprint
+# 1.43-1.49 GB). 60 fps as the game asks (present interval 1): on screen 125 of 125 frames at 2 vsyncs of the 120 Hz panel in most windows, GPU 4-6 ms;
+# 457 s of its sound output with no dropout or clipping and no audio underrun. Three core fixes came with it:
+# memory pools over 256 MB in chunks (its 812 MB pool crashed the device's gralloc service and the whole Android UI with it), the LRZ read before passes that load a
+# depth-only buffer (the title's copy to the window lost a triangle to stale bins), and made-up increasing timestamps for H.264 packets the game sends with time 0
+# Asian release (base v0, 1.00): a copy of the US profile 01003FC01670C000 with this title's IDs, packed from porter's derived profile.
+# Retroid Pocket 6, 2026-11-11 (Qualcomm's driver): the title, the prologue and the tutorial battle; the prologue's robot cut fell to 33-40 fps at its end (~6,000
+# draws a frame: the port's per-draw CPU cost, the game thread on little cores, no ADPF thread list on Android 13). The rows below are Unicorn Overlord's (the same
+# Vanillaware engine and draw pattern), checked there on the same device with Turnip T30 (--vulkan-driver) and pipeline libraries, 2026-11-15:
+# the replay on its own thread, kept to the prime core
+env	DM_NVN_ASYNC=1
+env	DM_PIN_REPLAY=prime
+# under one layout only the sets that changed are bound again
+env	DM_VK_SETSPLIT=1
+# the game waits on its frame's fence before it submits the next: passes split every 256 draws, those with depth too, so the GPU starts while the replay records
+env	DM_VK_PASS_SPLIT=256
+env	DM_VK_PASS_SPLIT_DEPTH=1
+# held at 60, back up judged on the median frame
+env	DM_FPS_PIN=60
+env	DM_ADAPT_UP_PCT=50
+# No dynamic uniform buffers, as Dark Souls: Remastered: with pipeline libraries on Turnip T30, a character's textures flickered for a frame when it first appeared
+# or its animation changed (a pipeline drawn fast-linked before its whole one took over, reading the fragment stage's constants at the vertex stage's dynamic
+# offsets). Retroid Pocket 6, 2026-11-15, from empty pipeline records: no flicker with this; the replay's descriptor sets 0.3-0.5 to 0.5-0.75 ms a frame
+env	DM_VK_DYN_UBO=0
+# Retroid Pocket 6, 2026-11-15: the title, the prologue and play by the user at 60 fps in most of it; its heaviest scenes ~48-57 fps (the game waits on its frame's
+# fence before it computes the next: game 7.4 + replay 6.3 + GPU tail 9.7 ms). Shader preparation 45 s the first time (some parts take 1.7-7 s to compile)
+status	playable
+tested	v0 Retroid Pocket 6 (Snapdragon 8 Gen 2, Adreno 740, Turnip T30, Android 13)
+package	org.nx2a.thirteensentinelsasia
+orientation	landscape
+requires	bcn
