@@ -96,6 +96,11 @@ static void render_main(void *arg) {
     for (int i = 0; i < NBUF; i++) { a->bufs[i] = (gbuf){a->data[i], sizeof a->data[i], 0}; free_list[i] = &a->bufs[i]; }
     dm_pcmout_start(out);
     LOG("audren: render thread started for renderer %d (%d buffers in flight, paced by the output)", (int)(a - g_ar), NBUF);
+    // DM_AUDREN_DUMP=<path prefix> (start-up, diagnosis): each renderer's output as it goes to the device, 16-bit stereo at 48 kHz, in <prefix><renderer>.pcm; and every
+    // 2000 frames (10 s) how many were its own renders, queued catch-up frames and frames with no output (played as silence)
+    FILE *df = NULL; uint64_t n_own = 0, n_queued = 0, n_none = 0;
+    { const char *e = getenv("DM_AUDREN_DUMP"); char pth[512];
+      if (e && *e) { snprintf(pth, sizeof pth, "%s%d.pcm", e, (int)(a - g_ar)); if (!(df = fopen(pth, "wb"))) LOG("[RED] DM_AUDREN_DUMP cannot open %s", pth); } }
     while (atomic_load(&a->open)) {
         while (!nfree) {   // wait for the output to hand a block back (silent sink / sound card, one every 5 ms); it signals each release, so the thread sleeps until then (it used to poll every 1 ms)
             gbuf *b = dm_pcmout_released(out);
@@ -121,8 +126,12 @@ static void render_main(void *arg) {
         int n = got ? got : 240;
         if (!got) memset(b->ptr, 0, (size_t)n * 4);
         b->size = (uint64_t)n * 4;
+        if (df) { fwrite(b->ptr, 4, (size_t)n, df); if (!got) n_none++; else if (popped) n_queued++; else n_own++;
+                  if ((n_own + n_queued + n_none) % 2000 == 0) LOG("audren: renderer %d output so far: %llu own renders, %llu queued catch-up frames, %llu without output (silence)", (int)(a - g_ar),
+                                                                   (unsigned long long)n_own, (unsigned long long)n_queued, (unsigned long long)n_none); }
         if (!dm_pcmout_append(out, b)) free_list[nfree++] = b;
     }
+    if (df) fclose(df);
     dm_pcmout_close(out);   // the output would otherwise keep its sound card callback or silent sink running and hold one of the AudioOut slots after the renderer closes
     cq_popped(a);   // an update waiting for queue space (catch-up pacing) sees the renderer closed
     t_ar = NULL;
