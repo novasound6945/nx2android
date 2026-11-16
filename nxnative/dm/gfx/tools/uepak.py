@@ -36,6 +36,7 @@
 #        uepak.py job <RomFS> <main NSO> <work dir> [<Mac host> <rewritten modules>]   the shader code archives of every pak, and an Oodle job of their Oodle-compressed shaders (LZ4 ones
 #                                                                       decoded at once); IoStore shader libraries (UE 5.6) decoded at once through the game's Oodle in the host (OodleHost)
 #        uepak.py finish <work dir> <out dir>                           after the host has run the job: the archives with every shader decoded
+import glob
 import ctypes, json, os, struct, sys, zlib
 
 PAK_MAGIC, ARCHIVE_VERSION = 0x5A6F12E1, 2
@@ -454,10 +455,22 @@ def inline_paks(paths):
             with open(p, 'rb') as f: enc = footer(f)[0]
             if not enc: byfolder.setdefault(os.path.dirname(p), {})[p] = Pak(p)
         except (OSError, ValueError, struct.error): pass
-    for ps in byfolder.values():
+    for folder, ps in byfolder.items():
         names = [n for pk in ps.values() for n in pk.files]
-        if not any(n.endswith('.ushaderbytecode') for n in names) and any(inline_candidate(n) and not n.endswith('.uexp') for n in names): out.update(ps)
+        if any(n.endswith('.ushaderbytecode') for n in names) or not any(inline_candidate(n) and not n.endswith('.uexp') for n in names): continue
+        # Minecraft Dungeons II (IoStore, pak version 11): Dungeons-Switch.pak has the global shader cache file and no archive, but its shaders are the two libraries in
+        # Dungeons-Switch.utoc, which job decodes; taken as inline, the split asked for the game's Oodle decoder to read the pak's files and stopped
+        if io_folder_has_libraries(folder): continue
+        out.update(ps)
     return out
+
+def io_folder_has_libraries(folder):
+    """An IoStore container in the folder holds shader code libraries (a container that does not open, an encrypted one for instance, counts as none)"""
+    for tp in sorted(glob.glob(os.path.join(glob.escape(folder), '*.utoc'))):
+        try:
+            if Toc(tp).of_type(IO_SHADER_LIBRARY): return True
+        except (OSError, ValueError, struct.error, IndexError): pass
+    return False
 
 def inline_only(romfs):
     """Every version 11 pak under the RomFS keeps its shaders inline (inline_paks): there is no shader code archive to decode, shader_split.py reads the packages itself"""
