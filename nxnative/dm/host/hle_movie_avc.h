@@ -17,4 +17,3 @@ void mavc_stats(mavc *a, long *back, long *none, int *nq_max);   // (MediaCodec)
 int mavc_held(const mavc *a);   // pictures still to come out: queued, and (MediaCodec) still in the codec's pipeline; hle_movie.c has a weak one that says 0
 void mavc_set_rgba(mavc *a);   // pictures come out as 4-byte RGBA (stride w * 4) instead of NV12: the native texture mode
 void mavc_drop(mavc *a);   // a flush / seek: queued pictures are discarded
-mavc *mavc_new_vp9(void);  // (Android) a VP9 decoder on the device's hardware VP9 MediaCodec decoder, NULL when it has none (libvpx decodes then); hle_movie.c has a weak one that says NULL
