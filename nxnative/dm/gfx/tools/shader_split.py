@@ -1177,7 +1177,24 @@ def ue_legacy_shaders(path, rel, names, out):
     for name in names:
         d = pk.read(name, decode=oodle)
         label = re.sub(r"^(\.\./)+", "", os.path.normpath(pk.mount + name))
-        ue_inline_shaders(d, f'/{rel}#{label}', out)
+        a1 = uepak.archive1(d) if name.endswith('.ushaderbytecode') else None
+        if a1: ue_archive1_shaders(d, a1, f'/{rel}#{label}', out)
+        else: ue_inline_shaders(d, f'/{rel}#{label}', out)
+
+def ue_archive1_shaders(d, ents, label, out):
+    """The shaders of a version 1 shader code archive (uepak.archive1: Unreal Engine 4.22, Minecraft Dungeons): each entry inflated and taken as the LSLG record it is, its stage checked
+    against the entry's frequency"""
+    import zlib
+    for at, n, u, fq in ents:
+        try: s = d[at:at + n] if n == u else zlib.decompress(d[at:at + n])
+        except zlib.error: red(f'{label}: the shader at {at:#x} does not inflate')
+        rec = len(s) == u and uepak.lslg(s)
+        if not rec: red(f'{label}: the shader at {at:#x} is not an LSLG record of the known layout')
+        tag, ctl, code = rec; st = UE_TAG.get(tag)
+        if not st or st != uepak.FREQ.get(fq): red(f'{label}: the shader at {at:#x} has stage tag {tag} and frequency {fq}')
+        why = check(label, st, ctl, code)
+        if why: red(f'{label}: shader at {at:#x} ({st}): {why}')
+        out.append((f'{label}#UE{at:x}', st, ctl, code))
 
 UE_DAMAGED = 'UE damaged pak files'   # scan_file's extra for a UE_INLINE job: the files that did not decode (main reports them all in one line)
 def ue_inline_pak_shaders(path, rel, names, out):
