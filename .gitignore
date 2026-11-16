@@ -8,6 +8,8 @@
 /nxnative/dm/android/out/
 *.apk
 *.spv
+# but a game profile's replacement shader (shader_vk.py: android_spv.<key>.spv, with its .glsl source beside it)
+!/nxnative/dm/games/*/android_spv.*.spv
 *.dmsv
 __pycache__/
 

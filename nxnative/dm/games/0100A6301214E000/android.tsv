@@ -9,7 +9,13 @@
 # Its device lost at scene changes (three in 30 minutes: the GPU hung on the new linked pipelines of a scene) was Turnip's fast link reading the fragment stage's
 # dynamic uniform buffers at the vertex stage's slots, fixed in the core (gfx_vk_shader.c vk_dyn_ubo_mode, c9da25e): with every pipeline linked at its draw
 # (DM_VK_NOPREWARM=1) 2 of 2 runs lost the device at the first battle scene before, 0 of 3 after, a first start with empty caches among them; about 40 minutes since.
-# Left: textures sometimes feel late to appear (not measured), and once the grass of a battle scene darkened and came back (seen before the fix, not since checked)
+# Battle scenes' lawn went dark for about a second after a hit and came back at once (2026-11-16; the Switch: no change): for that second, while a hit's light is in the
+# light table, the game draws the ground and grass with their point-lit variants, and the lit grass blades (fragment shader d31ff45e8a33bdf1) came out darker than the
+# unlit ones (1912f94e9c44fab3) with the same bindings, constants, textures and pipeline state, their code the same but for the point-light loop, which added nothing
+# there (no NaN either). Why is not found. Blades left out, or that shader replaced by the unlit one's code: no darkening (the knight's axe hit in chapter 2, recorded
+# and measured each run). The profile's android_spv.d31ff45e8a33bdf1.spv is that replacement (shader_vk.py; source in the .glsl beside it): the blades no longer take
+# a hit's light, the ground under them still does.
+# Left: textures sometimes feel late to appear (not measured)
 status	playable
 tested	v327680 Retroid Pocket Nova (QCS8550, Adreno 740, Turnip T30, Android 13)
 package	org.nx2a.t0100a6301214e000

@@ -412,7 +412,7 @@ def main():
     for r in rs:
         for ln in r.stderr.splitlines():
             if ln.strip(): errs[ln.strip()[:120]] += 1
-    entries, fails = [], collections.Counter()
+    entries, fails, overrides = [], collections.Counter(), []
     for k in keys:
         spv_p, res_p = os.path.join(w, k + '.spv'), os.path.join(w, k + '.res.json')
         if not os.path.exists(spv_p): fails['no output'] += 1; continue
@@ -422,6 +422,10 @@ def main():
             spv = remap_handles(spv, *handle_remaps[k])
         st = stages[k]
         cl = [classify(st, b, res) for b in binds]
+        # A game profile's android_spv.<key>.spv (beside it, its source android_spv.<key>.glsl): that shader's code in place of the translation, with the translation's
+        # reflection (same bindings; the replacement may leave some out). Fire Emblem Engage's lit grass blades (d31ff45e8a33bdf1, 2026-11-16): see that profile's android.tsv
+        ov = GAME.table(f'android_spv.{k}.spv')
+        if ov.is_file(): spv = ov.read_bytes(); overrides.append(k)
         for e in cl: kinds_all[e['kind']] += 1
         # header words 2-4: a compute shader's local size; a vertex shader's input locations (all, signed int, unsigned int); a pixel shader's output locations
         hdr3 = (local or jobs[k].get('local') or [1, 1, 1]) if st == 'cs' else io[1] if st == 'vs' else io[3] if st == 'ps' else [0, 0, 0]
@@ -431,5 +435,6 @@ def main():
     print(f'{len(entries)} of {len(keys)} shaders → {a.out} ({os.path.getsize(a.out) / 2**20:.1f} MB, version {ver}: SPIR-V {raw / 2**20:.1f} MB'
           f'{f", {stored / 2**20:.1f} MB compressed" if ver > 1 else ""}); failed: {dict(fails)}; binding kinds: {dict(kinds_all)}')
     for e, n in errs.most_common(8): print(f'  translator: {n:5d}  {e}')
+    if overrides: print(f'{len(overrides)} shaders from the profile in place of their translation (android_spv.<key>.spv): {" ".join(overrides)}')
 
 main()
