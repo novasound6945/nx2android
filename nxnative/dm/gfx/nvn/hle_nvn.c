@@ -2709,7 +2709,13 @@ static int write_region_bl(const tex_t *t, unsigned level, unsigned layer, const
         }
     return 0;
 }
+// A movie frame the host decoded, handed straight to the backend (Android's Vulkan: gfx_vk_tex.c host frames) instead of swizzled into the texture's guest storage and
+// deswizzled again by the replay's packaged upload: 1 = taken. Backends without it keep the guest-memory path. A write by the game itself (WriteTexels) wins over a host frame
+// still pending: mtl_tex_host_frame_drop
+__attribute__((weak)) int mtl_tex_host_frame(const tex_t *t, const void *rgba, int w, int h, size_t row) { (void)t; (void)rgba; (void)w; (void)h; (void)row; return 0; }
+__attribute__((weak)) void mtl_tex_host_frame_drop(const tex_t *t) { (void)t; }
 static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img) {
+    mtl_tex_host_frame_drop(t);
     if (!t->mem) { LOG("[RED] WriteTexels: texture has no storage"); return; }
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!bpb) { ONCE_LOG("[RED] WriteTexels: unknown format %#x", t->d.format); return; }
@@ -2754,7 +2760,14 @@ int nvn_host_write_texture(const void *nvntex, const void *src, int w, int h, si
     if (t->magic != MAGIC('T', 'E', 'X', 0)) return -1;
     if (tw) *tw = (int)t->d.width;
     if (th) *th = (int)t->d.height;
-    if (src) { NVNcopyRegion r = {0, 0, 0, w, h, 1}; write_texels(t, NULL, &r, src, row, 0); }
+    if (src) {
+        // DM_MOVIE_DIRECT=0 (read once): every frame through guest memory, as before the host frames (A/B)
+        static int direct = -1; if (direct < 0) { const char *e = getenv("DM_MOVIE_DIRECT"); direct = !e || atoi(e) != 0; }
+        int f = (int)t->d.format;
+        if (direct && t->d.target == NVN_TEXTURE_TARGET_2D && t->d.levels <= 1 && t->d.samples <= 1 && (f == 0x25 || f == 0x38 || f == 0x6d || f == 0x37) &&
+            mtl_tex_host_frame(t, src, w, h, row)) return f;
+        NVNcopyRegion r = {0, 0, 0, w, h, 1}; write_texels(t, NULL, &r, src, row, 0);
+    }
     return (int)t->d.format;
 }
 // work the host finished on the CPU: the sync object counts as signalled at once (fence 0 is always complete)

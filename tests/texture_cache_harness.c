@@ -52,6 +52,7 @@ static int nvn_dirty_since_span(const void *span,const void *mem,size_t size,uin
 static void nvn_dirty_protect(const void *mem,size_t size) {(void)mem;(void)size;}
 /* CACHE KEYS */
 /* CACHE LIFETIME */
+static void hf_apply(vkimg_t *im,const tex_t *t) {(void)im;(void)t;}   // host movie frames: none in this harness
 /* LOOKUP */
 /* DROP POOL */
 static uint8_t storage[4096]={0x83};

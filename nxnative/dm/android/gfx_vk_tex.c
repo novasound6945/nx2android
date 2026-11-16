@@ -359,6 +359,102 @@ static void pkg_upload_(vkimg_t *im, const tex_t *t, const vkfmt_t *f) {
     }
     free(copy);
 }
+// ---- host movie frames ----
+// The movie decoder's native-texture output (hle_movie.c md_out_tex → hle_nvn.c nvn_host_write_texture) used to be swizzled into the texture's guest storage by the
+// game's thread and deswizzled, hashed and uploaded again here once its pages were found written: the same 8 MB (a 1080p RGBA frame) went through the CPU twice. On the
+// Retroid Pocket Nova Link's Awakening's opening (1080p VP9 at 60 fps) spent 4 to 14 ms a picture in the write and 1 to 3.6 ms a frame in the re-upload, and the screen
+// showed 72 to 80% of the movie's changes; with the frames handed over here 95 to 96%, at about 2.3 ms (the copy) and 0.7 ms (the upload). Now the frame is copied as it is into a slot per texture serial (the newest wins) and the replay copies it into the upload command
+// buffer's scratch memory and onto the image, over whatever the packaged path did. Three buffers a slot: the pending frame (the movie client's thread, in
+// GetOutputBuffer, fills a spare and swaps it in), the last one uploaded (a new image of the same texture, after an eviction, gets it again: the movie's last picture stays when it ends), and the spare.
+// DM_MOVIE_DIRECT=0 (hle_nvn.c) keeps every frame on the guest-memory path
+typedef struct { uint8_t *p; size_t cap; int w, h; uint64_t gen; } hbuf;
+typedef struct { hbuf pend, last, spare; uint64_t gen; } hslot;
+static nvn_hmap g_hf = {.klen = sizeof(uint64_t)}; static pthread_mutex_t g_hf_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_hf_seq;   // (atomic) bumped by every frame queued and every slot gone: an image whose texture looked at this value already has nothing to take
+static int g_hf_live;       // (atomic) slots alive: no lookups pay for the table while no movie plays
+uint64_t g_hf_n, g_hf_bytes, g_hf_ns, g_hf_dropped;   // frames uploaded, their bytes and the replay's CPU time; frames replaced by a newer one before an upload (gfx_vk_present.c)
+static void hbuf_free(hbuf *b) { free(b->p); memset(b, 0, sizeof *b); }
+static void hslot_free(hslot *s) { hbuf_free(&s->pend); hbuf_free(&s->last); hbuf_free(&s->spare); free(s); }
+static void hf_drop_serial(uint64_t serial) {
+    if (!__atomic_load_n(&g_hf_live, __ATOMIC_ACQUIRE)) return;
+    pthread_mutex_lock(&g_hf_mu);
+    hslot *s = nvn_hm_del(&g_hf, &serial);
+    if (s) { __atomic_sub_fetch(&g_hf_live, 1, __ATOMIC_ACQ_REL); __atomic_add_fetch(&g_hf_seq, 1, __ATOMIC_ACQ_REL); }
+    pthread_mutex_unlock(&g_hf_mu);
+    if (s) hslot_free(s);
+}
+void mtl_tex_host_frame_drop(const tex_t *t) { if (t && t->serial) hf_drop_serial(t->serial); }
+int mtl_tex_host_frame(const tex_t *t, const void *rgba, int w, int h, size_t row) {
+    if (!t || !t->serial || !rgba || w <= 0 || h <= 0 || (uint32_t)w > t->d.width || (uint32_t)h > t->d.height || row < (size_t)w * 4) return 0;
+    // linear textures are copied from their pool by every upload buffer (lin_copy) and sparse ones read through their page table: those keep guest memory
+    if (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE) || sparse_tex(t)) return 0;
+    const vkfmt_t *f = vk_fmt(t->d.format);
+    if (!f || f->bpb != 4 || f->compressed || f->dec || f->depth || f->stencil) return 0;
+    size_t n = (size_t)w * h * 4;
+    pthread_mutex_lock(&g_hf_mu);
+    hslot *s = nvn_hm_get(&g_hf, &t->serial);
+    if (!s) {
+        if (!(s = calloc(1, sizeof *s))) { pthread_mutex_unlock(&g_hf_mu); return 0; }
+        nvn_hm_put(&g_hf, &t->serial, s); __atomic_add_fetch(&g_hf_live, 1, __ATOMIC_ACQ_REL);
+        static int nl; if (nl++ < 8) VKLOG("movie frames for texture serial %llu (%ux%u nvn format %#x) go straight to its image (%dx%d)", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, w, h);
+    }
+    hbuf b = s->spare; memset(&s->spare, 0, sizeof s->spare);
+    pthread_mutex_unlock(&g_hf_mu);
+    if (b.cap < n) { free(b.p); b.p = malloc(n); b.cap = b.p ? n : 0; if (!b.p) return 0; }   // (an allocation failure: this frame goes through guest memory)
+    if (row == (size_t)w * 4) memcpy(b.p, rgba, n);
+    else for (int y = 0; y < h; y++) memcpy(b.p + (size_t)y * w * 4, (const uint8_t *)rgba + (size_t)y * row, (size_t)w * 4);
+    b.w = w; b.h = h;
+    pthread_mutex_lock(&g_hf_mu);
+    if ((s = nvn_hm_get(&g_hf, &t->serial))) {   // (the texture may have been released meanwhile: then the frame goes)
+        b.gen = ++s->gen;
+        if (s->pend.p) { g_hf_dropped++; if (!s->spare.p) s->spare = s->pend; else hbuf_free(&s->pend); }
+        s->pend = b; memset(&b, 0, sizeof b);
+        __atomic_add_fetch(&g_hf_seq, 1, __ATOMIC_ACQ_REL);
+    }
+    pthread_mutex_unlock(&g_hf_mu);
+    free(b.p);
+    return 1;
+}
+static void hf_copy(vkimg_t *im, const hbuf *b) {
+    VkCommandBuffer cb = vk_upload_cmd();
+    vk_img_barrier_all(cb);   // after the reads of earlier submissions
+    if (im->layout != VK_IMAGE_LAYOUT_GENERAL) vk_tex_prepare(cb, im);
+    VkBuffer sb; VkDeviceSize so; size_t n = (size_t)b->w * b->h * 4;
+    uint8_t *dst = vk_scratch(n, 16, &sb, &so); memcpy(dst, b->p, n);
+    VkBufferImageCopy r = {so, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {(uint32_t)b->w, (uint32_t)b->h, 1}};
+    vkCmdCopyBufferToImage(cb, sb, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
+    im->hf_gen = b->gen; g_hf_n++; g_hf_bytes += n;
+}
+// the replay, inside a submission, after vk_tex_ decided the image's content: the newest frame queued for this texture, or the last one again for an image that lacks it
+static void hf_apply(vkimg_t *im, const tex_t *t) {
+    if (!__atomic_load_n(&g_hf_live, __ATOMIC_ACQUIRE)) return;
+    uint64_t seq = __atomic_load_n(&g_hf_seq, __ATOMIC_ACQUIRE);
+    if (im->hf_seen == seq && im->hf_serial == t->serial) return;
+    im->hf_seen = seq; im->hf_serial = t->serial;
+    struct timespec a, c; clock_gettime(CLOCK_MONOTONIC, &a);
+    pthread_mutex_lock(&g_hf_mu);
+    hslot *s = nvn_hm_get(&g_hf, &t->serial);
+    if (!s) { pthread_mutex_unlock(&g_hf_mu); return; }
+    if (im->levels != 1 || im->layers != 1 || im->d != 1 || im->samples != 1 || im->aspect != VK_IMAGE_ASPECT_COLOR_BIT || !(im->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
+        (s->pend.p && ((uint32_t)s->pend.w > im->w || (uint32_t)s->pend.h > im->h))) {
+        VKRED_ONCE(16, "movie frame for texture serial %llu does not fit its image (%ux%u levels %u layers %u samples %u): dropped", (unsigned long long)t->serial, im->w, im->h, im->levels, im->layers, im->samples);
+        pthread_mutex_unlock(&g_hf_mu); return;
+    }
+    hbuf b = s->pend;
+    if (b.p) {   // the newest frame: taken out, copied without the lock, then kept as the last one
+        memset(&s->pend, 0, sizeof s->pend);
+        pthread_mutex_unlock(&g_hf_mu);
+        hf_copy(im, &b);
+        pthread_mutex_lock(&g_hf_mu);
+        if ((s = nvn_hm_get(&g_hf, &t->serial))) { if (!s->spare.p) s->spare = s->last; else hbuf_free(&s->last); s->last = b; memset(&b, 0, sizeof b); }
+        pthread_mutex_unlock(&g_hf_mu);
+        free(b.p);
+    } else {
+        if (s->last.p && im->hf_gen != s->last.gen && (uint32_t)s->last.w <= im->w && (uint32_t)s->last.h <= im->h) hf_copy(im, &s->last);   // (rare: a new image; copied under the lock, the slot may go)
+        pthread_mutex_unlock(&g_hf_mu);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &c); g_hf_ns += (uint64_t)((c.tv_sec - a.tv_sec) * 1000000000ll + (c.tv_nsec - a.tv_nsec));
+}
 static int packaged_tex(const tex_t *t);
 static int cpu_content_tex(const tex_t *t, const vkfmt_t *f);
 static int lin_copy(vkimg_t *im, const tex_t *t, const vkfmt_t *f);
@@ -456,6 +552,7 @@ static vkimg_t *vk_tex_(const tex_t *t) {
             im->pkg_seen = now;
         }
     } else if (first) vk_tex_prepare(vk_upload_cmd(), im);
+    hf_apply(im, t);
     return im;
 }
 // Packaged textures give up their write protection (nvn_dirty_release; drawn again, they are uploaded and protected again) when not drawn for PKG_IDLE presents, and the
@@ -589,6 +686,7 @@ typedef struct { uint64_t serial, seq; } cwrel_t;
 static cwrel_t *g_cwrel; static int g_ncwrel, g_capcwrel;   // under g_cw_mu
 void mtl_tex_release(tex_t *t) {   // images belong to their storage key, dropped with the pool; the serial's CPU-written mark goes (serials are never reused: kept, the table grew by one entry per CPU-written texture made)
     if (!t->serial) return;
+    hf_drop_serial(t->serial);   // its host movie frames (the image keeps the one uploaded)
     uint64_t seq = nvn_jobs_queued();
     pthread_mutex_lock(&g_cw_mu);
     if (!seq) nvn_hm_del(&g_cpu_written, &t->serial);
