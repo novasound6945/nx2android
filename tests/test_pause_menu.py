@@ -1,7 +1,7 @@
 """The pause menu's settings.txt rows and its frame rate limit, through the production code on the computer.
 
 settings_load, settings_save, rate_apply, the limit row's press (menu_do) and dm_menu_state are cut out of front_android.c, fps_pin (which holds the
-limit) out of perf_android.c, and the menu panel's drawing (ov_menu_panel) out of gfx_vk_present.c, with the font pack the APK ships. No phone or game is needed.
+limit, with game_mode_sync which reads it) out of perf_android.c, and the menu panel's drawing (ov_menu_panel) out of gfx_vk_present.c, with the font pack the APK ships. No phone or game is needed.
 """
 from pathlib import Path
 import shutil
@@ -36,7 +36,7 @@ SETTINGS_MAIN = r'''
 static char *slurp(const char *p) { static char b[4096]; FILE *f = fopen(p, "r"); assert(f); size_t n = fread(b, 1, sizeof b - 1, f); b[n] = 0; fclose(f); return b; }   // (text: \r\n on Windows)
 static void put(const char *p, const char *s) { FILE *f = fopen(p, "w"); assert(f); fputs(s, f); fclose(f); }
 static const char *pin(void) { const char *e = getenv("DM_FPS_PIN"); return e ? e : "(unset)"; }
-static int pin_now(void) { int s = -2; for (int i = 0; i < 30; i++) s = fps_pin(); return s; }   // fps_pin reads DM_FPS_PIN every 30th call: 0 60 fps, 1 40, 2 30, -1 no pin
+static int pin_now(void) { int s = -2; for (int i = 0; i < 30; i++) { game_mode_sync(); s = fps_pin(); } return s; }   // the presenting thread's game_mode_sync reads DM_FPS_PIN every 30th frame, fps_pin gives it: 0 60 fps, 1 40, 2 30, -1 no pin
 static int rate_bits(void) { int st = dm_menu_state(); assert(st >= 0); return st >> 29 & 3; }   // what the panel is drawn with (gfx_vk_present.c ov_menu_panel)
 int main(int argc, char **argv) {
     assert(argc == 2); snprintf(g_root, sizeof g_root, "%s", argv[1]);
@@ -49,7 +49,7 @@ int main(int argc, char **argv) {
     assert(atomic_load(&g_set_rate) == 40 && !strcmp(pin(), "40") && pin_now() == 1 && rate_bits() == 2);
     // the row steps 40, 30, Auto (the env files' 60 again), 60, 40; each step is saved, every other row with it as it was
     menu_press(OVM_RATE); assert(atomic_load(&g_set_rate) == 30 && !strcmp(pin(), "30") && pin_now() == 2 && rate_bits() == 3);
-    const char *s = slurp(p); assert(strstr(s, "rate=30\n") && strstr(s, "docked=0\n") && strstr(s, "aspect=4:3\n") && strstr(s, "ui=phone,a,5000,4000,1200\n"));
+    const char *s = slurp(p); assert(strstr(s, "rate=30\n") && strstr(s, "docked=0\n") && strstr(s, "aspect=4:3\n") && strstr(s, "ui=phone,a,5000,4000,1200,0\n"));   // (written with the hidden field, 0: settings_save)
     menu_press(OVM_RATE); assert(atomic_load(&g_set_rate) == 0 && !strcmp(pin(), "60") && pin_now() == 0 && rate_bits() == 0 && strstr(slurp(p), "rate=0\n"));
     menu_press(OVM_RATE); assert(atomic_load(&g_set_rate) == 60 && !strcmp(pin(), "60") && pin_now() == 0 && rate_bits() == 1);
     menu_press(OVM_RATE); assert(atomic_load(&g_set_rate) == 40 && !strcmp(pin(), "40") && pin_now() == 1 && rate_bits() == 2);
@@ -130,7 +130,8 @@ class PauseMenu(unittest.TestCase):
         settings = cut(self.front, "// ---- settings (the pause menu's)", 'void dm_lan_android_start(')
         state = cut(self.front, 'static _Atomic int g_menu_hi = -1, g_menu_tab;', 'int dm_overlay_fps(void)')
         press = next(line.strip() for line in self.front.splitlines() if line.strip().startswith('else if (item == OVM_RATE)'))
-        pin = cut(self.perf, 'static int fps_pin(void) {', "// The frame's replay and GPU time")
+        # fps_pin gives what game_mode_sync (the presenting thread, every 30th frame) read from DM_FPS_PIN; both come with the adaptive rate's state they touch
+        pin = cut(self.perf, 'static int g_step = 0;', 'static int64_t work_pct(') + cut(self.perf, 'static int fps_pin(void) {', "// The frame's replay and GPU time")
         source = r'''
 #include <assert.h>
 #include <stdatomic.h>
@@ -169,6 +170,7 @@ static uint8_t *g_font;
 const uint8_t *dm_overlay_font(void) { return g_font; }
 float dm_overlay_scale(void) { return 1; }
 int dm_save_note(char *out, int cap) { snprintf(out, (size_t)cap, "-"); return OVX_IDLE; }
+int dm_menu_audio_available(void) { return 0; }   // no outputs to choose: the Game tab has no audio row (overlay_layout.h ov_menu_item)
 ''' + canvas + colours + r'''
 typedef struct { char s[64]; float x, cy; int scale; } drawn;   // each text the panel draws
 static drawn g_drawn[64]; static int g_ndrawn;

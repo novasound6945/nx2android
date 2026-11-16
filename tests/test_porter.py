@@ -1,6 +1,7 @@
 # Unit tests of the port pipeline's own parts (python -m unittest discover tests). They need no game files, toolchains or device.
 import hashlib, importlib.util, json, os, random, re, shutil, struct, sys, tempfile, unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -207,7 +208,9 @@ class DataPack(unittest.TestCase):
             self.assertEqual(next(f['sha256'] for f in fj['files'] if f['path'] == 'mods/main.patched.bin'), hashlib.sha256(b'm' * 100).hexdigest())
             self.assertEqual((fj['package'], fj['variants'], fj['hashed']), ('org.nx2a.test', ['4x3'], 3))
             again = publish.manifest(t); self.assertEqual((again['hashed'], again['id']), (0, fj['id']))
-            (t / 'env.txt').write_text('DM_LANG=en\n'); self.assertNotEqual(publish.manifest(t)['id'], fj['id'])
+            # the same size, another mtime (set: a bind-mounted folder can keep the old one for a write this quick)
+            e = t / 'env.txt'; m = e.stat().st_mtime_ns; e.write_text('DM_LANG=en\n'); os.utime(e, ns=(m + 2_000_000_000, m + 2_000_000_000))
+            self.assertNotEqual(publish.manifest(t)['id'], fj['id'])
             self.assertEqual(publish.check_url('https://h:5006/port/darksouls/1.0.0'), 'https://h:5006/port/darksouls/1.0.0/')
             for bad in ('ftp://h/', 'h/x', 'http://h/a b'):
                 with self.assertRaises(BuildError): publish.check_url(bad)
@@ -252,6 +255,47 @@ class Experimental(unittest.TestCase):
             self.assertEqual(os.environ.get('DM_GAMES_FIRST'), '1')
         finally:
             os.environ.clear(); os.environ.update(environ); shutil.rmtree(t, ignore_errors=True)
+
+    @staticmethod
+    def _npdm(exefs, flags):   # a main.npdm: META magic, the flags byte (bit 0 Is64BitInstruction) at 0xC
+        exefs.mkdir(parents=True, exist_ok=True); d = bytearray(0x80); d[:4] = b'META'; d[0xC] = flags; (exefs / 'main.npdm').write_bytes(bytes(d))
+
+    def test_32bit_game_refused(self):   # issue #161: Rune Factory 4 Special is AArch32 (flags 0x0); every 64-bit game has bit 0 set (0x27, 0x37)
+        from porter.upstream import BuildError, nsp
+        t = Path(tempfile.mkdtemp(prefix='nx2a_test_32_'))
+        try:
+            nsp.require_64bit(t, 'no npdm')   # no main.npdm: nothing to judge, the run goes on
+            self._npdm(t, 0x37); nsp.require_64bit(t, 'a 64-bit game')
+            self._npdm(t, 0x00)
+            with self.assertRaisesRegex(BuildError, r'32-bit \(AArch32\)'): nsp.require_64bit(t, 'Rune Factory 4 Special')
+        finally: shutil.rmtree(t, ignore_errors=True)
+
+    def test_32bit_reused_provisional_profile_refused(self):   # a provisional profile an older porter wrote for a 32-bit game is not reused
+        from porter.upstream import BuildError
+        tid = '010051D00E3A4000'; t = Path(tempfile.mkdtemp(prefix='nx2a_test_32_')); environ = dict(os.environ)
+        try:
+            d = t / f'{tid}_build/profile/{tid}'; d.mkdir(parents=True); (d / 'game.tsv').write_text(f'title_id\t{tid}\n')
+            self._npdm(t / f'{tid}_survey/extract/ExeFS', 0x00)
+            port = pipeline.Port(pipeline.Options(folder=t, experimental=True)); port.env = {}; port.work = t / f'{tid}_build'
+            with self.assertRaisesRegex(BuildError, '32-bit'): port.experimental_profile(None, tid)
+        finally:
+            os.environ.clear(); os.environ.update(environ); shutil.rmtree(t, ignore_errors=True)
+
+    def test_dynsyms_elf32_is_named(self):   # an AArch32 module's ELF32 dynamic entries read as 64-bit ones have no DT_SYMTAB: a ValueError that says so, not KeyError: 6
+        sys.path.insert(0, str(REPO / 'nxnative/dm/tools')); import nso_syms
+        img = bytearray(0x400); struct.pack_into('<I', img, 4, 0x100); img[0x100:0x104] = b'MOD0'; struct.pack_into('<i', img, 0x104, 0x100)
+        for i, (tag, v) in enumerate([(1, 1), (1, 0x4b), (0x15, 0), (6, 0x300), (5, 0x340), (0, 0)]): struct.pack_into('<II', img, 0x200 + i * 8, tag, v)   # Elf32_Dyn
+        with self.assertRaisesRegex(ValueError, 'not a 64-bit NSO'): nso_syms.dynsyms(bytes(img))
+
+    def test_crash_log(self):   # an error porter does not expect: the traceback goes to <build folder>/logs/crash.log, and the error is raised again
+        t = Path(tempfile.mkdtemp(prefix='nx2a_test_crash_'))
+        try:
+            port = pipeline.Port.__new__(pipeline.Port); port.work = t / 'X_build'
+            def boom(): return {}[6]
+            port._run = boom
+            with self.assertRaises(KeyError): port.run()
+            self.assertIn('KeyError: 6', (t / 'X_build/logs/crash.log').read_text(encoding='utf-8'))
+        finally: shutil.rmtree(t, ignore_errors=True)
 
 
 class Misc(unittest.TestCase):
@@ -302,6 +346,16 @@ class Misc(unittest.TestCase):
         from porter import cli
         self.assertTrue(cli._parser().parse_args(['port', 'x', '--mt-replay']).mt_replay); self.assertFalse(cli._parser().parse_args(['port', 'x']).mt_replay)
         self.assertFalse(pipeline.Options(Path(".")).mt_replay)
+
+    def test_sysdata_no_firmware_text(self):   # the [RED] line without --firmware: MiiModel's wording as before; the shared fonts say what the host draws instead
+        mii = pipeline.sysdata_no_firmware('Mario Kart 8 Deluxe', [0x0100000000000802])
+        self.assertEqual(mii, 'Mario Kart 8 Deluxe reads system data from the console\'s firmware (0100000000000802); without --firmware <your firmware dump\'s system content folder> '
+                              'the host\'s stand-in is used and those parts draw nothing (MiiModel: the Mii heads)')
+        fonts = pipeline.sysdata_no_firmware('Kirby', [0x0100000000000811, 0x0100000000000810])
+        self.assertIn('(0100000000000811, 0100000000000810)', fonts); self.assertIn('--shared-font <ttf>', fonts); self.assertIn('stand-ins', fonts)
+        self.assertNotIn('MiiModel', fonts); self.assertNotIn('\n', fonts)
+        both = pipeline.sysdata_no_firmware('X', [0x0100000000000802, 0x0100000000000810])
+        self.assertIn('MiiModel: the Mii heads', both); self.assertIn('(0100000000000810)', both)
 
     def test_shared_font_option(self):   # --shared-font FILE: parsed, and a file that is not a .ttf fails before any stage
         from porter import cli
@@ -432,7 +486,17 @@ class Dumps(unittest.TestCase):   # porter/dumps.py: NSZ / XCZ → NSP; an NCZ m
         secure = _hfs0([(self.name + '.ncz', self.block), ('0100000000aaa0000000000000000000.tik', b't' * 0x2c0)])
         root = _hfs0([('update', _hfs0([])), ('secure', secure)])
         x = bytearray(0x200); x[0x100:0x104] = b'HEAD'; x[0x130:0x138] = struct.pack('<Q', 0x200)
-        (self.d / 'g.xcz').write_bytes(bytes(x) + root); self.check(self.d / 'g.xcz')
+        for key_area in (False, True):   # identification accepts both card layouts; decompression must read the same secure partition
+            with self.subTest(key_area=key_area):
+                src = self.d / 'g.xcz'; src.write_bytes(bytes(0x1000 if key_area else 0) + bytes(x) + root)
+                app, fam = pipeline.nsp.scan_nsps(self.d, ('xcz',))
+                self.assertEqual(app, 0x0100000000AAA000); self.assertEqual(fam['base'], src)
+                self.check(src)
+
+    def test_xcz_without_card_header_is_rejected(self):
+        src = self.d / 'bad.xcz'; src.write_bytes(bytes(0x2000))
+        with self.assertRaisesRegex(pipeline.BuildError, 'no card header'): self.dumps.decompress(src, self.d / 'out.nsp')
+        self.assertFalse((self.d / 'out.nsp').exists()); self.assertFalse((self.d / 'out.nsp.partial').exists())
 
     def test_damage_is_found(self):   # a changed byte: a zstd error, or an NCA whose SHA-256 is not its name; either way a BuildError and no NSP
         for ncz, at in ((self.solid, 0x4000 + 16 + 0x80 + 40), (self.block, -1), (self.block, 0x4000 + 16 + 0x80 + 24 + 100)):
@@ -579,6 +643,94 @@ class Saves(unittest.TestCase):   # porter/saves.py: the save folders on the dev
         u = Path(tempfile.mkdtemp(dir=t)); self.assertEqual(sorted(p.name for p in saves._unpacked(t / 'loose.zip', u).iterdir()), ['main.dat', 'other.dat'])
         with self.assertRaises(BuildError): saves._unpacked(t / 'bad.zip', Path(tempfile.mkdtemp(dir=t)))
         self.assertEqual(saves._unpacked(t, None), t)   # a folder: as it is
+
+
+class UnrealShaders(unittest.TestCase):
+    """porter/pipeline.py device_ue: the Unreal shader code archives decoded with the game's own Oodle decoder, in rounds"""
+
+    class FakePort:
+        """the parts of Port.device_ue it uses"""
+        UE_ROUNDS = 4
+        def __init__(self, root, answers):
+            self.versions, self.dirs = ['v1'], {'v1': root / 'extract' / 'v1'}
+            self.work, self.logs = root / 'work', root / 'logs'
+            self.answers, self.asked = answers, []   # answers: the raw bytes each stream decodes to (missing: the decoder fails)
+            for d in (self.dirs['v1'] / 'RomFS', self.dirs['v1'] / 'ExeFS', self.logs): d.mkdir(parents=True, exist_ok=True)
+        def device_oodle_job(self, job, out, bnsh=False):
+            """the game's own Oodle decoder: the job's streams, decoded (a stream it fails on comes back with no bytes)"""
+            b = job.read_bytes(); n = struct.unpack_from('<I', b, 4)[0]; o = 8; recs = []
+            for _ in range(n):
+                ln, raw = struct.unpack_from('<II', b, o); o += 8
+                recs.append((b[o:o + ln], raw)); o += ln
+            self.asked.append([c for c, _ in recs])
+            ans = b'DMOR' + struct.pack('<I', n)
+            for comp, raw in recs:
+                got = self.answers.get(comp, b'')
+                ans += struct.pack('<I', len(got)) + got
+            out.write_bytes(ans)
+
+    def uepak_job(self, rounds):
+        """what uepak.job does: it asks its decoder for the streams of this round (rounds: a list of stream lists, one per round) and it lists the archives"""
+        state = {'n': 0}
+        def job(romfs, main, jd, decode=None):
+            (Path(jd) / 'archives').mkdir(parents=True, exist_ok=True)   # the real job writes the archives here
+            i = state['n']; state['n'] += 1
+            for comp, raw in rounds[min(i, len(rounds) - 1)]: decode(comp, raw)
+            return [{'name': 'ShaderArchive-Global', 'shaders': 2, 'compressed': 1, 'compression': 'Oodle'}], 0
+        return job
+
+    def uepak_finish(self, jd, out):
+        """what uepak.finish does: the decoded archives land in out"""
+        Path(out).mkdir(parents=True, exist_ok=True)
+        (Path(out) / 'ShaderArchive-Global.ushaderbytecode').write_bytes(b'shaders')
+
+    def port(self, rounds, answers, stamp_size=None):
+        """a port with the fake decoder and the fake archives"""
+        root = Path(tempfile.mkdtemp(prefix='nx2a_test_ue_'))
+        self.addCleanup(shutil.rmtree, root, True)
+        p = self.FakePort(root, answers)
+        (p.dirs['v1'] / 'RomFS' / 'Content').mkdir(parents=True, exist_ok=True)
+        (p.dirs['v1'] / 'RomFS' / 'Content' / 'pakchunk0-Switch.pak').write_bytes(b'pak')
+        p.stamp = pipeline.nsp.ue_stamp(p.dirs['v1'])   # what the version's archives were made from: its paks (the path is the platform's own)
+        if stamp_size is not None:
+            (p.dirs['v1'] / 'ue_shaders').mkdir(parents=True, exist_ok=True)
+            (p.dirs['v1'] / 'ue_shaders' / 'stamp').write_text(p.stamp.rsplit('\t', 1)[0] + f'\t{stamp_size}\n', encoding='utf-8')
+        patches = [mock.patch.object(pipeline.uepak, 'job', self.uepak_job(rounds)),
+                   mock.patch.object(pipeline.uepak, 'finish', self.uepak_finish)]
+        for q in patches: q.start()
+        self.addCleanup(lambda: [q.stop() for q in patches])
+        return p
+
+    def test_the_rounds_advance_until_nothing_is_left(self):   # the same stream again is a cache hit: the round asks for nothing and the decode is done
+        p = self.port([[(b'one', 6)]], {b'one': b'123456'})
+        pipeline.Port.device_ue(p)
+        self.assertEqual(p.asked, [[b'one']])   # the decoder was asked once: the second round wanted nothing
+        self.assertEqual((p.dirs['v1'] / 'ue_shaders' / 'ShaderArchive-Global.ushaderbytecode').read_bytes(), b'shaders')
+        self.assertEqual((p.dirs['v1'] / 'ue_shaders' / 'stamp').read_text(), p.stamp)
+
+    def test_a_stream_the_decoder_fails_on_is_asked_again(self):   # the round that decodes none of them says so
+        from porter.upstream import BuildError
+        p = self.port([[(b'one', 6), (b'two', 4)]], {b'one': b'123456'})
+        with self.assertRaises(BuildError) as e: pipeline.Port.device_ue(p)
+        self.assertIn('decoded none of 1 streams', str(e.exception))
+        self.assertEqual(p.asked, [[b'one', b'two'], [b'two']])   # the stream that failed is asked for again, the decoded one is not
+
+    def test_the_rounds_end_with_an_error(self):   # a new stream every round: the rounds run out
+        from porter.upstream import BuildError
+        rounds = [[(f'stream {i}'.encode(), 4)] for i in range(8)]
+        p = self.port(rounds, {f'stream {i}'.encode(): b'1234' for i in range(8)})
+        with self.assertRaises(BuildError) as e: pipeline.Port.device_ue(p)
+        self.assertIn('still need Oodle streams after 4 rounds', str(e.exception))
+        self.assertEqual(len(p.asked), 4)
+
+    def test_a_stamped_decode_is_not_done_again(self):   # the stamp of a version whose archives are decoded: it is left alone
+        p = self.port([[(b'one', 6)]], {b'one': b'123456'}, stamp_size=3)   # the stamp of this version's paks
+        pipeline.Port.device_ue(p)
+        self.assertEqual(p.asked, [])
+        self.assertFalse((p.dirs['v1'] / 'ue_shaders' / 'ShaderArchive-Global.ushaderbytecode').exists())
+        p = self.port([[(b'one', 6)]], {b'one': b'123456'}, stamp_size=9)   # another pak: the stamp is not the one
+        pipeline.Port.device_ue(p)
+        self.assertEqual(p.asked, [[b'one']])
 
 
 if __name__ == '__main__':

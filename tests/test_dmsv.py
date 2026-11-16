@@ -247,9 +247,10 @@ int main(int argc, char **argv) {   // each shader: key, stage, words, FNV-1a 64
 }
 '''
         (cls.d / 'h.c').write_text(harness, encoding='utf-8'); z = REPO / 'nxnative/dm/third_party/zstd'
+        # -I android: gfx_vk_spv_strip.inc, which the cut-out shader code includes; -Wno-unused-variable: its state the harness does not read (the bundle hash, the strip counts)
         # -Wno-misleading-indentation: gcc (Linux, MinGW) flags the engine's dense `else ...; if (...) ...;` one-liners, clang does not
-        subprocess.run(['cc', '-O1', '-std=gnu11', '-Wall', '-Werror', '-Wno-misleading-indentation', '-Wno-unused-function',
-                        '-I', str(z), '-I', str(REPO / 'nxnative/dm/gfx/nvn'), '-c', str(cls.d / 'h.c'), '-o', str(cls.d / 'h.o')], check=True)
+        subprocess.run(['cc', '-O1', '-std=gnu11', '-Wall', '-Werror', '-Wno-misleading-indentation', '-Wno-unused-function', '-Wno-unused-variable',
+                        '-I', str(z), '-I', str(REPO / 'nxnative/dm/gfx/nvn'), '-I', str(REPO / 'nxnative/dm/android'), '-c', str(cls.d / 'h.c'), '-o', str(cls.d / 'h.o')], check=True)
         subprocess.run(['cc', '-O1', '-w', '-fvisibility=hidden', '-DZSTDLIB_VISIBLE=', '-DZSTDERRORLIB_VISIBLE=', '-c', str(z / 'zstddeclib.c'), '-o', str(cls.d / 'z.o')], check=True)
         subprocess.run(['cc', str(cls.d / 'h.o'), str(cls.d / 'z.o'), '-o', str(cls.d / 'h')], check=True)
 

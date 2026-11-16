@@ -21,6 +21,8 @@ int nvn_fmt_bpb(int format, int *bw, int *bh);   // Bytes per block (0 = unknown
 void nvn_sparse_tile_layout(const nvn_texdesc *d, int32_t out[8]);   // NVNtextureSparseTileLayout words for a texture: numTiledLevels, tile width/height/depth in texels, 4 reserved zeros (all 0 for multisampled or unknown formats)
 // Block height / block depth actually used by level `level` (log2 of the GOB count): the per-level block height shrinks with that level's row count (block rows), and deswizzling uses it level by level
 void nvn_tex_level_tiles(const nvn_texdesc *d, unsigned level, unsigned *tileH, unsigned *tileD);
+// A sparse texture's tiled levels (the levels before its mip tail) and one 64 KB tile in texels; 0 and no tile for a texture that is not sparse
+int nvn_tex_sparse_tiles(const nvn_texdesc *d, uint32_t *tw, uint32_t *th, uint32_t *td);
 // A texture buffer of n elements of bpb bytes read as 2D rows of NVN_TBUF_ROW texels (the translator's wrapped 1D fetch, x & 0x3FFF / x >> 14): width, height and bytes per row of the
 // linear 2D texture over the same memory. One row is n texels, its byte length rounded up to align (the linear-texture row alignment); more rows are full 16384-texel rows. 0 when n or bpb is 0
 #define NVN_TBUF_ROW 16384u

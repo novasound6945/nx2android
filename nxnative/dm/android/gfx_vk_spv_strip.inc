@@ -64,7 +64,8 @@ static uint32_t *spv_strip_clipcull(const uint32_t *w, uint32_t nw, uint32_t *on
     uint32_t vars[16], vs[16], nv = 0;
     for (uint32_t i = 5; i < fn; i += w[i] >> 16) { uint32_t n = w[i] >> 16;
         if ((w[i] & 0xffff) == 59 && n >= 4) for (int k = 0; k < ns; k++) for (uint32_t p = 0; p < st[k].nptr; p++) if (w[i + 1] == st[k].ptr[p]) {
-            if (nv == 16) return NULL; vars[nv] = w[i + 2]; vs[nv++] = (uint32_t)k; } }
+            if (nv == 16) return NULL;
+            vars[nv] = w[i + 2]; vs[nv++] = (uint32_t)k; } }
     for (uint32_t i = fn; i < nw;) { uint32_t n = w[i] >> 16, op = w[i] & 0xffff; if (!n || i + n > nw) return NULL;
         for (uint32_t v = 0; v < nv; v++) { int k = (int)vs[v];
             for (uint32_t m = 1; m < n; m++) if (spv_strip_lit(op, m)) continue; else if (w[i + m] == vars[v] || ((op != 65 && op != 66 && op != 67) && m == 1 && w[i + 1] == st[k].id)) {

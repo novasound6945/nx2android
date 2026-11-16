@@ -208,13 +208,14 @@ static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? 
 
 // Style update events bound per npad (BindNpadStyleSetUpdateEvent: No1..No8 by id, then Handheld and Other): signalled when a player's controller comes or goes, as the hid
 // service does. The front end reports from its own thread, where an event cannot be bound, so only a bound one is signalled (one the game destroyed is not bound any more)
-static void *_Atomic g_style_ev[DM_PLAYERS + 2];
-static int ev_slot(uint32_t id) { return id < DM_PLAYERS ? (int)id : id == NPAD_HANDHELD ? DM_PLAYERS : id == 0x10 ? DM_PLAYERS + 1 : -1; }
-static void style_changed(uint32_t id) { int k = ev_slot(id); void *ev = k >= 0 ? atomic_load(&g_style_ev[k]) : NULL; if (ev) hle_signal_bound_system_event(ev); }
-// The operation mode changed (hle_oe.c dm_set_opmode): player 1's controller moves between No1 (docked) and Handheld, so both npads' style update events fire, as on the
-// Switch when the Joy-Cons are attached or taken off. The Legend of Zelda: Link's Awakening (SDK 8) picks the controller it reads when the event comes: switched to handheld
-// while running, it kept reading No1, which had gone, and took no input at all (Retroid Pocket 6); started in handheld it read Handheld, whose event was signalled at its bind
-void hle_hid_opmode_changed(void) { style_changed(NPAD_NO1); style_changed(NPAD_HANDHELD); }
+// Handheld's after No1..No8 (slot DM_PLAYERS): player 1 moves between Handheld and No1 when the operation mode changes (dm_hid_opmode_changed)
+static void *_Atomic g_style_ev[DM_PLAYERS + 1];
+static int ev_slot(uint32_t id) { return id < DM_PLAYERS ? (int)id : id == NPAD_HANDHELD ? DM_PLAYERS : -1; }
+static void style_changed(uint32_t id) { int k = ev_slot(id); void *ev = k < 0 ? NULL : atomic_load(&g_style_ev[k]); if (ev) hle_signal_bound_system_event(ev); }
+// The operation mode changed (hle_oe.c dm_set_opmode: the pause menu's Handheld / Docked row): player 1's controller is now on the other npad (connected_id), as on the Switch, where
+// docking takes the console's Joy-Cons off Handheld. Both npads' style events fire, so a game that picks its controller by style looks again: Pokémon Legends: Arceus, switched to docked
+// from the pause menu, kept reading Handheld, which reports nothing in docked mode, and no controller worked until the app was started again
+void dm_hid_opmode_changed(void) { style_changed(NPAD_HANDHELD); style_changed(NPAD_NO1); }
 static void note_merged(void) {   // logs the players whose npad the game does not support, when that changes
     static _Atomic uint32_t last; uint32_t m = unsupported_players(), one = (uint32_t)one_player();
     if (atomic_exchange(&last, m | one << 31) == (m | one << 31)) return;
@@ -485,7 +486,7 @@ HLE_FORCE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleEPjRKjNS0_17NpadJoyDeviceTy
 HLE_FORCE("_ZN2nn3hid23MergeSingleJoyAsDualJoyERKjS2_", "merge single Joy-Cons; ignored by the host, reports success", Result, h_hid_Merge, const uint32_t *a, const uint32_t *b) { (void)a; (void)b; return RES_OK; }
 // Bound and signalled once when its controller is connected (the hid service reports the controller already attached at start the same way), and again whenever a player's controller
 // comes or goes (dm_pad_players). Link's Awakening reads no controller state until this event has fired: without it GetNpadState was never called and the title's "Press L+R" never saw a press
-HLE_FORCE("_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", "controller style update event: bound, signaled once for a connected controller and on connect / disconnect", void, h_hid_BindStyleEv,
+HLE_FORCE("_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", "controller style update event: bound, signaled once for a connected controller, on connect / disconnect and on an operation mode change", void, h_hid_BindStyleEv,
           const uint32_t *id, void *ev, int clear) {
     hle_bind_system_event(ev, clear);
     int k = ev_slot(*id); if (k >= 0) atomic_store(&g_style_ev[k], ev);
@@ -579,3 +580,40 @@ HLE_FORCE("_ZN2nn3hid23GetActualVibrationValueEPNS0_14VibrationValueERKNS0_21Vib
     uint32_t targets = h ? vib_targets(*h) : 0;
     *v = targets ? dm_haptics_actual(__builtin_ctz(targets), *h >> 16 & 1) : (dm_vibration){0, 160, 0, 320};
 }
+
+// Palma (the Poké Ball Plus): the SDK's Palma calls talk to the hid service themselves (nn::hid::detail::SetPalmaBoostMode connects through sm; Pokémon Sword 1.3.2 crashed at sdk+0x238eb0
+// after "[RED] sf: the game connects to service hid itself"). The host has no Poké Ball Plus: connection is allowed and boost mode accepted, no npad reports the Palma style, and every
+// call on a connection handle fails with hid's InvalidPalmaHandle (module 202, description 3302, as Ryujinx's hid ResultCode), the answer for a ball that is not there.
+// The operation-complete event is bound (a real, never signalled event) so a game that waits on it after a refused operation does not wait on an unbound one.
+#define PALMA_INVALID (202u | 3302u << 9)
+HLE_FORCE("_ZN2nn3hid17SetPalmaBoostModeEb", "Poké Ball Plus boost mode; accepted (no Poké Ball Plus on the host)", Result, h_hid_PalmaBoost, unsigned on) { (void)on; return RES_OK; }
+HLE_FORCE("_ZN2nn3hid24EnableAnyPalmaConnectionEv", "Poké Ball Plus pairing allowed; none comes", Result, h_hid_PalmaAnyOn, void) { return RES_OK; }
+HLE_FORCE("_ZN2nn3hid25DisableAnyPalmaConnectionEv", "Poké Ball Plus pairing refused", Result, h_hid_PalmaAnyOff, void) { return RES_OK; }
+HLE_FORCE("_ZN2nn3hid24GetPalmaConnectionHandleEPNS0_21PalmaConnectionHandleERKj", "Poké Ball Plus of a controller: none (InvalidPalmaHandle)", Result, h_hid_PalmaHandle, uint64_t *out, const uint32_t *id) {
+    (void)id; if (out) *out = 0; return PALMA_INVALID;
+}
+HLE_FORCE("_ZN2nn3hid31BindPalmaOperationCompleteEventERKNS0_21PalmaConnectionHandleEPNS_2os15SystemEventTypeENS4_14EventClearModeE", "Poké Ball Plus operation event: bound, never signalled",
+          Result, h_hid_PalmaBind, const uint64_t *h, void *ev, int clear) { (void)h; hle_bind_system_event(ev, clear); return RES_OK; }
+HLE_FORCE("_ZN2nn3hid21GetPalmaOperationInfoEPNS0_18PalmaOperationInfoERKNS0_21PalmaConnectionHandleE", "Poké Ball Plus operation result: none (InvalidPalmaHandle)", Result, h_hid_PalmaOpInfo,
+          void *info, const uint64_t *h) { (void)info; (void)h; return PALMA_INVALID; }
+// The rest take a connection handle the host never hands out
+#define PALMA_REFUSE(sym, what, fn) HLE_FORCE(sym, "Poké Ball Plus " what ": refused (InvalidPalmaHandle)", Result, fn, const uint64_t *h) { (void)h; return PALMA_INVALID; }
+PALMA_REFUSE("_ZN2nn3hid15InitializePalmaERKNS0_21PalmaConnectionHandleE", "initialization", h_hid_PalmaInit)
+PALMA_REFUSE("_ZN2nn3hid13ReadPalmaStepERKNS0_21PalmaConnectionHandleE", "step count read", h_hid_PalmaStepRd)
+PALMA_REFUSE("_ZN2nn3hid14ResetPalmaStepERKNS0_21PalmaConnectionHandleE", "step count reset", h_hid_PalmaStepReset)
+PALMA_REFUSE("_ZN2nn3hid15EnablePalmaStepERKNS0_21PalmaConnectionHandleEb", "step counting", h_hid_PalmaStepOn)
+PALMA_REFUSE("_ZN2nn3hid16ReadPalmaPlayLogERKNS0_21PalmaConnectionHandleERKt", "play log read", h_hid_PalmaLogRd)
+PALMA_REFUSE("_ZN2nn3hid17ResetPalmaPlayLogERKNS0_21PalmaConnectionHandleERKt", "play log reset", h_hid_PalmaLogReset)
+PALMA_REFUSE("_ZN2nn3hid17PlayPalmaActivityERKNS0_21PalmaConnectionHandleERKt", "activity", h_hid_PalmaPlay)
+PALMA_REFUSE("_ZN2nn3hid18SetPalmaFrModeTypeERKNS0_21PalmaConnectionHandleERKNS0_15PalmaFrModeTypeE", "FR mode", h_hid_PalmaFr)
+PALMA_REFUSE("_ZN2nn3hid19ReadPalmaUniqueCodeERKNS0_21PalmaConnectionHandleE", "unique code read", h_hid_PalmaCodeRd)
+PALMA_REFUSE("_ZN2nn3hid25SetPalmaUniqueCodeInvalidERKNS0_21PalmaConnectionHandleE", "unique code reset", h_hid_PalmaCodeInv)
+PALMA_REFUSE("_ZN2nn3hid19SuspendPalmaFeatureERKNS0_21PalmaConnectionHandleERKNS_4util10BitFlagSetILi32ENS0_12PalmaFeatureEEE", "feature suspension", h_hid_PalmaSuspend)
+PALMA_REFUSE("_ZN2nn3hid19WritePalmaWaveEntryERKNS0_21PalmaConnectionHandleERKNS0_12PalmaWaveSetERKtPKvmm", "sound write", h_hid_PalmaWave)
+PALMA_REFUSE("_ZN2nn3hid23WritePalmaActivityEntryERKNS0_21PalmaConnectionHandleERKtPKNS0_18PalmaActivityEntryE", "activity write", h_hid_PalmaActWr)
+PALMA_REFUSE("_ZN2nn3hid28WritePalmaRgbLedPatternEntryERKNS0_21PalmaConnectionHandleERKtPKvm", "LED pattern write", h_hid_PalmaLed)
+PALMA_REFUSE("_ZN2nn3hid27ReadPalmaApplicationSectionERKNS0_21PalmaConnectionHandleEim", "application section read", h_hid_PalmaAppRd)
+PALMA_REFUSE("_ZN2nn3hid28WritePalmaApplicationSectionERKNS0_21PalmaConnectionHandleEimRKNS0_35PalmaApplicationSectionAccessBufferE", "application section write", h_hid_PalmaAppWr)
+PALMA_REFUSE("_ZN2nn3hid37GetPalmaDataBaseIdentificationVersionERKNS0_21PalmaConnectionHandleE", "database version read", h_hid_PalmaDbRd)
+PALMA_REFUSE("_ZN2nn3hid37SetPalmaDataBaseIdentificationVersionERKNS0_21PalmaConnectionHandleEi", "database version write", h_hid_PalmaDbWr)
+PALMA_REFUSE("_ZN2nn3hid25CancelWritePalmaWaveEntryERKNS0_21PalmaConnectionHandleE", "sound write cancel", h_hid_PalmaWaveCancel)

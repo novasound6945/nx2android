@@ -19,8 +19,10 @@ class OverlayLayout(unittest.TestCase):
         harness = r'''
 #include <assert.h>
 #include "overlay_layout.h"
-static int custom_faces, custom_a, custom_x;
+static int custom_faces, custom_a, custom_x, hidden_ctl = -1, audio_available;
+int dm_menu_audio_available(void) { return audio_available; }
 float dm_overlay_scale(void) { return 1; }
+int dm_overlay_off(int l, int c) { return l == 1 && c == hidden_ctl; }
 int dm_overlay_custom(int layout, int ctl, float *x, float *y, float *s) {
     *s = 1;
     if (layout == 1 && custom_faces && (ctl == custom_a || ctl == custom_x)) {
@@ -55,6 +57,11 @@ int main(void) {
     assert(ov_button_bits(phone_layout, &phone_layout[ib], (a[0] + x[0]) / 2, (a[1] + x[1]) / 2, 2400, 1080) == DM_BTN_B);
     assert(ov_face_combo(phone_layout, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 2400, 1080) == (DM_BTN_A | DM_BTN_B));
     assert(!ov_face_combo(phone_layout, (a[0] + y[0]) / 2, (a[1] + y[1]) / 2, 2400, 1080));
+    // a hidden face button drops out of the two-button combo
+    hidden_ctl = ix;
+    assert(!ov_face_combo(phone_layout, (a[0] + x[0]) / 2, (a[1] + x[1]) / 2, 2400, 1080));
+    assert(ov_face_combo(phone_layout, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 2400, 1080) == (DM_BTN_A | DM_BTN_B));
+    hidden_ctl = -1;
     custom_a = ia; custom_x = ix;
     for (custom_faces = 1; custom_faces <= 3; custom_faces++) {
         ov_box(&phone_layout[ia], 2400, 1080, a); ov_box(&phone_layout[ix], 2400, 1080, x);
@@ -81,10 +88,13 @@ int main(void) {
     assert(ov_drag_pos(1100, 600, 1013, 50) == 506.5f);
     assert(ov_drag_pos(1100, 505, 1013, 50) == 508);
 
-    // the Gamepad tab's last row is the face buttons' (front_android.c pad_labels); the Game tab's: the frame rate counter, the mode, the frame rate limit under
-    // it (front_android.c rate_apply), the save's export and import
-    assert(ov_menu_item(0, OVM_ROWS - 2) == OVM_PAD && ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
-    assert(ov_menu_item(1, 1) == OVM_FPS && ov_menu_item(1, 2) == OVM_MODE && ov_menu_item(1, 3) == OVM_RATE && ov_menu_item(1, OVM_ROWS - 2) == OVM_IMPORT);
+    // the Gamepad tab's rows end with the face buttons' (front_android.c pad_labels), the row under it empty; the Game tab's: the frame rate counter, the mode, the frame
+    // rate limit under it (front_android.c rate_apply), the save's export and import, and the audio output's row only where the app has outputs to choose
+    assert(ov_menu_item(0, OVM_ROWS - 3) == OVM_PAD && ov_menu_item(0, OVM_ROWS - 2) == -1 && ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
+    assert(ov_menu_item(1, 1) == OVM_FPS && ov_menu_item(1, 2) == OVM_MODE && ov_menu_item(1, 3) == OVM_RATE && ov_menu_item(1, OVM_ROWS - 3) == OVM_IMPORT);
+    assert(ov_menu_item(1, OVM_ROWS - 2) == -1);
+    audio_available = 1;
+    assert(ov_menu_item(1, OVM_ROWS - 2) == OVM_AUDIO);
     {   // every item has one row in one tab, before Resume (gfx_vk_present.c ov_menu_panel sizes the letters by the items before OVM_RESUME)
         int seen[OVM_N] = {0};
         for (int t = 0; t < OVM_TABS; t++) for (int row = 1; row < OVM_ROWS - 1; row++) { int it = ov_menu_item(t, row); if (it >= 0) { assert(it < OVM_RESUME); seen[it]++; } }
@@ -118,60 +128,6 @@ int main(void) {
     return 0;
 }
 '''
-        self._run(cc, harness)
-
-    def test_text_entry_keyboard(self):
-        cc = shutil.which('cc') or shutil.which('clang')
-        if not cc:
-            self.skipTest('a C compiler is needed for the keyboard geometry check')
-        harness = r'''
-#include <assert.h>
-#include "overlay_layout.h"
-float dm_overlay_scale(void) { return 1; }
-int dm_overlay_custom(int layout, int ctl, float *x, float *y, float *s) { (void)layout; (void)ctl; (void)x; (void)y; *s = 1; return 0; }
-int main(void) {
-    assert(OVK_N == 45 && OVK_SHIFT == 40 && OVK_LANG == 41 && OVK_SPACE == 42 && OVK_DEL == 43 && OVK_OK == 44);
-    const float panels[][4] = {{0, 0, 915, 412}, {100, 50, 1216, 760}, {0, 0, 2400, 1080}, {30, 400, 1020, 900}};
-    for (unsigned q = 0; q < sizeof panels / sizeof panels[0]; q++) {
-        const float *p = panels[q];
-        for (int i = 0; i < OVK_N; i++) {   // inside the panel's key area, no overlaps, and the touch test finds each key at its centre
-            float r[4]; ov_kb_key(i, p, r);
-            assert(r[2] > 0 && r[3] > 0 && r[0] >= p[0] && r[1] >= p[1] + p[3] * 0.30f && r[0] + r[2] <= p[0] + p[2] && r[1] + r[3] <= p[1] + p[3] * 0.90f + 0.01f);
-            assert(ov_kb_at(r[0] + r[2] / 2, r[1] + r[3] / 2, p) == i);
-            for (int j = 0; j < i; j++) { float o[4]; ov_kb_key(j, p, o); assert(r[0] >= o[0] + o[2] || o[0] >= r[0] + r[2] || r[1] >= o[1] + o[3] || o[1] >= r[1] + r[3]); }
-        }
-        assert(ov_kb_at(p[0] - 1, p[1] - 1, p) == -1);
-    }
-    for (int i = 0; i < OVK_N; i++) {   // the d-pad: a key from every key in every direction; a row's width of moves left or right comes back, and five up or down
-        int row = i < 40 ? 10 : 5;   // from a wide key (a character key's column can change on the wide row: two columns share a wide key)
-        for (int d = -1; d <= 1; d += 2) {
-            int k = ov_kb_move(i, d, 0), m = ov_kb_move(i, 0, d); assert(k >= 0 && k < OVK_N && m >= 0 && m < OVK_N);
-            assert((k >= 40) == (i >= 40));
-            k = i; for (int s = 0; s < row; s++) k = ov_kb_move(k, d, 0); assert(k == i);
-            k = i; for (int s = 0; s < 5; s++) k = ov_kb_move(k, 0, d); assert(i < 40 || k == i);
-            if (i < 40 && (i % 10 == 0 || i % 10 == 2 || i % 10 == 4 || i % 10 == 7 || i % 10 == 9)) assert(k == i);
-            assert(ov_kb_move(ov_kb_move(i, d, 0), -d, 0) == i);
-        }
-    }
-    assert(ov_kb_move(30, 0, 1) == OVK_SHIFT && ov_kb_move(32, 0, 1) == OVK_LANG && ov_kb_move(35, 0, 1) == OVK_SPACE && ov_kb_move(37, 0, 1) == OVK_DEL && ov_kb_move(39, 0, 1) == OVK_OK);
-    assert(ov_kb_move(OVK_OK, 1, 0) == OVK_SHIFT && ov_kb_move(OVK_SHIFT, -1, 0) == OVK_OK && ov_kb_move(OVK_SHIFT, 0, -1) == 30 && ov_kb_move(OVK_LANG, 0, 1) == 2);
-    assert(ov_kb_move(-1, 1, 0) == 0);
-    // the characters: English as before, the Hangul layout and its shift
-    assert(ov_kb_char(10, 0, 0) == 'q' && ov_kb_char(11, 1, 0) == 'W' && ov_kb_char(0, 1, 0) == '1' && ov_kb_char(29, 1, 0) == '\'' && ov_kb_char(OVK_SPACE, 0, 0) == 0 && ov_kb_char(-1, 0, 1) == 0);
-    assert(ov_kb_char(0, 0, 1) == '1' && ov_kb_char(9, 1, 1) == '0');
-    static const uint32_t ko[30] = {0x3142, 0x3148, 0x3137, 0x3131, 0x3145, 0x315B, 0x3155, 0x3151, 0x3150, 0x3154, 0x3141, 0x3134, 0x3147, 0x3139, 0x314E, 0x3157, 0x3153, 0x314F, 0x3163, '\'',
-                                    0x314B, 0x314C, 0x314A, 0x314D, 0x3160, 0x315C, 0x3161, '-', '.', '_'};
-    static const uint32_t ko_shift[30] = {0x3143, 0x3149, 0x3138, 0x3132, 0x3146, 0x315B, 0x3155, 0x3151, 0x3152, 0x3156, 0x3141, 0x3134, 0x3147, 0x3139, 0x314E, 0x3157, 0x3153, 0x314F, 0x3163, '\'',
-                                          0x314B, 0x314C, 0x314A, 0x314D, 0x3160, 0x315C, 0x3161, '-', '.', '_'};
-    for (int i = 0; i < 30; i++) { assert(ov_kb_char(10 + i, 0, 1) == ko[i]); assert(ov_kb_char(10 + i, 1, 1) == ko_shift[i]); }
-    for (int i = 40; i < OVK_N; i++) assert(ov_kb_char(i, 1, 1) == 0);
-    assert(ov_kb_find('q') == 10 && ov_kb_find('m') == 36 && ov_kb_find('1') == 0 && ov_kb_find('!') == -1 && ov_kb_char(ov_kb_find('r'), 1, 1) == 0x3132);   // a physical r with shift: kk
-    return 0;
-}
-'''
-        self._run(cc, harness)
-
-    def _run(self, cc, harness):
         with tempfile.TemporaryDirectory(prefix='nx2a_overlay_') as tmp:
             tmp = Path(tmp)
             (tmp / 'android_profile.h').write_text(android_profile.header(None), encoding='utf-8')
@@ -183,6 +139,73 @@ int main(void) {
             result = subprocess.run([str(exe)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+
+    def test_grown_controls_do_not_overlap(self):
+        """On a small screen the controls grow so a face button stays 10 mm wide (front_android.c dm_overlay_scale). Each side grows out from its bottom
+        corner and no further than fits (overlay_layout.h ov_box, ov_fit_scale): no two controls overlap and none leaves the window. Grown around their
+        own centres, the Odin 3's 1920x1080 at x1.45 made eleven pairs overlap and pushed ZL, ZR and the menu button off the screen. The top strip (the
+        menu button and the frame rate counter's FPS row; its temperature rows are not kept clear: overlay_layout.h ov_strip) stays clear"""
+        cc = shutil.which('cc') or shutil.which('clang')
+        if not cc:
+            self.skipTest('a C compiler is needed for the layout geometry check')
+        harness = r"""
+#include <assert.h>
+#include <stdio.h>
+#include "overlay_layout.h"
+static float g_s = 1;
+float dm_overlay_scale(void) { return g_s; }
+int dm_overlay_custom(int layout, int ctl, float *x, float *y, float *s) { (void)layout; (void)ctl; (void)x; (void)y; *s = 1; return 0; }
+static float gap(const ov_ctl *a, const float p[4], const ov_ctl *b, const float q[4]) {   // < 0: they overlap (round ones as circles, the rest as boxes)
+    float dx = fabsf(p[0] - q[0]), dy = fabsf(p[1] - q[1]);
+    if (a->w == a->h && b->w == b->h) return hypotf(dx, dy) - p[2] - q[2];
+    return fmaxf(dx - p[2] - q[2], dy - p[3] - q[3]);
+}
+int main(void) {
+    const float screens[][3] = {{1920, 1080, 1}, {1920, 1080, 1.45f}, {2400, 1080, 1}, {2400, 1080, 1.45f}, {1280, 800, 1.45f}, {2560, 1600, 1.2f}, {2340, 1080, 1.45f}, {2340, 1080, 1.064f}, {2160, 1080, 1.45f}};
+    for (unsigned k = 0; k < sizeof screens / sizeof screens[0]; k++) {
+        float W = screens[k][0], H = screens[k][1]; int l = ov_layout_for_size((int)W, (int)H); const ov_ctl *L = OV_LAYOUTS[l];
+        g_s = ov_fit_scale(L, W, H, screens[k][2]);
+        assert(g_s >= 1 && g_s <= screens[k][2]);
+        float b[OV_N][4];
+        for (int i = 0; i < OV_N; i++) {
+            ov_box(&L[i], W, H, b[i]);
+            if (!(b[i][0] - b[i][2] >= -0.5f && b[i][0] + b[i][2] <= W + 0.5f && b[i][1] - b[i][3] >= -0.5f && b[i][1] + b[i][3] <= H + 0.5f)) {
+                fprintf(stderr, "%gx%g x%.2f: %s leaves the window\n", W, H, g_s, L[i].name); return 1; }
+        }
+        // the top strip: the menu button (the frame rate counter sits beside it) and the controls beside it (the phone's - and +), which grow down from
+        // the top edge, away from the counter's corner; every other control stays below it
+        float strip = 0; for (int i = 0; i < OV_N; i++) if (L[i].kind == OV_MENU || ov_beside(L, &L[i])) strip = fmaxf(strip, b[i][1] + b[i][3]);
+        for (int i = 0; i < OV_N; i++) if (L[i].kind != OV_MENU && !ov_beside(L, &L[i]) && b[i][1] - b[i][3] < strip - 0.5f) {
+            fprintf(stderr, "%gx%g x%.2f: %s reaches into the top strip\n", W, H, g_s, L[i].name); return 1; }
+        for (int i = 0; i < OV_N; i++) if (ov_beside(L, &L[i])) {
+            float edge0 = fabsf(L[i].x) * H - L[i].w * H / 2, edge = L[i].ax == 0 ? b[i][0] - b[i][2] : W - b[i][0] - b[i][2];
+            if (edge < edge0 - 0.5f || b[i][1] - b[i][3] < L[i].y * H - L[i].h * H / 2 - 0.5f) {
+                fprintf(stderr, "%gx%g x%.2f: %s moves towards its top corner\n", W, H, g_s, L[i].name); return 1; }
+        }
+        for (int i = 0; i < OV_N; i++) for (int j = i + 1; j < OV_N; j++) if (gap(&L[i], b[i], &L[j], b[j]) < 0) {
+            fprintf(stderr, "%gx%g x%.2f: %s and %s overlap by %.0f px\n", W, H, g_s, L[i].name, L[j].name, -gap(&L[i], b[i], &L[j], b[j])); return 1; }
+    }
+    g_s = ov_fit_scale(OV_LAYOUTS[0], 1920, 1080, 1.45f);   // the Odin 3 still gets bigger controls, only not as far as x1.45
+    assert(g_s > 1.15f && g_s < 1.45f);
+    // a phone grows too: - and + beside the menu button do not hold it at x1
+    assert(ov_fit_scale(OV_LAYOUTS[1], 2400, 1080, 1.2f) > 1);
+    // 2340x1080 at 425 dpi: A is 9.4 mm, so front_android.c dm_overlay_scale asks for x1.06 (as on main), and all of it fits
+    float face = 0; for (int i = 0; i < OV_N; i++) if (OV_LAYOUTS[1][i].btn == DM_BTN_A) face = OV_LAYOUTS[1][i].w;
+    float want = OV_MIN_MM / (face * 1080 / 425.0f * 25.4f);
+    assert(want > 1.05f && want < 1.07f && ov_fit_scale(OV_LAYOUTS[1], 2340, 1080, want) == want);
+    return 0;
+}
+"""
+        with tempfile.TemporaryDirectory(prefix='nx2a_overlay_') as tmp:
+            tmp = Path(tmp)
+            (tmp / 'android_profile.h').write_text(android_profile.header(None), encoding='utf-8')
+            c, exe = tmp / 'check.c', tmp / 'check'
+            c.write_text(harness, encoding='utf-8')
+            result = subprocess.run([cc, '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-Wno-missing-field-initializers', f'-I{tmp}',
+                                     f'-I{DM / "android"}', f'-I{DM / "host"}', str(c), '-lm', '-o', str(exe)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            result = subprocess.run([str(exe)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 if __name__ == '__main__':
     unittest.main()

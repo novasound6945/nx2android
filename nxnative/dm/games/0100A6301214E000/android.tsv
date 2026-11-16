@@ -15,6 +15,11 @@
 # there (no NaN either). Why is not found. Blades left out, or that shader replaced by the unlit one's code: no darkening (the knight's axe hit in chapter 2, recorded
 # and measured each run). The profile's android_spv.d31ff45e8a33bdf1.spv is that replacement (shader_vk.py; source in the .glsl beside it): the blades no longer take
 # a hit's light, the ground under them still does.
+# From the profile upstream made on its own (2026-11-11, merged here 2026-11-16):
+# The package keeps the name the experimental port used, so a port made with this profile installs over it and keeps its saves.
+# On Qualcomm's own driver (512.676.53) an Engage Attack scene draws as white/black silhouettes (#122); a Turnip driver draws it right.
+# Tested 2026-11-11 on the AYN Thor with Turnip 27.0.0-R2: the map, menus, battles and an Engage Attack with Marth; 60 fps (a few steps to 40), 0 dropped frames,
+# footprint 1.1-1.4 GB, 0 audio underruns, no red log line.
 # Left: textures sometimes feel late to appear (not measured)
 status	playable
 tested	v327680 Retroid Pocket Nova (QCS8550, Adreno 740, Turnip T30, Android 13)

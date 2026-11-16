@@ -13,10 +13,17 @@
 import hashlib, posixpath, re, shlex, tempfile, zipfile
 from pathlib import Path
 
-from porter import datapack, publish
+from porter import datapack, paths, publish
 from porter.adb import Adb, AdbError, long_path
 from porter.upstream import BuildError, PROG, say
 
+# A pack of a profile with romfs zstd holds packed RomFS files (porter/romfs_pack.py), which only this app reads: pushed into a folder another app reads (--romfs-at, --romfs-push),
+# they would replace that app's own files of the same names and it would stop working. Such a pack goes only into the app's files folder
+PACKED_ELSEWHERE = ('a data pack with a compressed RomFS (android.tsv romfs zstd) goes only into the app\'s own files folder: its packed files would replace the files of a '
+                    'RomFS folder that another app reads. Install it with --romfs-at app')
+def packed_romfs(data):   # whether the pack holds packed RomFS files (its env.txt turns the host's reader on)
+    try: return 'DM_ROMFS_ZSTD=1' in (Path(data) / 'env.txt').read_text(encoding='utf-8').split()
+    except OSError: return False
 APP = 'app'                                                  # --romfs-at app: the RomFS in the app's files folder (the default)
 ROMFS_MARK = '# porter install --romfs-at'                   # in the device's env.txt: the DM_ROMFS row under it is the installer's, carried over by later installs
 ACCESS = 'android.permission.MANAGE_EXTERNAL_STORAGE'        # All files access, which the APK asks for (mkapk.py) and the installer grants
@@ -120,13 +127,15 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
     bund = datapack.bundled(man)
     no_romfs_at = f'{man["name"]}\'s pack keeps its small files in bundles (android.tsv data_bundles), which the app unpacks into its files folder: --romfs-at is not offered for it'
     if bund and target: raise BuildError(f'{no_romfs_at}; install without --romfs-at')
+    packed = packed_romfs(data)
+    if packed and target: raise BuildError(PACKED_ELSEWHERE)
     adb = Adb(adb_exe, serial, log=say)
     PROG.stage('install', step='listing the pack' if bund else 'finding the device')
     fj = publish.manifest(data) if bund else None   # files.json, by which the app unpacks the bundles (the port wrote it: its hashes are kept, nothing is read again)
     if bund: PROG.set(step='finding the device')
-    pushing = False
+    pushing, lock = False, None
     try:
-        dev = adb.pick()
+        dev = adb.pick(); lock = adb.hold(paths.user_dir())   # one install per device at a time: released in the finally below
         model = adb.prop('ro.product.model')
         say(f'device: {model or dev} ({dev}), GPU {adb.gpu() or "unknown"}')
         if 'bcn' in man.get('requires', []):   # the profile's requires: BC-compressed textures
@@ -137,6 +146,7 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
         if romfs_at is None and was:
             target = romfs_target(was, files)
             if target and bund: raise BuildError(f'{no_romfs_at}, and an earlier install had the app read its RomFS from {target}: install with --romfs-at app')
+            if packed and target: raise BuildError(f'the app reads its RomFS from {target} (an earlier install\'s --romfs-at). ' + PACKED_ELSEWHERE)
             if target: say(f'the app reads its RomFS from {target} (an earlier install\'s --romfs-at; --romfs-at app moves it into its files folder)')
         rom = datapack.romfs_sizes(data) if target else {}
         missing = other = changed = []; there = {}
@@ -237,6 +247,8 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
         if gone:   # Android deletes an app's files folder with the app: a push into it then fails part-way (a size mismatch)
             raise BuildError(f'{man["package"]} was uninstalled on the device while its data was being pushed ({e})') from e
         raise BuildError(str(e)) from e
+    finally:
+        if lock: lock.close()
     PROG.end(f'{man["name"]} on {model or dev}')
     say(f'installed: open "{man["name"]}" on the device' + (' (it unpacks its bundles at its first start)' if bund else ''))
 

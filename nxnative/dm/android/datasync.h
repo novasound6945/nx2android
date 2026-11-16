@@ -153,7 +153,8 @@ static void ds_free(ds_list *l) { for (int i = 0; i < l->n; i++) free(l->f[i].pa
 static int ds_rel_ok(const char *path) {   // a path the app can write under its folder: relative, no empty, . or .. parts, no backslash
     if (!path[0] || path[0] == '/' || strchr(path, '\\')) return 0;
     for (const char *s = path; *s;) { const char *e = strchr(s, '/'); size_t k = e ? (size_t)(e - s) : strlen(s);
-        if (!k || (k == 1 && s[0] == '.') || (k == 2 && s[0] == '.' && s[1] == '.')) return 0; s += k + (e != NULL); if (e && !*s) return 0; }
+        if (!k || (k == 1 && s[0] == '.') || (k == 2 && s[0] == '.' && s[1] == '.')) return 0;
+        s += k + (e != NULL); if (e && !*s) return 0; }
     return 1;
 }
 // one entry of "files" (bundle: its "bundle", -1 without) or of "bundles" (bundle NULL); each takes path, size, sha256
@@ -413,7 +414,8 @@ static int ds_env_key(const char *line, char *key, size_t cap) {   // KEY of a K
 }
 static int ds_has_line(const char *text, const char *line, size_t n) {
     for (const char *s = text; s && *s;) { const char *e = strchr(s, '\n'); size_t k = e ? (size_t)(e - s) : strlen(s); if (k && s[k - 1] == '\r') k--;
-        if (k == n && !memcmp(s, line, n)) return 1; s = e ? e + 1 : NULL; }
+        if (k == n && !memcmp(s, line, n)) return 1;
+        s = e ? e + 1 : NULL; }
     return 0;
 }
 static __attribute__((unused)) int ds_has_key(const char *text, const char *key) {
@@ -468,7 +470,7 @@ static int ds_get(ds_ctx *c, const ds_file *f, const char *dst) {
     if (ds_mkdirs(part)) { snprintf(c->err, sizeof c->err, "cannot make the folder of %s (errno %d)", f->path, errno); return DS_ERR_DISK; }
     int64_t have = ds_size(part); if (have < 0 || (uint64_t)have > f->size) have = 0;
     ds_sha s; ds_sha_init(&s);
-    FILE *fp = fopen(part, have ? "r+b" : "wb"); if (!fp) { snprintf(c->err, sizeof c->err, "cannot write %s (errno %d)", part, errno); return DS_ERR_DISK; }
+    FILE *fp = fopen(part, have ? "r+b" : "wb"); if (!fp) { snprintf(c->err, sizeof c->err, "cannot write %.200s (errno %d)", part, errno); return DS_ERR_DISK; }
     c->pr.done += (uint64_t)have; ds_note(c);   // counted before the part is read back for the hash (a 1 GB part takes seconds: the bar showed 0% meanwhile)
     if (have) {   // the part already there goes into the hash
         static uint8_t b[1 << 20]; uint64_t left = (uint64_t)have; size_t k;
@@ -480,15 +482,15 @@ static int ds_get(ds_ctx *c, const ds_file *f, const char *dst) {
     ds_dl d = {fp, &s, c, (uint64_t)have, f->size, (uint64_t)have, 0, &start, part, 0};
     int rc = 0, http = 0;
     if ((uint64_t)have < f->size) rc = c->fetch(c->fu, f->path, (uint64_t)have, &start, &total, &http, NULL, NULL, ds_dl_sink, &d);   // (the fetch sets start before its first sink call)
-    fp = d.f; if (!fp) { snprintf(c->err, sizeof c->err, "cannot write %s (errno %d)", part, errno); return DS_ERR_DISK; }
+    fp = d.f; if (!fp) { snprintf(c->err, sizeof c->err, "cannot write %.200s (errno %d)", part, errno); return DS_ERR_DISK; }
     int wbad = fflush(fp) || ferror(fp); fclose(fp);
-    if (wbad) { snprintf(c->err, sizeof c->err, "cannot write %s (errno %d)", part, errno); return DS_ERR_DISK; }
+    if (wbad) { snprintf(c->err, sizeof c->err, "cannot write %.200s (errno %d)", part, errno); return DS_ERR_DISK; }
     if (rc == DS_ERR_SERVER) { snprintf(c->err, sizeof c->err, "the server answered HTTP %d for %s", http, f->path); return rc; }
     if (rc) { snprintf(c->err, sizeof c->err, "the download of %s broke off at %llu of %llu bytes", f->path, (unsigned long long)d.got, (unsigned long long)f->size); return DS_ERR_NET; }
     if (d.got != f->size) { snprintf(c->err, sizeof c->err, "the download of %s ended at %llu of %llu bytes", f->path, (unsigned long long)d.got, (unsigned long long)f->size); return DS_ERR_NET; }
     char hex[65]; ds_sha_hex(&s, hex);
     if (strcmp(hex, f->sha)) { remove(part); c->pr.done -= f->size; snprintf(c->err, sizeof c->err, "%s came with other bytes than the list says (SHA-256 %.16s, not %.16s)", f->path, hex, f->sha); return DS_ERR_DATA; }
-    if (ds_rename(part, dst)) { snprintf(c->err, sizeof c->err, "cannot rename %s (errno %d)", part, errno); return DS_ERR_DISK; }
+    if (ds_rename(part, dst)) { snprintf(c->err, sizeof c->err, "cannot rename %.200s (errno %d)", part, errno); return DS_ERR_DISK; }
     return 0;
 }
 
@@ -664,9 +666,9 @@ static void ds_clean_bundles(const ds_ctx *c) {   // the folder is whole: what i
     DIR *dir = opendir(d); if (!dir) return;
     for (struct dirent *e; (e = readdir(dir));) if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) {
         snprintf(p, sizeof p, "%s/%s", d, e->d_name);
-        if (remove(p)) DS_LOG(c, "[RED] data: cannot delete %s (errno %d)", p, errno);
+        if (remove(p)) DS_LOG(c, "[RED] data: cannot delete %.400s (errno %d)", p, errno);
     }
-    closedir(dir); if (ds_rmdir(d)) DS_LOG(c, "[RED] data: cannot delete %s (errno %d)", d, errno);
+    closedir(dir); if (ds_rmdir(d)) DS_LOG(c, "[RED] data: cannot delete %.400s (errno %d)", d, errno);
 }
 
 // The files of list l the folder lacks or holds with other bytes (not there at l's size, or there at that size with another hash: known's, the folder's list or the one

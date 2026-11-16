@@ -360,6 +360,11 @@ def build_nx_extract(repo, work, logs, env):
     return nx
 
 
+def require_64bit(exefs, what):   # a 32-bit (AArch32) game stops here: the rewriter, the host and every module tool read only 64-bit (AArch64) code (Rune Factory 4 Special, issue #161)
+    if pg.is_64bit(Path(exefs) / 'main.npdm') is False:
+        raise BuildError(f'{what} is a 32-bit (AArch32) Switch game: nx2android runs only 64-bit (AArch64) games, so it cannot be ported')
+
+
 def swap_in(tmp, dst):   # swap the new output in as a whole (the old one is untouched on failure)
     rmtree(dst)
     # Windows refuses to rename a folder while a file inside is still open, and a virus scanner opens freshly written files for a moment ("[WinError 5] Access is
@@ -453,7 +458,7 @@ def scan_nsps(nsp_dir, exts=('nsp', 'xci'), keys=None):
     keys: prod.keys, whose header_key reads the title ID of a dump with neither a ticket nor a [title ID] tag from its NCA headers"""
     fams, unknown = {}, []
     hk = header_key(keys) if keys else None
-    for p in sorted(p for e in exts for p in nsp_dir.glob(f'*.{e}')):   # a base game may be a cartridge dump (.xci: Monster Hunter Rise); nx_extract reads its secure partition
+    for p in sorted(p for p in nsp_dir.glob('*') if p.is_file() and p.suffix.lower()[1:] in exts):   # suffix case is accepted on every host; directories named *.nsp are not dumps
         if p.stat().st_size == 0:   # an empty file left by an incomplete download (the Zelda BotW folder holds a 0-byte DLC NSP next to the complete (1).nsp)
             say(f'skipping an empty file: {p.name}'); continue
         tid = title_of(p, hk)
@@ -532,6 +537,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     say(f'extracting the code modules and a RomFS manifest (no game files written) → {ex}')
     run([nx, keys, fam['base'], upd or '-', tmp, '--manifest'] + (['--allow-damaged'] if ALLOW_DAMAGED else []), logs / 'extract.log')
     swap_in(tmp, ex)
+    require_64bit(ex / 'ExeFS', f'{nacp.name(ex / "control.nacp") or "the game"} ({app:016X})')
     PROG.stage('survey: code modules', step='reading')
     xlog = (logs / 'extract.log').read_text(errors='replace')
     dv = re.search(r'display version (\S+)', xlog)

@@ -21,7 +21,9 @@ HARNESS = r'''
 #include "gfx_vk_spv_strip.inc"
 // harness <list>: each line "<stage> <in.spv> <out.spv>"; writes out.spv (the module after both, as the runtime applies them) and prints "<in> clip=<0|1> caps=<0|1>"
 int main(int argc, char **argv) {
-    if (argc < 2) return 2; FILE *l = fopen(argv[1], "r"); if (!l) return 2; char in[1024], out[1024]; int stage;
+    if (argc < 2) return 2;
+    FILE *l = fopen(argv[1], "r"); if (!l) return 2;
+    char in[1024], out[1024]; int stage;
     while (fscanf(l, "%d %1023s %1023s", &stage, in, out) == 3) {
         FILE *f = fopen(in, "rb"); if (!f) return 3; fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
         uint32_t *w = malloc((size_t)n), nw = (uint32_t)(n / 4); if (fread(w, 1, (size_t)n, f) != (size_t)n) return 3; fclose(f);

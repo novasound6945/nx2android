@@ -4,7 +4,8 @@
 # when the opening movie ended) and SDK 7.4's DeviceSink command ID 0x10 (the first menu sound crashed the audio render thread).
 # The map's floor panels are drawn with back faces culled and came out culled with the winding as given: the lava sea under the hub showed through the floor.
 # With the winding inverted every floor draws and culling stays on (25 of ~100 map draws cull back). Why this game differs from the other upper-left games is not known
-env	DM_VK_FRONT_INVERT=1
+# Upstream's DM_VK_FRONT=2 is the same switch, so the row now uses that name (the old name, DM_VK_FRONT_INVERT=1, still works as an alias)
+env	DM_VK_FRONT=2
 # Retroid Pocket 6, 2026-11-15 (Turnip T30): title, new game, the opening, the hub at 60 fps (GPU 2.2 ms, frame p95 16.9 ms, no drops); battles not checked yet
 status	experimental
 tested	v1 Retroid Pocket 6 (Snapdragon 8 Gen 2, Adreno 740, Turnip T30, Android 13)

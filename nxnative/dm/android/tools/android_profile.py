@@ -6,8 +6,8 @@
 #   package      the app's package name (default org.nx2a.t<title ID in lowercase>: a package name's parts start with a letter)
 #   orientation  landscape (default) | any
 #   requires     device features, separated by spaces: bcn (BC texture compression)
-#   sysdata      system data titles the game reads from the console's firmware, 16-digit hex title IDs separated by spaces (0100000000000802: MiiModel, the Mii heads Mario Kart 8 Deluxe builds);
-#                porter extracts each from the player's firmware dump (--firmware) into the data pack, and the host mounts it in place of its stand-in
+#   sysdata      system data titles the game reads from the console's firmware, 16-digit hex title IDs separated by spaces (0100000000000802: MiiModel, the Mii heads Mario Kart 8 Deluxe builds; 0100000000000811 and 0100000000000810: the shared fonts, standard and Nintendo extension);
+#                porter extracts each from the player's firmware dump (--firmware) into the data pack, and the host mounts it in place of its stand-in (the fonts: the host decodes them)
 #   setting      <name>=<value>, one row each: the pause menu's defaults on first launch (overlay, rumble, docked, fps, opacity: 20..80 by 5, rate: the frame rate
 #                limit, 0 auto (env.txt's DM_FPS_PIN, else the adaptive rate) or 60, 40, 30); a device that already has a settings.txt keeps it, so a new row reaches new installs only
 #   env          <KEY>=<VALUE>, one row each: host switches the game needs on Android (the data pack's env.txt)
@@ -20,6 +20,7 @@
 #                <bundle bytes> (bundles/bNNNN.tar) instead of one file each, which the app unpacks itself (porter/datapack.py, dm/android/datasync.h): for a game of so many
 #                small files that creating each one on the device over adb (Android's FUSE layer) or downloading each one takes hours (Fire Emblem Engage: 205,000 of its
 #                207,000 files are under 1 MB)
+#   romfs        raw (default) | zstd: zstd puts the RomFS files that compress in the data pack as packed files (porter/romfs_pack.py), which the host reads back
 # Usage: android_profile.py header <id> <out.h> (android_profile.h for the host: the gamepad layouts, written only when it changes); android_profile.py list;
 #   android_profile.py <id> [<key>] (the profile's keys, or one key's value); android_profile.py theme <id> (the gamepad theme pack porter puts in the APK)
 # From Python: import android_profile; p = android_profile.load(<id>) (None without android.tsv); p.status, p.package, p.settings, p.env, p.overlay_table();
@@ -38,7 +39,7 @@ SETTINGS = {'overlay': ('0', '1'), 'rumble': ('0', '1'), 'docked': ('0', '1'), '
             'rate': ('0', '60', '40', '30')}                                                       # the frame rate limit, 0 auto (front_android.c RATE_STEPS)
 REQUIRES = ('bcn',)
 KINDS = {'stick_l': 'OV_STICK_L', 'stick_r': 'OV_STICK_R', 'button': 'OV_BUTTON', 'dpad': 'OV_DPAD', 'menu': 'OV_MENU'}
-SINGLE = ('status', 'tested', 'package', 'orientation', 'requires', 'sysdata', 'data_bundles')
+SINGLE = ('status', 'tested', 'package', 'orientation', 'requires', 'sysdata', 'romfs', 'data_bundles')
 BUNDLE_MAX = 1 << 30   # data_bundles: the largest bundle (the app downloads one whole and reads it twice, its SHA-256 then its files, before deleting it)
 REPEAT = ('setting', 'env', 'overlay', 'variant')
 VARIANTS = ('4x3',)   # the variants the app knows how to pick (front_android.c aspect_variant)
@@ -112,6 +113,9 @@ class AndroidProfile:
         return (int(v[0]), int(v[1])) if len(v) == 2 and all(x.isdigit() for x in v) else None
 
     @property
+    def romfs_zstd(self): return self.get('romfs', 'raw') == 'zstd'   # the data pack's RomFS compressed (porter/romfs_pack.py)
+
+    @property
     def settings(self):   # {'overlay': '1', ...}: the defaults the data pack's settings.txt starts with
         return dict(v.split('=', 1) for v in self.values('setting'))
 
@@ -136,6 +140,7 @@ class AndroidProfile:
         if self.status not in STATUS: bad.append(f'status {self.status!r}: one of {", ".join(STATUS)}')
         if not re.fullmatch(r'[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+', self.package): bad.append(f'package {self.package!r} is not a package name')
         if self.get('orientation', 'landscape') not in ('landscape', 'any'): bad.append('orientation: landscape or any')
+        if self.get('romfs', 'raw') not in ('raw', 'zstd'): bad.append('romfs: raw or zstd')
         bad += [f'requires {r!r}: one of {", ".join(REQUIRES)}' for r in self.requires if r not in REQUIRES]
         bad += [f'sysdata {t!r}: a 16-digit hex title ID' for t in self.get('sysdata').split() if not re.fullmatch(r'[0-9A-Fa-f]{16}', t)]
         if self.get('data_bundles') and not (self.bundles and 0 < self.bundles[0] < self.bundles[1] <= BUNDLE_MAX):

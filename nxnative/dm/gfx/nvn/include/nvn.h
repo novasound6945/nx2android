@@ -54,11 +54,9 @@ typedef struct {
 } NVNdeviceBuilder;
 
 typedef struct {
-    int32_t numTiledLevels;
-    int32_t width;    // tile size in texels
-    int32_t height;
-    int32_t depth;
-    int32_t reserved[4];
+    int numTiledLevels;                   // levels laid out in whole 64 KB tiles; the rest are the mip tail
+    int tileWidth, tileHeight, tileDepth; // one tile in texels
+    char reserved[16];
 } NVNtextureSparseTileLayout;
 _Static_assert(sizeof(NVNtextureSparseTileLayout) == 0x20, "NVNtextureSparseTileLayout is 0x20 bytes");
 

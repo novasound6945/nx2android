@@ -27,7 +27,8 @@
 #   mount point) and its FPakEntry: offset, stored size, raw size (i64 each), compression flags (i32), SHA-1 (20), for a compressed file the block count (i32) and each block's start and end
 #   (i64, from the file start before version 5, from the entry after), the encrypted flag (u8) and the compression block size (u32). The FPakEntry is repeated in front of the data.
 #   The compression flags are no names: 1 zlib, 2 gzip, 4 custom; DRAGON QUEST XI S's engine uses 3, which is LZ5 2.0 (main exports LZ5_*; every block starts with its level, 0x2d = 45), and only the
-#   game's own decoder reads it (hle_oodle.c, through a decode function given to Pak.read).
+#   game's own decoder reads it (hle_oodle.c, through a decode function given to Pak.read). OCTOPATH TRAVELER (UE 4.18, Kingship-Switch.pak 1.9 GB / 103,018 files and Kingship-Switch_0_P.pak) uses 1:
+#   zlib, which Pak.read decodes itself, so its shaders need no game decoder (legacy_decoder_paks).
 # Shader code archive (version 2): shader map hashes (20 bytes each), shader hashes (20 each), shader map entries {u32 first index, u32 shader count, u32 first preload, u32 preload count}, shader
 #   entries {u64 offset, u32 size, u32 raw size, u8 frequency} (17 bytes, packed), preload entries (16 each), shader indices (u32): each array is a u32 count and its elements; the code follows,
 #   offsets relative to its start. A shader whose size differs from its raw size is compressed.
@@ -35,20 +36,28 @@
 #        uepak.py job <RomFS> <main NSO> <work dir> [<Mac host> <rewritten modules>]   the shader code archives of every pak, and an Oodle job of their Oodle-compressed shaders (LZ4 ones
 #                                                                       decoded at once); IoStore shader libraries (UE 5.6) decoded at once through the game's Oodle in the host (OodleHost)
 #        uepak.py finish <work dir> <out dir>                           after the host has run the job: the archives with every shader decoded
-import ctypes, json, os, struct, sys
+import ctypes, json, os, struct, sys, zlib
 
 PAK_MAGIC, ARCHIVE_VERSION = 0x5A6F12E1, 2
 JOB_MAGIC, OUT_MAGIC = 0x4a4f4d44, 0x524f4d44   # "DMOJ", "DMOR" (hle_oodle.c)
 FREQ = {0: 'vs', 1: 'hs', 2: 'ds', 3: 'ps', 4: 'gs', 5: 'cs'}   # EShaderFrequency (the archive's frequency census: 0 vertex, 3 pixel, 5 compute)
 
-_cc = None
+_cc, _aes = None, None
 def aes_decrypt(key, data):
-    """AES-256 ECB decryption through CommonCrypto (every Mac has it; no Python package needed)"""
-    global _cc
-    if _cc is None:
-        _cc = ctypes.CDLL('/usr/lib/libSystem.B.dylib').CCCrypt
-        _cc.restype = ctypes.c_int32
-        _cc.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
+    """AES-256 ECB decryption: CommonCrypto on the Mac (every Mac has it; no Python package needed), pycryptodome elsewhere (requirements.txt; the Windows and Linux
+    bundles ship it). The porter runs where the game is, so the pak's encrypted index is read on a machine that has no CommonCrypto"""
+    global _cc, _aes
+    if _cc is None and _aes is None:
+        try:
+            _cc = ctypes.CDLL('/usr/lib/libSystem.B.dylib').CCCrypt
+            _cc.restype = ctypes.c_int32
+            _cc.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
+        except OSError:   # not a Mac: pycryptodome does the same work (pip install pycryptodome)
+            try: from Crypto.Cipher import AES as _aes
+            except ImportError:
+                try: from Cryptodome.Cipher import AES as _aes   # what some system package managers call pycryptodome
+                except ImportError: raise ValueError('AES-256 ECB decryption needs CommonCrypto (a Mac) or pycryptodome (pip install pycryptodome)') from None
+    if _aes is not None: return _aes.new(key, _aes.MODE_ECB).decrypt(data)
     out = ctypes.create_string_buffer(len(data)); moved = ctypes.c_size_t()
     if _cc(1, 0, 2, key, len(key), None, data, len(data), out, len(data), ctypes.byref(moved)): raise ValueError('CCCrypt failed')   # decrypt, AES, ECB
     return out.raw[:moved.value]
@@ -150,6 +159,7 @@ class R:
 
 LEGACY = (4,)   # legacy pak versions read (the per-file index); 11 has the encoded one
 LEGACY_METHODS = {1: 'Zlib', 2: 'Gzip', 3: 'LZ5', 4: 'Custom'}   # compression flags of a legacy pak (3: DRAGON QUEST XI S's engine, see the header)
+ZLIB = {'Zlib': lambda b, n: zlib.decompress(b), 'Gzip': lambda b, n: zlib.decompress(b, 31)}   # the methods Pak.read decodes without the game
 
 def magic_back(f):
     """(how far from the end the footer's magic is, the pak version): a legacy footer is the last 0x2d bytes (magic 0x2c from the end); version 11's magic is 0xc8 from the end in
@@ -231,9 +241,10 @@ class Pak:
         return dict(off=off, raw=raw, size=size, method=self.methods[meth - 1] if meth else '', encrypted=enc, block_size=bsz, blocks=blocks)
     def read(self, path, decode=None):
         """A file's bytes. A compressed one needs decode(block bytes, raw length) → bytes, block by block (each block holds block_size raw bytes, the last one the rest):
-        the game's own decoder in the Mac host (shader_split.py oodle); Octopath Traveler 0's archives go through the Oodle job instead"""
+        the game's own decoder in the Mac host (shader_split.py oodle); Octopath Traveler 0's archives go through the Oodle job instead. Zlib and gzip blocks are decoded here (ZLIB)"""
         e = self.entry(path)
         if not e['method']: return self.read_at(e['off'] + 53, e['size'], e['encrypted'])
+        decode = ZLIB.get(e['method'], decode)
         if not decode: raise ValueError(f'{path} is {e["method"]}-compressed in the pak')
         out, left = [], e['raw']
         for s, n in e['blocks']:
@@ -430,6 +441,17 @@ def inline_only(romfs):
     """Every version 11 pak under the RomFS keeps its shaders inline (inline_paks): there is no shader code archive to decode, shader_split.py reads the packages itself"""
     v11 = unreal_paks(romfs, legacy=False)
     return bool(v11) and set(inline_paks(v11)) == set(v11)
+
+def legacy_decoder_paks(romfs):
+    """The legacy paks under the RomFS whose files need the game's own decoder: a compression method other than zlib or gzip (DRAGON QUEST XI S's LZ5), or an encrypted index, which
+    is not read here. OCTOPATH TRAVELER's are all zlib: Pak.read decodes them and the shader split needs no game"""
+    out = []
+    for p in unreal_paks(romfs, legacy=True):
+        try: pk = Pak(p)
+        except ValueError: out.append(p); continue
+        if any(e['method'] and e['method'] not in ZLIB for e in pk.files.values()): out.append(p)
+        pk.f.close()
+    return out
 
 def job(romfs, main_nso, work, decode=None):
     """The shader code archives of every pak under the RomFS into <work>/archives, and one Oodle job (<work>/oodle.job) of every compressed shader in them; <work>/job.json lists them.

@@ -151,7 +151,7 @@ static const int g_devinfo[] = {
     [0x45] = 1, [0x46] = 5, [0x47] = 1, [0x48] = 1, [0x49] = 1, [0x4A] = 1, [0x4B] = 1, [0x4C] = 1, [0x4D] = 16,
     [0x4E] = 1024, [0x4F] = 32, [0x50] = 4096, [0x51] = 65536, [0x52] = 65536, [0x53] = 256, [0x54] = 16384,
     [0x55] = 262144, [0x56] = 4096, [0x57] = 1, [0x58] = 4, [0x59] = 2, [0x5A] = 0, [0x5B] = 4096, [0x5C] = 16384,
-    [0x5D] = 4096, [0x5E] = 128, [0x5F] = 4096,
+    [0x5D] = 4096, [0x5E] = 128, [0x5F] = 32,
 };
 // The NVN API version the game's own driver would report follows its SDK: games check it and create no device on a mismatch. SDK 10 and older are API 53 (Super Mario 3D World 10.4,
 // Age of Calamity 9.6, Link's Awakening 8, Odyssey 7.3, Three Houses 6.5); SDK 11 and later take 55.15
@@ -167,21 +167,20 @@ static void nvn_api(int api[2]) {
 NVN(nvnDeviceGetInteger, void, const NVNdevice *d, NVNdeviceInfo what, int *out) {
     (void)d;
     unsigned w = (unsigned)what;
-    // 0x5F separate sampler binding count and 0x60/0x61 are not in the table measured on SMO: 0x5F is given 4096 per the sampler pool limit, unverified; 0x60/0x61 report a failure and return 0
+    // 0x5F separate sampler bindings per stage is 32: nnheaders nvn_DeviceConstantsNX.h, the source of the table above, has NVN_DEVICE_SEPARATE_SAMPLER_BINDINGS_PER_STAGE 32.
+    // Frostpunk sizes its renderer's per-stage binding table (32 entries) to min(0x5E, 0x5F) and clears that many slots each frame (main+0x1aa68d4, main+0x762f50), so the old
+    // 4096 ran it 96 slots past its end into the Renderer thread's crash at main+0x1aa90ac. 0x60/0x61 are not in the table: they report a failure and return 0
     // 0x67 (SDK 19): FINAL FANTASY TACTICS - The Ivalice Chronicles reads it before every program it loads and passes it as the alignment of its copies of the shader's control section and code
     // (main+0x49800; its allocator raises anything below 8 to 8). Not measured on hardware: 256, the alignment of shader code in a memory pool; the host reads shaders by key, so any value works
     if (w == 0x67) { *out = 256; return; }
     if (w >= sizeof g_devinfo / sizeof *g_devinfo) { LOG("[RED] nvnDeviceGetInteger unknown item %#x, returning 0", w); *out = 0; return; }
     *out = g_devinfo[w];
-    // 0x2E / 0x30, the newest GPU code version the driver runs: the table's 1.14 is SMO's SDK 7 driver, while each SDK's driver runs the code of the GLSLC in the same SDK. A game that compiles
-    // at run time checks its GLSLC's version against this range first (Catherine: Full Body, SDK 8.2.1: its GLSLC writes 1.15, main+0x330dcc refused it, no built-in program was compiled
-    // and the first uniform lookup read a null program, main+0x3316dc), so the host reports at least the version of the GLSLC the game carries. A game that checks the shaders it ships
-    // does the same (Bayonetta 3, SDK 13.3.2: PlatinumGames' shader objects carry their GPU code version, 1.9 to 1.16, and main+0xd0da20 refuses one above the driver's newest; at 1.14
-    // its first built-in shader, hwfillcolor.vso at 1.15, was refused, the init failed and nnMain returned), so the SDK also sets a floor: what that SDK's GLSLC writes, 1.15 from SDK 8
-    // (Catherine: Full Body's 8.2.1) and 1.16 from SDK 13 (Bayonetta 3's newest objects). A wider range only lets more shaders pass these checks
+    // 0x2E / 0x30 describe the GPU code the host can translate, not the linked SDK's driver. Precompiled shaders can come from a newer compiler: ASTRAL CHAIN links SDK 6.4 but its
+    // hwfillcolor.vso is 1.15; main+0x9e97d0 rejects the old SDK-based answer 1.14 and initialization unwinds into a null read at main+0x9c0d1c. Our chain translates through 1.16
+    // (Bayonetta 3, shader-object check at main+0xd0da20), so advertise that range for every SDK. Retain the floor from a game's own run-time GLSLC (Catherine: Full Body,
+    // compiler-version check at main+0x330dcc), whose outputs the build also translates.
     if (w == 0x2E || w == 0x30) {
-        int gv[2], m = dm_sdk_major(), sv[2] = {1, m >= 13 ? 16 : m >= 8 ? 15 : 0}, cur[2] = {g_devinfo[0x2E], g_devinfo[0x30]};
-        if (sv[1] && (sv[0] > cur[0] || (sv[0] == cur[0] && sv[1] > cur[1]))) { cur[0] = sv[0]; cur[1] = sv[1]; }
+        int gv[2], cur[2] = {1, 16};
         if (dm_glslc_gpu_code(&gv[0], &gv[1]) && (gv[0] > cur[0] || (gv[0] == cur[0] && gv[1] > cur[1]))) { cur[0] = gv[0]; cur[1] = gv[1]; }
         *out = w == 0x2E ? cur[0] : cur[1];
     }
@@ -197,6 +196,10 @@ NVN(nvnDeviceInstallDebugCallback, void, NVNdevice *d, const PFNNVNDEBUGCALLBACK
 }
 NVN(nvnDeviceSetWindowOriginMode, void, NVNdevice *d, NVNwindowOriginMode m) { ((dev_t_ *)d)->origin = m; mtl_set_origin_lower_left(m == NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT); LOG("[nvn] window origin %s", m ? "upper left (as D3D / Metal)" : "lower left (GL)"); }
 NVN(nvnDeviceSetDepthMode, void, NVNdevice *d, NVNdepthMode m) { ((dev_t_ *)d)->depth_mode = m; mtl_set_depth_zero(m != 0); LOG("[nvn] depth mode %s", m ? "near=0 (as D3D / Metal)" : "near=-w (GL)"); }
+// The modes the device was set to, as the setters keep them. Mega Man Battle Network Legacy Collection Vol. 1 sets the upper-left origin and reads it back: the unimplemented getter's 0
+// (lower left, GL) made it draw its render-to-texture menu layers flipped, a mirrored copy of the menu over the top of the screen; Pokémon Sword 1.3.2 asks for both right after creating its device
+NVN(nvnDeviceGetWindowOriginMode, NVNwindowOriginMode, const NVNdevice *d) { return (NVNwindowOriginMode)((const dev_t_ *)d)->origin; }
+NVN(nvnDeviceGetDepthMode, NVNdepthMode, const NVNdevice *d) { return (NVNdepthMode)((const dev_t_ *)d)->depth_mode; }
 NVN(nvnDeviceFinalizeCommandHandle, void, NVNdevice *d, NVNcommandHandle h) { (void)d; (void)h; }
 
 // ---------- Memory pools ----------
@@ -204,16 +207,16 @@ NVN(nvnMemoryPoolBuilderSetDefaults, void, NVNmemoryPoolBuilder *b) { memset(b, 
 NVN(nvnMemoryPoolBuilderSetDevice, void, NVNmemoryPoolBuilder *b, NVNdevice *d) { ((pool_builder_t *)b)->dev = d; }
 NVN(nvnMemoryPoolBuilderSetStorage, void, NVNmemoryPoolBuilder *b, void *m, size_t n) { ((pool_builder_t *)b)->mem = m; ((pool_builder_t *)b)->size = n; }
 NVN(nvnMemoryPoolBuilderSetFlags, void, NVNmemoryPoolBuilder *b, int f) { ((pool_builder_t *)b)->flags = f; }
-static uint8_t *vpool_reserve(const pool_t *o); static void vpool_release(const pool_t *o);   // sparse virtual pools, see MapVirtual
+static uint8_t *vpool_reserve(pool_t *o); static void vpool_release(pool_t *o);   // sparse virtual pools, see MapVirtual
 static void replay_lock(void); static void replay_unlock(void);   // the replay's state, from a game thread (see "Asynchronous replay")
 static void nvn_drain(void);
 __attribute__((weak)) void vk_pool_set_flags(const void *mem, int flags) { (void)mem; (void)flags; }
 __attribute__((weak)) void dm_perf_replay_thread(void) {}   // Android (perf_android.c): the replay thread's CPU placement   // Android's Vulkan host (gfx_vk_core.c): copied pools by their flags
 NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) {
     const pool_builder_t *s = (const pool_builder_t *)b; pool_t *o = (pool_t *)p;
-    o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size;
-    if (!o->mem && (o->flags & 0x200)) { uint8_t *vr = vpool_reserve(o); if (vr) o->mem = vr; }   // a sparse virtual pool's own address range (see MapVirtual)
-    else if (o->mem) { replay_lock(); mtl_pool_add(o->mem, o->size); vk_pool_set_flags(o->mem, o->flags); replay_unlock(); nvn_dirty_add_range(o->mem, o->size); }
+    o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size; o->vp = NULL; o->vmode = 0;
+    if (!o->mem && (o->flags & 0x200)) { uint8_t *vr = vpool_reserve(o); if (vr) o->mem = vr; }   // a virtual pool's own address range until its first mapping decides (see MapVirtual)
+    else if (o->mem) { nvn_dirty_add_range(o->mem, o->size); replay_lock(); mtl_pool_add(o->mem, o->size); vk_pool_set_flags(o->mem, o->flags); replay_unlock(); }   // tracked first: Android's lazy pools (gfx_vk_core.c) are only those the tracker holds
     if (!o->mem && !(o->flags & 0x200)) LOG("[RED] MemoryPoolInitialize: non-virtual pool has no storage flags=%#x size=%#llx", o->flags, o->size);
     if (getenv("DM_NVN_VLOG")) { LOG("[nvn] MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, (unsigned long long)o->size, o->flags); void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0)); }
     OLOG("MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, o->size, o->flags);
@@ -223,7 +226,7 @@ static void fl_add(const uint8_t *a, uint64_t n); static void fl_drop(const uint
 static void ft_drop(const uint8_t *a, uint64_t n);   // first-touch textures over a pool that goes, see ft_add
 // Under asynchronous replay the submissions queued before it are replayed first: they may still read the pool (Unicorn Overlord's skipped scenes freed theirs
 // right after submitting, and the replay then found its index buffers outside every pool and the command memory overwritten: a black screen, the sound going on)
-NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) { nvn_drain(); if (((pool_t *)p)->flags & 0x200) vpool_release((pool_t *)p);
+NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) { nvn_drain(); if (((pool_t *)p)->flags & 0x200 && ((pool_t *)p)->vp) vpool_release((pool_t *)p);
     if (((pool_t *)p)->mem && !(((pool_t *)p)->flags & 0x200)) {   // A virtual pool's storage is borrowed from a physical pool; do not unregister it
  nvn_dirty_remove_range(((pool_t *)p)->mem); replay_lock(); mtl_pool_del(((pool_t *)p)->mem); replay_unlock(); fl_drop(((pool_t *)p)->mem, ((pool_t *)p)->size); ft_drop(((pool_t *)p)->mem, ((pool_t *)p)->size); }
     replay_lock(); mtl_alias_drop_pool(p); replay_unlock(); ((pool_t *)p)->magic = 0; }
@@ -329,10 +332,16 @@ NVN(nvnTextureBuilderGetStorageSize, size_t, const NVNtextureBuilder *b) {
 NVN(nvnTextureBuilderGetStorageAlignment, size_t, const NVNtextureBuilder *b) {
     nvn_texlayout L; nvn_tex_layout(&((const tex_builder_t *)b)->d, &L); return L.align;
 }
-// Sparse tile shape (Disgaea 4 sizes a buffer from it); see nvn_sparse_tile_layout
-NVN(nvnTextureBuilderGetSparseTileLayout, void, const NVNtextureBuilder *b, NVNtextureSparseTileLayout *l) {
-    nvn_sparse_tile_layout(&((const tex_builder_t *)b)->d, (int32_t *)l);
+// The tiled levels of a sparse texture and its tile size (nvn_tex_sparse_tiles). OCTOPATH TRAVELER (Unreal Engine 4 on SDK 3.5.1) sizes a sparse texture's mip tail as storage(all
+// levels) − storage(numTiledLevels levels) and allocates it from its heap at boot (main+0x1f1a688); unimplemented, the count was stack garbage and it asked for the whole 1.75 GB texture twice.
+// A texture without the sparse flag gets the standard 64 KB tile shape of its format (nvn_sparse_tile_layout), as before the two were one: Disgaea 4 sizes a buffer from it
+// (main+0x5a76c8; a stub that left stack garbage made it 0x200 bytes and the game's allocator crashed when the opening movie ended), and that is what was tested on a device
+static void sparse_layout(const nvn_texdesc *d, NVNtextureSparseTileLayout *o) {
+    uint32_t tw, th, td; memset(o, 0, sizeof *o);
+    o->numTiledLevels = nvn_tex_sparse_tiles(d, &tw, &th, &td); o->tileWidth = (int)tw; o->tileHeight = (int)th; o->tileDepth = (int)td;
+    if (!tw) nvn_sparse_tile_layout(d, (int32_t *)o);
 }
+NVN(nvnTextureBuilderGetSparseTileLayout, void, const NVNtextureBuilder *b, NVNtextureSparseTileLayout *o) { sparse_layout(&((const tex_builder_t *)b)->d, o); }
 #define TX(t) ((tex_t *)(t))
 #define CTX(t) ((const tex_t *)(t))
 // Textures the CPU fills in place (profile tex_flush_upload): Tears of the Kingdom streams its textures (TexToGo, already in the GPU's block-linear layout) straight into
@@ -487,7 +496,7 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     if (o->magic == MAGIC('T', 'E', 'X', 0) && o->serial) { static uint64_t n; if (!n++) LOG("[nvn] TextureInitialize on a texture object that is still live (no Finalize): releasing the old host texture (first case ser=%llu)", (unsigned long long)o->serial); ft_del(o->serial); mtl_tex_release(o); }
     memset(o, 0, sizeof *o);
     o->magic = MAGIC('T', 'E', 'X', 0); o->d = s->d; o->pool = s->pool; o->off = s->off;
-    o->has_layout = s->has_layout; memcpy(o->layout, s->layout, 8); o->set_swz = s->set_swz; o->stencil = s->stencil; o->swz = s->swz;
+    o->has_layout = s->has_layout; o->has_pkg_data = s->pkg_data != NULL; memcpy(o->layout, s->layout, 8); o->set_swz = s->set_swz; o->stencil = s->stencil; o->swz = s->swz;
     nvn_tex_layout(&o->d, &o->L);
     o->mem = s->pool && s->pool->mem ? s->pool->mem + s->off : NULL;
     o->serial = nvn_new_serial(); mtl_tex_init(o);
@@ -510,13 +519,15 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     // issue #80). Such a texture is CPU-written (uploaded from memory at its first use) when its storage holds anything; render targets, images, video, display, linear and
     // sparse textures are left out, so are virtual pools (their pages exist only where mapped, and their content is the mapping's), and so is memory that looks all zero (a
     // texture the GPU fills later). The look reads the first 64 KB and then 64 bytes of each 4 KB page: a texture that is all zero, re-initialized every frame, stays cheap
-    if (!o->has_layout && !s->pkg_data && o->mem && o->pool && (o->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) && !(o->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) &&
+    // With the profile's tex_cpu_uncached, a CPU-uncached pool counts too: the CPU writes it with no flush to see, so data there at creation is the CPU's as well. Cardfight!!
+    // Vanguard Dear Days 2 fills its UI label atlas (1024x512 RGBA8, flags 0) before making the texture over it: as a GPU texture of zeros, every card's ability tabs were missing
+    if (!o->has_layout && !s->pkg_data && o->mem && o->pool && ((o->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) || (DM_GAME_TEX_CPU_UNCACHED && (o->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED))) && !(o->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) &&
         o->d.target != NVN_TEXTURE_TARGET_BUFFER && !(o->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE | NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBLE |
                                                                    NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) {
         size_t i = 0, n = o->L.size, head = n < 65536 ? n : 65536; int data = 0;
         for (; i < head && !data; i++) data = o->mem[i] != 0;
         for (size_t pg = head; pg < n && !data; pg += 4096) for (size_t k = pg; k < pg + 64 && k < n && !data; k++) data = o->mem[k] != 0;
-        if (data) { mtl_tex_cpu_written(o); static int nl; if (nl++ < 8) LOG("[nvn] texture %ux%ux%u format %#x target %d (no packaged layout) holds data at creation in a CPU-inaccessible pool: uploaded from memory", o->d.width, o->d.height, o->d.depth, o->d.format, o->d.target); }
+        if (data) { mtl_tex_cpu_written(o); static int nl; if (nl++ < 8) LOG("[nvn] texture %ux%ux%u format %#x target %d (no packaged layout) holds data at creation in a pool %s: uploaded from memory", o->d.width, o->d.height, o->d.depth, o->d.format, o->d.target, (o->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ? "the CPU cannot access" : "the CPU writes uncached (tex_cpu_uncached)"); }
     }
     OLOG("Texture %p %ux%ux%u lv%u fmt=%#x tgt=%d flags=%#x size=%#llx", (void *)t, o->d.width, o->d.height, o->d.depth,
          o->d.levels, o->d.format, o->d.target, o->d.flags, o->L.size);
@@ -529,10 +540,10 @@ NVN(nvnTextureGetWidth, int, const NVNtexture *t) { return (int)CTX(t)->d.width;
 NVN(nvnTextureGetHeight, int, const NVNtexture *t) { return (int)CTX(t)->d.height; }
 NVN(nvnTextureGetDepth, int, const NVNtexture *t) { return (int)CTX(t)->d.depth; }
 NVN(nvnTextureGetStorageSize, int, const NVNtexture *t) { return (int)CTX(t)->L.size; }
-NVN(nvnTextureGetSparseTileLayout, void, const NVNtexture *t, NVNtextureSparseTileLayout *l) { nvn_sparse_tile_layout(&CTX(t)->d, (int32_t *)l); }
 NVN(nvnTextureGetStride, ptrdiff_t, const NVNtexture *t) { return (ptrdiff_t)CTX(t)->d.stride; }   // the row stride of a linear texture as built (0 for block-linear ones)
 // The queries below are used by Engage (Unity) at startup: it calls MemoryPoolMap on "the pool the texture / buffer lives in", and with a stub returning 0 it dereferenced a null pool and crashed
 NVN(nvnTextureGetLevels, int, const NVNtexture *t) { return (int)CTX(t)->d.levels; }
+NVN(nvnTextureGetSparseTileLayout, void, const NVNtexture *t, NVNtextureSparseTileLayout *o) { sparse_layout(&CTX(t)->d, o); }
 NVN(nvnTextureGetSamples, int, const NVNtexture *t) { return CTX(t)->d.samples; }
 NVN(nvnTextureGetMemoryPool, NVNmemoryPool *, const NVNtexture *t) { return (NVNmemoryPool *)CTX(t)->pool; }
 NVN(nvnTextureGetMemoryOffset, ptrdiff_t, const NVNtexture *t) { return (ptrdiff_t)CTX(t)->off; }
@@ -802,7 +813,7 @@ static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
 }
 // Host-supplied segment when the game's own command memory runs out: when the game's out-of-memory callback cannot allocate from its command memory pool, it calls AddCommandMemory with an empty pool (p = NULL, n = 0)
 // (opening the advanced stats page on the level 88 sorceress save: many list items in one frame, and the original implementation segfaulted here reading NULL+8). Our records are larger than real-device NVN commands, so the budget the game reserved for real-device usage is not necessarily enough,
-// so this is not an error state of the game but something we must catch: provide a segment of host memory to keep recording. The segment is replayed in place at submit and reclaimed after being kept for 8 frames (submit is in the same frame as recording or the next one).
+// so this is not an error state of the game but something we must catch: provide a segment of host memory to keep recording. The segment is replayed in place at submit.
 // (Do not use the whole game chunk as the range: SMBW sub-allocates many recordings out of one big chunk, and a later grant inside that chunk freed segments still in use.)
 // Reclaim follows the game's command memory chunks, not a frame count: the game caches recorded command handles and CALLs them every frame until it re-records them itself (SMBW's object setup handles);
 // once a handle was recorded into a host segment, the old "reclaim 8 frames after lending" rewrote the segment while the game still CALLed it (with overflow forced on the Mac, the replay read garbage commands: RGBA16F used as a depth format for a pipeline).
@@ -810,9 +821,9 @@ static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
 // (when it re-records that material in place; packing the next recording right behind by used never touches them, since used includes the JUMP). So a segment remembers that guest range and is reclaimed when the game gives out memory
 // overlapping it; segments overflowing from a host segment keep the same range.
 // The segment pool grows on demand (SMBW opening course: many small command buffers each overflow once per frame, and the old fixed 64 segments × 1 MB ran out within 8 frames); abort only beyond HOSTSEG_CAP in total.
-// A segment is as large as the game asked for when it says (an empty pool with a length: HOSTSEG_MIN up to HOSTSEG_SZ), else HOSTSEG_SZ: Super Mario Odyssey entering the Wooded Kingdom
-// sets up tens of thousands of command buffers with an empty pool and 0x200 bytes each before recording into them, and at 256 KB apiece these (never reclaimed: no guest bytes to hang off)
-// reached the 1 GB cap within 3 seconds, every time; at 4 KB they come to 128 MB
+// An empty command pool can still have guest control memory: reserve a distinct lifetime anchor per recording below, so any overflow has a real guest lifetime. Super Mario Odyssey's Wooded Kingdom
+// supplied 0x200-byte control blocks but the old no-op AddControlMemory lost that association: ~11 unknown-origin segments accumulated per frame until the 1 GiB cap, and whole-pool scans progressively slowed the main thread.
+// Without either kind of guest storage the lifetime remains unknown; keep that conservative fallback rather than recycling cached handles by age. Its size follows the request, HOSTSEG_MIN up to HOSTSEG_SZ.
 #define HOSTSEG_SZ (256u << 10)
 #define HOSTSEG_MIN (4u << 10)
 #define HOSTSEG_CAP (1u << 30)
@@ -828,6 +839,7 @@ static uint8_t *hostseg_take(const cmd_t *o, uint32_t sz) {
     int in_seg = 0;
     for (int i = 0; i < g_nhostseg && cur; i++) if (cur >= (uintptr_t)g_hostseg[i].mem && cur <= (uintptr_t)g_hostseg[i].mem + g_hostseg[i].sz) { lo = g_hostseg[i].org_lo; hi = g_hostseg[i].org_hi; in_seg = 1; break; }
     if (!in_seg && o && o->recording && o->cur) { lo = o->recording == 1 && o->begin && (uintptr_t)o->begin <= cur ? (uintptr_t)o->begin : cur; hi = cur + 16; }
+    if (!in_seg && o && o->host_control && o->ctl_anchor) { lo = o->ctl_anchor; hi = lo + 16; }
     for (int i = 0; i < g_nhostseg && !m; i++)
         if (!g_hostseg[i].busy && g_hostseg[i].sz == sz) { g_hostseg[i] = (hostseg_t){ g_hostseg[i].mem, f, 1, lo, hi, sz }; m = g_hostseg[i].mem; }
     if (!m && g_hostseg_bytes + sz <= HOSTSEG_CAP) {
@@ -848,7 +860,15 @@ static void hostseg_release(uintptr_t lo, uintptr_t hi) {
     pthread_mutex_unlock(&g_hostseg_mu);
 }
 NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemoryPool *p, ptrdiff_t off, size_t n) {
-    const pool_t *pl = (const pool_t *)p;
+    const pool_t *pl = (const pool_t *)p; cmd_t *o = CB(c);
+    if (pl) __atomic_store_n(&CB(c)->cmd_size, n, __ATOMIC_RELAXED);   // GetCommandMemorySize: the memory the game added, whether the host records into it or into a segment it lends
+    // NVN control memory lives as long as its recorded handles. With no GPU command pool, reserve distinct control bytes for each recording's host segments; report that reservation so the game cannot re-grant it to another live handle.
+    // Keep replay records and their handles in host storage, preserving the original command-byte accounting. The guest's control bytes are an ownership anchor, not our private command format.
+    // Do not switch an in-progress command recording into control accounting: its earlier guest command bytes still own its overflow chain.
+    if (!pl && !o->recording && o->ctl_mem) {
+        uint32_t sz = HOSTSEG_MIN; while (sz < n && sz < HOSTSEG_SZ) sz <<= 1;
+        o->cur = o->end = NULL; o->used = 0; o->host_control = 1; o->host_sz = sz; o->ctl_anchor = 0; return;
+    }
     if (!pl || n < 64) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } uint32_t sz = HOSTSEG_SZ; if (!pl && n >= 64) { sz = HOSTSEG_MIN; while (sz < n && sz < HOSTSEG_SZ) sz <<= 1; }
         cmd_new_segment(CB(c), hostseg_take(CB(c), sz), sz); return; }
     if (!pl->mem) { LOG("[RED] AddCommandMemory: pool has no CPU storage"); return; }
@@ -856,17 +876,39 @@ NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemory
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.grants++; g_cs.grant_bytes += n; if (!g_cs.grant_min || n < g_cs.grant_min) g_cs.grant_min = n; if (n > g_cs.grant_max) g_cs.grant_max = n; pthread_mutex_unlock(&g_cs_mu); }
     { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ng; if (cblog && (++ng <= 60 || ng % 500 == 0)) LOG("[nvn] AddCommandMemory #%llu cmd=%p pool %p +%#lx length %#zx (recording %d)", (unsigned long long)ng, (void *)c, (const void *)pl, (long)off, n, CB(c)->recording); }
     cmd_new_segment(CB(c), pl->mem + off, n);
+    CB(c)->host_control = 0; CB(c)->ctl_anchor = 0;
     CB(c)->used = 0;   // GetCommandMemoryUsed counts from the start of the memory the game last added, across recordings (see there)
 }
-NVN(nvnCommandBufferAddControlMemory, void, NVNcommandBuffer *c, void *m, size_t n) { (void)c; (void)m; (void)n; }
+NVN(nvnCommandBufferAddControlMemory, void, NVNcommandBuffer *c, void *m, size_t n) {
+    cmd_t *o = CB(c); if (!m || n < 16) return;
+    hostseg_release((uintptr_t)m, (uintptr_t)m + n);
+    o->ctl_mem = m; o->ctl_end = (uint8_t *)m + n; o->ctl_used = 0;
+}
+// A control-owned recording consumes one aligned 16-byte identity, even if its first replay record is larger than the entire control block. CPU records never overwrite the guest control layout.
+static void cmd_host_anchor(cmd_t *o) {
+    for (int tries = 0; tries < 3; tries++) {
+        size_t size = o->ctl_mem ? (size_t)(o->ctl_end - o->ctl_mem) : 0;
+        if (o->ctl_used <= size) {
+            uintptr_t p = ((uintptr_t)o->ctl_mem + o->ctl_used + 7) & ~(uintptr_t)7;
+            if (p && p <= (uintptr_t)o->ctl_end && (uintptr_t)o->ctl_end - p >= 16) { o->ctl_anchor = p; o->ctl_used = p + 16 - (uintptr_t)o->ctl_mem; return; }
+        }
+        if (!o->cb || tries == 2) return;   // no valid guest anchor: retain the existing conservative unknown-lifetime fallback
+        o->cb((NVNcommandBuffer *)o, NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_CONTROL_MEMORY, 16, o->cb_data);
+    }
+}
 // Get space for one record and keep `keep` bytes after it (OP_RESERVE, 0 for the END); if not enough, call back into the game per the NVN convention to add command memory
 static uint8_t *cmd_alloc_keep(cmd_t *o, uint32_t size, uint32_t keep) {
     size = (size + 7) & ~7u;
+    if (o->host_control && o->recording == 2 && !o->cur) {
+        cmd_host_anchor(o); uint32_t sz = o->host_sz ? o->host_sz : HOSTSEG_MIN; while (sz < size + keep && sz < HOSTSEG_SZ) sz <<= 1;
+        cmd_new_segment(o, hostseg_take(o, sz), sz);
+    }
     for (int tries = 0; !o->cur || o->cur + size + keep > o->end; tries++) {
         // The game's callback cannot supply enough (newer-SDK games hand out small chunks sized for real-device commands, or disable the callback and manage memory themselves): continue recording in a host segment instead of aborting
         if (!o->cb || tries == 2) {
             static int once; if (!once++) LOG("[nvn] command memory: the game's callback did not add enough (cb=%p, need %u bytes), using a host-lent segment", (void *)o->cb, size + keep);
-            cmd_new_segment(o, hostseg_take(o, HOSTSEG_SZ), HOSTSEG_SZ); break;
+            uint32_t sz = o->host_control ? HOSTSEG_MIN : HOSTSEG_SZ; while (sz < size + keep && sz < HOSTSEG_SZ) sz <<= 1;
+            cmd_new_segment(o, hostseg_take(o, sz), sz); break;
         }
         if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.cbs++; pthread_mutex_unlock(&g_cs_mu); }
         { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ncb;
@@ -885,6 +927,8 @@ static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) { return cmd_alloc_keep(o, si
 NVN(nvnCommandBufferBeginRecording, void, NVNcommandBuffer *c) {
     cmd_t *o = CB(c);
     if (o->recording) LOG("[RED] BeginRecording re-entered");
+    // Each control-owned recording needs its own host chain and guest anchor. Multiple cached handles must not share an overflow segment reclaimed by just one handle's control range.
+    if (!o->recording && o->host_control) { o->cur = o->end = NULL; o->ctl_anchor = 0; }
     o->recording = 2;   // 2: recording, no command yet (cmd_alloc sets begin)
 }
 NVN(nvnCommandBufferEndRecording, NVNcommandHandle, NVNcommandBuffer *c) {
@@ -1275,7 +1319,8 @@ static void *replay_main(void *arg) {
         if (j.kind == JOB_SUBMIT) { uint64_t ts = now_ns(); __atomic_store_n(&g_replaying, g_job_done + 1, __ATOMIC_RELAXED); submit_now(j.q, j.n, (const NVNcommandHandle *)j.h); __atomic_store_n(&g_replaying, 0, __ATOMIC_RELAXED);
             static nvn_job prev; if (prev.h) { for (int i = 0; i < prev.n; i++) free((void *)(uintptr_t)prev.h[i]); free(prev.h); }   // the copies (rec_copy) go one submission later
             prev = j; g_tl_enq = j.t_enq; g_tl_start = ts; g_tl_end = now_ns(); }
-        else { gfx_enter(); uint64_t t0 = now_ns(); uint64_t tk = mtl_present(j.tex, j.period, j.crop); __atomic_store_n(j.ticket, tk, __ATOMIC_RELEASE); pres_ticket_note(tk, j.n); gfx_leave(); atomic_fetch_add(&g_nvn_ns, now_ns() - t0); }
+        else { dm_perf_replay_thread();   // (again while its cores were refused: perf_android.c)
+            gfx_enter(); uint64_t t0 = now_ns(); uint64_t tk = mtl_present(j.tex, j.period, j.crop); __atomic_store_n(j.ticket, tk, __ATOMIC_RELEASE); pres_ticket_note(tk, j.n); gfx_leave(); atomic_fetch_add(&g_nvn_ns, now_ns() - t0); }
         pthread_mutex_lock(&g_job_mu);
         memmove(g_jobs, g_jobs + 1, sizeof *g_jobs * (size_t)--g_njob); g_job_done++; g_job_fence[g_job_done % JOB_RING] = mtl_last_fence();
         pthread_cond_broadcast(&g_jobdone_cv); pthread_mutex_unlock(&g_job_mu);
@@ -1960,15 +2005,10 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
           if (!known && nseen < 4) { seen[nseen++] = o; if (!(o->crop[2] > 0 && o->crop[3] > 0)) LOG("[nvn] WindowCrop not set by the game at its window's first present: the whole window texture %dx%d is shown",
                                                                                                   (int)CTX(o->tex[idx])->d.width, (int)CTX(o->tex[idx])->d.height); } }
         o->done[idx] = nvn_fence_now();
-        // The part of the window texture shown: the window's crop; with none set, the layer's (vi::SetLayerCrop, hle_vi.c) when it lies inside the texture. The Legend of Zelda:
-        // Link's Awakening never sets a window crop and crops its layer instead: switched to handheld while running it draws 1280x720 into its 1920x1080 window textures and
-        // crops the layer to that, and the whole texture was shown (its picture in a corner, the docked frames' leftovers around it). A layer crop the size of the texture changes nothing
-        int crop[4]; memcpy(crop, o->crop, sizeof crop);
-        if (!(crop[2] > 0 && crop[3] > 0)) { int lc[4]; void dm_vi_layer_crop(int c[4]); dm_vi_layer_crop(lc); const tex_t *wt = CTX(o->tex[idx]);
-            if (lc[2] > 0 && lc[3] > 0 && lc[0] + lc[2] <= (int)wt->d.width && lc[1] + lc[3] <= (int)wt->d.height) memcpy(crop, lc, sizeof crop); }
-        if (nvn_async()) { nvn_job j = {JOB_PRESENT, present_itv(o), NULL, q, CTX(o->tex[idx]), present_period(o) / 1e9, {0}, &o->ticket[idx]}; memcpy(j.crop, crop, sizeof j.crop);
+        // (with no window crop, mtl_present takes the vi layer crop: gfx_vk_present.c)
+        if (nvn_async()) { nvn_job j = {JOB_PRESENT, present_itv(o), NULL, q, CTX(o->tex[idx]), present_period(o) / 1e9, {0}, &o->ticket[idx]}; memcpy(j.crop, o->crop, sizeof j.crop);
             o->ticket[idx] = ASYNC_FENCE | (g_job_enq + 1); job_push(j); }   // (the job overwrites the ticket with the present's own when it runs)
-        else { o->ticket[idx] = mtl_present(CTX(o->tex[idx]), present_period(o) / 1e9, crop); pres_ticket_note(o->ticket[idx], present_itv(o)); }   // enqueue only, return immediately
+        else { o->ticket[idx] = mtl_present(CTX(o->tex[idx]), present_period(o) / 1e9, o->crop); pres_ticket_note(o->ticket[idx], present_itv(o)); }   // enqueue only, return immediately
     }
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
@@ -2130,37 +2170,60 @@ _Static_assert(sizeof(map_req) == 0x28, "NVNmappingRequest");
 // that set it), and the host reads textures of a sparse pool through it (nvn_sparse_copy): such a texture is uploaded from what the table points at, with unmapped pages read as 0,
 // and uploaded again only when a mapping in its range changes or the CPU writes a physical page behind it (nvn_sparse_since; the physical pools are dirty-tracked). The game fills
 // its sparse textures (flag 0x20, 32 GB into the pool) that way: it writes the tiles on the CPU into 4 MB physical pools, then maps them; no GPU copy writes them
-enum { NVPOOL = 4, NVRUN = 1024, VPT_LEAF = 512 };   // a page-table leaf covers 2 MB
+// With the profile's small_vpool_sparse on, every virtual pool gets that range at Initialize (without it only those larger than the application pool, as before), since the game may
+// create its textures and buffers before mapping anything; its first mapping request then decides (MapVirtual):
+// one that maps the whole pool from offset 0 keeps the alias above (Mario's pool: the range is given back, and no object of the pool came before it), anything else makes the pool
+// sparse. OCTOPATH TRAVELER (Unreal Engine 4) gives each streamed texture a virtual pool of its own (0x20000 to 0x560000 bytes, flags 0x2a1), creates the texture in it, maps its mip
+// tail from a 4 MB physical pool and later the higher mips from other pages of it, after writing their texels there on the CPU: aliased, the texture had no storage (created before any
+// mapping) and the later mappings were refused (`[RED] MapVirtual: non-contiguous mapping`). A pool larger than the application pool is sparse from the start
+enum { NVRUN = 1024, VPT_LEAF = 512 };   // a page-table leaf covers 2 MB
 typedef struct { const uint8_t *phys; uint64_t gen; } vpte;
-static struct vpool { const pool_t *pool; uint8_t *base; uint64_t len, size, top; int nrun; struct { uint64_t lo, hi; } run[NVRUN]; vpte **pt; } g_vp[NVPOOL];   // len: reserved; size: the pool's; top: highest mapped end so far (logged per 128 MB)
+struct vpool { const pool_t *pool; uint8_t *base; uint64_t len, size, top; int nrun; struct { uint64_t lo, hi; } run[NVRUN]; vpte **pt; };   // len: reserved; size: the pool's; top: highest mapped end so far (logged per 128 MB)
+static struct vpool **g_vp; static int g_nvp, g_cvp;   // the pools with a range of their own, under g_vp_mu
 static pthread_mutex_t g_vp_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_vp_gen;   // bumped per mapping request
-static struct vpool *vpool_of(const pool_t *o) { for (int i = 0; i < NVPOOL; i++) if (g_vp[i].pool == o && g_vp[i].base) return &g_vp[i]; return NULL; }
-static uint8_t *vpool_reserve(const pool_t *o) {   // → the reserved range, or NULL for a pool that keeps the alias
-    if (!(o->flags & 0x200) || o->size <= DM_GAME_APP_POOL) return NULL;
+static struct vpool *vpool_of(const pool_t *o) { return o->vp; }
+static uint8_t *vpool_reserve(pool_t *o) {   // → the reserved range, or NULL (the pool takes the alias path of MapVirtual)
+    if (!(o->flags & 0x200)) return NULL;
+    // A pool no larger than the application pool keeps main's alias unless the profile asks (small_vpool_sparse on: OCTOPATH TRAVELER's per-texture pools); a game that maps
+    // a small pool in parts the alias accepts would otherwise become page-table-only on Android
+    if (o->size <= DM_GAME_APP_POOL && !DM_GAME_SMALL_VPOOL_SPARSE) return NULL;
 #if TARGET_OS_IPHONE   // 1 GB: Monster Hunter Rise's buffers stay under 0x20100000 through its opening, its textures (32 GB in) are read through the page table, and 4 GB guest + 1 GB stays near the 5 GB proven on a phone
     uint64_t len = o->size < (1ull << 30) ? o->size : 1ull << 30;
 #else
     uint64_t len = o->size < (64ull << 30) ? o->size : 64ull << 30;
 #endif
+    len = (len + (uint64_t)getpagesize() - 1) & ~((uint64_t)getpagesize() - 1);
     void *a = mmap(NULL, len, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (a == MAP_FAILED) { LOG("[RED] virtual pool %p: cannot reserve %#llx bytes of address space (errno %d)", (const void *)o, (unsigned long long)len, errno); return NULL; }
+    // An allocation that fails gives the range back and the pool takes the alias path (MapVirtual), as on main, instead of stopping the game
+    struct vpool *v = calloc(1, sizeof *v);
+    if (!v || !(v->pt = calloc((o->size + (2u << 20) - 1) >> 21, sizeof *v->pt))) {
+        LOG("[RED] virtual pool %p (%#llx bytes): no memory for its page table: it keeps the alias", (const void *)o, (unsigned long long)o->size);
+        munmap(a, len); free(v); return NULL;
+    }
+    v->pool = o; v->base = a; v->len = len; v->size = o->size;
     pthread_mutex_lock(&g_vp_mu);
-    int i = 0; while (i < NVPOOL && g_vp[i].base) i++;
-    if (i == NVPOOL) { pthread_mutex_unlock(&g_vp_mu); munmap(a, len); LOG("[RED] more than %d sparse virtual pools", NVPOOL); return NULL; }
-    g_vp[i].pool = o; g_vp[i].base = a; g_vp[i].len = len; g_vp[i].size = o->size; g_vp[i].nrun = 0;
-    if (!(g_vp[i].pt = calloc((o->size + (2u << 20) - 1) >> 21, sizeof *g_vp[i].pt))) die("sparse pool page table allocation failed");
+    if (g_nvp == g_cvp) {
+        int nc = g_cvp ? 2 * g_cvp : 64; struct vpool **t = realloc(g_vp, nc * sizeof *g_vp);
+        if (!t) { pthread_mutex_unlock(&g_vp_mu); LOG("[RED] virtual pool %p: no memory for the pool table (%d pools): it keeps the alias", (const void *)o, g_nvp); munmap(a, len); free(v->pt); free(v); return NULL; }
+        g_vp = t; g_cvp = nc;
+    }
+    g_vp[g_nvp++] = v; o->vp = v;
+    o->vmode = o->size > DM_GAME_APP_POOL ? 2 : 0;
     pthread_mutex_unlock(&g_vp_mu);
-    LOG("[nvn] virtual pool %p (%#llx bytes, flags %#x): sparse, own address range %p+%#llx, physical pages are remapped into it", (const void *)o, (unsigned long long)o->size, o->flags, a, (unsigned long long)len);
+    if (o->vmode == 2) LOG("[nvn] virtual pool %p (%#llx bytes, flags %#x): sparse, own address range %p+%#llx, physical pages are remapped into it", (const void *)o, (unsigned long long)o->size, o->flags, a, (unsigned long long)len);
     return a;
 }
-static void vpool_release(const pool_t *o) {
-    replay_lock(); pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_of(o);
-    if (v) { for (int k = 0; k < v->nrun; k++) mtl_pool_del(v->base + v->run[k].lo); munmap(v->base, v->len);
-        for (uint64_t l = 0; l < (v->size + (2u << 20) - 1) >> 21; l++) free(v->pt[l]);
-        free(v->pt); memset(v, 0, sizeof *v); }
-    pthread_mutex_unlock(&g_vp_mu); replay_unlock();
+static void vpool_drop(pool_t *o) {   // caller holds the replay lock and g_vp_mu
+    struct vpool *v = o->vp; if (!v) return;
+    for (int k = 0; k < v->nrun; k++) mtl_pool_del(v->base + v->run[k].lo);
+    munmap(v->base, v->len);
+    for (uint64_t l = 0; l < (v->size + (2u << 20) - 1) >> 21; l++) free(v->pt[l]);
+    for (int i = 0; i < g_nvp; i++) if (g_vp[i] == v) { g_vp[i] = g_vp[--g_nvp]; break; }
+    free(v->pt); free(v); o->vp = NULL;
 }
+static void vpool_release(pool_t *o) { replay_lock(); pthread_mutex_lock(&g_vp_mu); vpool_drop(o); pthread_mutex_unlock(&g_vp_mu); replay_unlock(); }
 // Mapped runs of a sparse pool: [lo, hi) sorted, disjoint, adjacent runs merged. Caller holds g_vp_mu
 static void vrun_set(struct vpool *v, uint64_t lo, uint64_t hi, int mapped) {
     uint64_t nl[NVRUN][2]; int nn = 0; uint64_t mlo = lo, mhi = hi;
@@ -2209,6 +2272,10 @@ static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp
     uintptr_t from = (uintptr_t)ph->mem + (uintptr_t)r->poff;
     vm_prot_t cur, max;
     kern_return_t kr = vm_remap(mach_task_self(), &to, r->size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(), (vm_address_t)from, FALSE, &cur, &max, VM_INHERIT_NONE);
+    if (kr == KERN_NOT_SUPPORTED) {   // Android: private memory cannot be aliased (darwin_compat.c vm_remap), so the page table alone, as for an unaligned request above
+        static _Atomic uint64_t n; if (!atomic_fetch_add(&n, 1)) LOG("[nvn] virtual pool %p: the host cannot alias physical pages here: mappings are kept in the page table only (textures read it, the GPU cannot address the pool)", (const void *)v->pool);
+        return 1;
+    }
     if (kr != KERN_SUCCESS || to != (vm_address_t)(v->base + r->voff)) { LOG("[RED] virtual pool remap %#lx → %p (%#llx bytes) failed: %d", (unsigned long)from, (void *)(v->base + r->voff), (unsigned long long)r->size, kr); return 0; }
     mprotect((void *)to, r->size, PROT_READ | PROT_WRITE);   // the source may be write-protected by the dirty tracker at this moment; the alias itself is plain memory
     vrun_set(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size, 1);
@@ -2219,7 +2286,12 @@ static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp
 }
 NVN(nvnMemoryPoolMapVirtual, NVNboolean, NVNmemoryPool *p, int n, const NVNmappingRequest *rq) {
     pool_t *o = (pool_t *)p; const map_req *r = (const map_req *)rq;
-    replay_lock(); pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_of(o); int ok = 1;   // (the replay lock first: the replay thread takes g_vp_mu under it)
+    replay_lock(); pthread_mutex_lock(&g_vp_mu);   // (the replay lock first: the replay thread takes g_vp_mu under it)
+    if (o->vp && o->vmode == 0 && n > 0) {   // the first mapping decides (see the sparse pools above)
+        if (r[0].phys && r[0].voff == 0 && r[0].size == o->size) { vpool_drop(o); o->mem = NULL; o->vmode = 1; }
+        else o->vmode = 2;
+    }
+    struct vpool *v = o->vmode == 2 ? vpool_of(o) : NULL; int ok = 1;
     for (int i = 0; v && i < n && ok; i++) ok = vpool_map(v, &r[i]);
     pthread_mutex_unlock(&g_vp_mu); replay_unlock();
     if (v) return (NVNboolean)ok;
@@ -2409,7 +2481,7 @@ NVN(nvnDeviceSetIntermediateShaderCache, void, NVNdevice *d, int n) { (void)d; (
 NVN_NOPROTO(nvnWindowBuilderSetNumActiveTextures, void, NVNwindowBuilder *b, int n) { (void)b; ONCE_LOG("WindowBuilderSetNumActiveTextures %d (the host rotates through the SetTextures count)", n); }
 NVN_NOPROTO(nvnWindowSetNumActiveTextures, void, NVNwindow *w, int n) { (void)w; ONCE_LOG("WindowSetNumActiveTextures %d (the host rotates through the SetTextures count)", n); }
 
-// Command buffer memory usage: record bytes written in this recording (accumulated across segments; the host does not use control memory, always 0); the memory callback switch is ignored.
+// Command buffer memory usage: keep command byte accounting across host segments; control memory separately reports the reserved lifetime identities, never the host allocation's unused capacity. The memory callback switch is ignored.
 // It used to be cur - begin: once a recording overflowed into a host segment, cur is in host memory (an address below the guest begin) and it returned 0. SMBW asks for this value after recording each material setup handle,
 // and on 0 (with control memory also 0) treats the recording as empty and marks the handle invalid (from main+0x4bb6c it clears bit 0 of the material entry +0x50); later draws no longer CALL it and inherit the previous object's vertex buffers / textures:
 // on the iPhone a batch of draws on odd frames of the opening course fetched vertices out of bounds, giving huge triangles and NaN (black band, black-edged glow, grey stripes). Without overflow the accumulated value equals cur - begin.
@@ -2418,10 +2490,16 @@ NVN_NOPROTO(nvnWindowSetNumActiveTextures, void, NVNwindow *w, int n) { (void)w;
 // signals. Counted per recording, the position stayed at one frame's size (about 18 KB), the ring never freed past it, and after the first 16 MB (about 15 s) the callback waited for ring space forever
 NVN(nvnCommandBufferGetCommandMemoryUsed, size_t, const NVNcommandBuffer *c) { const cmd_t *m = (const cmd_t *)c;
     return m->begin ? (size_t)m->used : 0; }
-NVN(nvnCommandBufferGetControlMemoryUsed, size_t, const NVNcommandBuffer *c) { (void)c; return 0; }
-// Size and free bytes of the command memory the game last added (DRAGON QUEST XI S, Unreal Engine 4.18): as in NVN, size = used + free; free is what is left in the current segment
+NVN(nvnCommandBufferGetControlMemoryUsed, size_t, const NVNcommandBuffer *c) { return (size_t)CB(c)->ctl_used; }
+NVN(nvnCommandBufferGetControlMemorySize, size_t, const NVNcommandBuffer *c) { return CB(c)->ctl_mem ? (size_t)(CB(c)->ctl_end - CB(c)->ctl_mem) : 0; }
+NVN(nvnCommandBufferGetControlMemoryFree, size_t, const NVNcommandBuffer *c) { size_t n = h_nvnCommandBufferGetControlMemorySize(c), used = h_nvnCommandBufferGetControlMemoryUsed(c); return used < n ? n - used : 0; }
+// Free bytes of the command memory (DRAGON QUEST XI S, Unreal Engine 4.18): what is left in the current segment
 NVN(nvnCommandBufferGetCommandMemoryFree, size_t, const NVNcommandBuffer *c) { const cmd_t *m = (const cmd_t *)c; return m->cur && m->end > m->cur ? (size_t)(m->end - m->cur) : 0; }
-NVN(nvnCommandBufferGetCommandMemorySize, size_t, const NVNcommandBuffer *c) { return h_nvnCommandBufferGetCommandMemoryUsed(c) + h_nvnCommandBufferGetCommandMemoryFree(c); }
+// Size, as NVN defines it: the byte count the game last passed to AddCommandMemory (cmd_size), which records and host-lent segments leave alone. It used to be used + free summed
+// per call. Super Smash Bros. Ultimate's two render dispatch threads take command buffers from one pool under a lock, and when it runs out std::sort it by this size while the other
+// thread is still recording into a buffer it took: a record landing between the two reads gave one buffer two sizes within one sort, and libc++'s unguarded partition can then run
+// off the vector (upstream nxnative 843081d0: CRASH sig=11 addr=0x50 pc=main+0x385201c, rare as a battle starts; read from the disassembly, not caught live)
+NVN(nvnCommandBufferGetCommandMemorySize, size_t, const NVNcommandBuffer *c) { return __atomic_load_n(&((const cmd_t *)c)->cmd_size, __ATOMIC_RELAXED); }
 NVN_NOPROTO(nvnCommandBufferSetCommandMemoryCallbackEnabled, void, NVNcommandBuffer *c, uint32_t on) { (void)c; (void)on; }
 
 // nvnProgramSetShadersExt (NVN 55): each stage is 0x18 bytes = NVNshaderData{data, control} + one 8-byte extension field (filled from SMBW main 0x1074ff0).
@@ -2479,7 +2557,7 @@ NVN(nvnCommandBufferMultiDrawArraysIndirectCount, void, NVNcommandBuffer *c, NVN
 // Whether the host can read n bytes at a guest address: outside a sparse virtual pool always; inside one only where pages are mapped (nvn_mtl.m reads multi-draw counts there)
 int nvn_host_readable(uint64_t a, uint64_t n) {
     int ok = 1; pthread_mutex_lock(&g_vp_mu);
-    for (int k = 0; k < NVPOOL; k++) { struct vpool *v = &g_vp[k]; if (!v->base || a < (uint64_t)(uintptr_t)v->base || a >= (uint64_t)(uintptr_t)v->base + v->len) continue;
+    for (int k = 0; k < g_nvp; k++) { struct vpool *v = g_vp[k]; if (a < (uint64_t)(uintptr_t)v->base || a >= (uint64_t)(uintptr_t)v->base + v->len) continue;
         uint64_t o = a - (uint64_t)(uintptr_t)v->base; ok = 0;
         for (int r = 0; r < v->nrun; r++) if (o >= v->run[r].lo && o + n <= v->run[r].hi) { ok = 1; break; }
         break; }
@@ -2488,11 +2566,13 @@ int nvn_host_readable(uint64_t a, uint64_t n) {
 // Textures of a sparse pool, read through its page table (see the sparse pools above): whether a pool is one, a copy of a texture's bytes (unmapped pages read as 0; → bytes not mapped),
 // whether its content may have changed since an upload (a mapping in its range newer than gen, or a physical page behind it written after the dirty-page stamp), and the write
 // protection of the physical pages behind it (taken before an upload, as for any packaged texture)
-static struct vpool *vpool_at(const void *pool, uint64_t a) {
-    for (int k = 0; k < NVPOOL; k++) { struct vpool *v = &g_vp[k]; if (v->base && v->pool == pool && a >= (uint64_t)(uintptr_t)v->base && a < (uint64_t)(uintptr_t)v->base + v->size) return v; }
-    return NULL;
+// A texture's pool pointer is the game's NVNmemoryPool: after Finalize the game may reuse that memory, so vp is read only from a live virtual pool (magic POOL, flag 0x200)
+static struct vpool *vpool_live(const void *pool) { const pool_t *p = pool; return p && p->magic == MAGIC('P', 'O', 'O', 'L') && (p->flags & 0x200) ? p->vp : NULL; }
+static struct vpool *vpool_at(const void *pool, uint64_t a) {   // caller holds g_vp_mu
+    struct vpool *v = vpool_live(pool);
+    return v && a >= (uint64_t)(uintptr_t)v->base && a < (uint64_t)(uintptr_t)v->base + v->size ? v : NULL;
 }
-int nvn_sparse_pool(const void *pool) { int r = 0; for (int k = 0; k < NVPOOL; k++) r |= g_vp[k].base && g_vp[k].pool == pool; return r; }   // no lock: a slot is set once at Initialize, cleared at Finalize; called per texture lookup
+int nvn_sparse_pool(const void *pool) { return vpool_live(pool) != NULL; }   // no lock: set at Initialize, cleared at the first mapping (an aliased pool) or Finalize; called per texture lookup
 uint64_t nvn_sparse_gen(void) { return atomic_load(&g_vp_gen); }
 uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n) {
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); uint64_t miss = 0;
