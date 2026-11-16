@@ -22,6 +22,8 @@ class AVCFrameLayout(unittest.TestCase):
         state=source[source.index('#define QMAX'):source.index('mavc *mavc_new(')]
         code=r'''
 #define __USE_MINGW_ANSI_STDIO 1
+#define _POSIX_C_SOURCE 199309L
+#include <time.h>
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>

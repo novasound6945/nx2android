@@ -37,6 +37,7 @@ struct mavc {
 };
 static int avc_trace(void) { static int on = -1; if (on < 0) on = getenv("DM_MOVIE_TRACE") != NULL; return on; }
 
+static __thread uint64_t t_conv_ns;   // the last picture's conversion (with the copy-out of an NV12 one) on this thread: hle_movie.c's picture stages
 mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); a->last_in = a->last_out = INT64_MIN; return a; }
 static void close_codec(mavc *a) { if (a->mc) { AMediaCodec_stop(a->mc); AMediaCodec_delete(a->mc); a->mc = NULL; } a->nin = a->nout = 0; a->eos_sent = 0; a->last_in = a->last_out = INT64_MIN; a->npmap = 0; }
 void mavc_drop(mavc *a) {
@@ -270,6 +271,7 @@ static int64_t earliest_pending(const mavc *a) {
     for (int i = 0; i < a->npmap; i++) if (a->pmap[i].g > a->last_out && a->pmap[i].g < m) m = a->pmap[i].g;
     return m;
 }
+uint64_t mavc_last_conv_ns(void) { return t_conv_ns; }
 int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts_us) {
     if (flush) finish(a);
     else if (!a->nq && a->mc && a->nin > a->nout) drain(a, 4000);   // a picture is in the codec's pipeline: give it a few milliseconds
@@ -288,6 +290,7 @@ int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts_us) {
     if (a->q[0].pts > a->last_out) a->last_out = a->q[0].pts;
     memmove(a->q, a->q + 1, --a->nq * sizeof a->q[0]);
     const uint8_t *uv = pic + (size_t)pw * ph;
+    struct timespec c0, c1; clock_gettime(CLOCK_MONOTONIC, &c0);
     if (a->rgba) nv12_rgba(pic, uv, pw, ph, dst, w, h);
     else {
         int cw = pw < w ? pw : w, chh = ph < h ? ph : h;
@@ -298,5 +301,6 @@ int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts_us) {
         for (int r = 0; r < (chh + 1) / 2 && r < h / 2; r++) memcpy(dst + (size_t)w * h + (size_t)r * w, uv + (size_t)r * cs, (size_t)copied);
     }
     free(pic);
+    clock_gettime(CLOCK_MONOTONIC, &c1); t_conv_ns = (uint64_t)((c1.tv_sec - c0.tv_sec) * 1000000000ll + (c1.tv_nsec - c0.tv_nsec));
     return 1;
 }

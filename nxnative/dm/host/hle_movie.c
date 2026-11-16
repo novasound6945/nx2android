@@ -88,6 +88,9 @@ typedef struct {
     int64_t aac_pts[16]; int aac_npts, aac_fpp;  // times of the packets fed and not decoded yet (Android's MediaCodec gives a packet's PCM two packets later); frames per packet
     uint64_t in_ns;                              // when the last packet came (md_tail)
     uint64_t dec_n, dec_ns, dec_max;            // decode timing (on the host thread, per packet)
+    // a video picture's time by stage (md_stage_log): the decoder itself (libvpx decode + frame, MediaCodec input + output wait + picture copy), YUV → RGBA, the native-texture
+    // write (md_out_tex, the client's thread), and the whole job per packet (the rest of it is "other"); totals since creation and since the last periodic line
+    struct md_stage { uint64_t n, ns, max; } st[4], st0[4];
     unsigned long ncall[24];
     // Video pacing as the client sees it (md_pace, one line per 600 pictures): presents between successive GetOutputBuffer calls, pictures whose time goes backwards,
     // and how many outputs the client held (acquired, not released) at each one
@@ -341,6 +344,22 @@ static void md_rgba(const vpx_image_t *im, uint8_t *dst, int w, int h) {
     }
     #undef CL
 }
+enum { MDS_DEC, MDS_CONV, MDS_WRITE, MDS_JOB };
+static void md_st(mdec_t *d, int k, uint64_t dt) { struct md_stage *s = &d->st[k]; s->n++; s->ns += dt; if (dt > s->max) s->max = dt; }
+static void md_st_fmt(const struct md_stage *a, const struct md_stage *b, char *o, size_t n) {   // a - b (b NULL: a alone): "avg / max ms over n"
+    uint64_t c = a->n - (b ? b->n : 0), t = a->ns - (b ? b->ns : 0);
+    snprintf(o, n, "%.2f avg / %.2f max ms (%llu)", c ? t / 1e6 / c : 0.0, a->max / 1e6, (unsigned long long)c);
+}
+// one line per 600 video packets decoded, and the totals when the decoder goes: where a picture's time goes (the replay's re-upload is its own "texture uploads")
+static void md_stage_log(mdec_t *d, int final) {
+    char a[80], b[80], c[80], e[80]; const struct md_stage *p = final ? NULL : d->st0;
+    md_st_fmt(&d->st[MDS_DEC], p ? &p[MDS_DEC] : NULL, a, sizeof a); md_st_fmt(&d->st[MDS_CONV], p ? &p[MDS_CONV] : NULL, b, sizeof b);
+    md_st_fmt(&d->st[MDS_WRITE], p ? &p[MDS_WRITE] : NULL, c, sizeof c); md_st_fmt(&d->st[MDS_JOB], p ? &p[MDS_JOB] : NULL, e, sizeof e);
+    uint64_t jn = d->st[MDS_JOB].n - (p ? p[MDS_JOB].n : 0), other = (d->st[MDS_JOB].ns - (p ? p[MDS_JOB].ns : 0)) - (d->st[MDS_DEC].ns - (p ? p[MDS_DEC].ns : 0)) - (d->st[MDS_CONV].ns - (p ? p[MDS_CONV].ns : 0));
+    LOG("[movie] picture stages (%s): decode %s; YUV to RGBA %s; texture write %s; whole decode job %s, other %.2f ms a job (maxima since the start)",
+        final ? "all" : "last 600 packets", a, b, c, e, jn ? (int64_t)other / 1e6 / jn : 0.0);
+    memcpy(d->st0, d->st, sizeof d->st);
+}
 // decode one packet into output slot slot: 1 = a picture came out, 0 = none (hidden frame or error)
 static int md_vpx(mdec_t *d, const uint8_t *p, int n, int slot) {
     const char *codec = d->type == MD_TYPE_VP8 ? "VP8" : "VP9";
@@ -353,19 +372,23 @@ static int md_vpx(mdec_t *d, const uint8_t *p, int n, int slot) {
         d->vpx_on = 1;
         LOG("[movie] libvpx %s: %s decoder, %d threads", vpx_codec_version_str(), codec, cfg.threads);
     }
+    uint64_t t0 = now_ns();
     if (vpx_codec_decode(&d->vpx, p, (unsigned)n, NULL, 0)) {
         if (!d->red_dec++) LOG("[RED] movie: %s decode error (first case, %d bytes): %s %s", codec, n, vpx_codec_error(&d->vpx), vpx_codec_error_detail(&d->vpx) ? vpx_codec_error_detail(&d->vpx) : "");
         return 0;
     }
     vpx_codec_iter_t it = NULL; vpx_image_t *im, *last = NULL;
     while ((im = vpx_codec_get_frame(&d->vpx, &it))) last = im;
+    md_st(d, MDS_DEC, now_ns() - t0);
     if (!last) return 0;
     if (last->fmt != VPX_IMG_FMT_I420) { if (!d->red_img++) LOG("[RED] movie: %s picture format %#x is not I420 (4:2:0 8-bit), outputting a black frame", codec, last->fmt); return 0; }
     if ((int)last->d_w != d->w || (int)last->d_h != d->h) { if (!d->red_img++) LOG("[RED] movie: %s picture %u×%u does not match the output %d×%d (first case), cropping / padding with black", codec, last->d_w, last->d_h, d->w, d->h); }
     int rgba = d->fmt == MD_FMT_ABGR;
     size_t need = (size_t)d->w * d->h * (rgba ? 4 : 3) / (rgba ? 1 : 2);
     if (d->out[slot].cap < need) { free(d->out[slot].frm); d->out[slot].frm = malloc(need); d->out[slot].cap = need; }   // a Configure after Reset may change the size
+    uint64_t t1 = now_ns();
     if (rgba) md_rgba(last, d->out[slot].frm, d->w, d->h); else md_nv12(last, d->out[slot].frm, d->w, d->h);
+    md_st(d, MDS_CONV, now_ns() - t1);
     return 1;
 }
 // ---------- Vorbis ----------
@@ -494,14 +517,19 @@ static int md_aac_tail(mdec_t *d, int slot) {
 // The H.264 decoder, made by Configure (when the stream's parameter sets come with it) or by the first packet; RGBA pictures in the native texture mode either way.
 // Absolum's movies bring csd-0 / csd-1 to Configure, and a decoder made there used to stay NV12: the frames' bytes went into the RGBA texture as they were
 static void md_avc_open(mdec_t *d) { if (!d->avc) { d->avc = mavc_new(); if (d->fmt == MD_FMT_ABGR) mavc_set_rgba(d->avc); } }
+__attribute__((weak)) uint64_t mavc_last_conv_ns(void) { return 0; }   // movie_avc.c: the last picture's NV12 → RGBA conversion on this thread
 // H.264: decode the packet (if any) and hand out the next picture in presentation order (with jflush every queued one in turn); 1 = a picture is in the slot, its time in jpts_out
 static int md_avc(mdec_t *d, const uint8_t *p, int n, int slot, int take_only) {
     md_avc_open(d);
+    uint64_t t0 = now_ns();
     if (!take_only && n > 0) mavc_decode(d->avc, p, n, d->jpts);
     if (d->w <= 0 || d->h <= 0) return 0;
     size_t need = (size_t)d->w * d->h * (d->fmt == MD_FMT_ABGR ? 4 : 3) / (d->fmt == MD_FMT_ABGR ? 1 : 2);
     if (d->out[slot].cap < need) { free(d->out[slot].frm); d->out[slot].frm = malloc(need); d->out[slot].cap = need; }
-    return mavc_take(d->avc, d->jflush, d->out[slot].frm, d->w, d->h, &d->jpts_out);
+    int got = mavc_take(d->avc, d->jflush, d->out[slot].frm, d->w, d->h, &d->jpts_out);
+    uint64_t conv = got ? mavc_last_conv_ns() : 0;
+    md_st(d, MDS_DEC, now_ns() - t0 - conv); if (got) md_st(d, MDS_CONV, conv);
+    return got;
 }
 static void md_close(mdec_t *d) { if (d->vpx_on) { vpx_codec_destroy(&d->vpx); d->vpx_on = 0; } if (d->vb) { stb_vorbis_close(d->vb); d->vb = NULL; } if (d->aac) { AudioConverterDispose(d->aac); d->aac = NULL; } if (d->avc) { mavc_free(d->avc); d->avc = NULL; } }
 void dm_host_helper_qos(qos_class_t q);   // hle_thread.c
@@ -520,6 +548,7 @@ static void *md_worker(void *arg) {
             d->jgot = d->type == MD_TYPE_AVC ? md_avc(d, d->jp, d->jn, d->jslot, job == MDJ_TAKE) : d->type == MD_TYPE_VORBIS ? md_vorbis(d, d->jp, d->jn, d->jslot) :
                       d->type == MD_TYPE_AAC ? md_aac(d, d->jp, d->jn, d->jslot) : md_vpx(d, d->jp, d->jn, d->jslot);
             uint64_t dt = now_ns() - t0; d->dec_n++; d->dec_ns += dt; if (dt > d->dec_max) d->dec_max = dt;
+            if (!MD_AUDIO(d)) { md_st(d, MDS_JOB, dt); if (d->st[MDS_JOB].n % 600 == 0) md_stage_log(d, 0); }
         }
         else md_close(d);
         pthread_mutex_lock(&d->wmu);
@@ -638,6 +667,7 @@ static void md_free(void **self) {
     self[1] = NULL;
     LOG("[movie] decoder %p destroyed: %lu packets in, %lu frames out; decoded %llu packets, average %.2f ms per packet, longest %.2f ms", (void *)self, d->ncall[7], d->ncall[8],
         (unsigned long long)d->dec_n, d->dec_n ? d->dec_ns / 1e6 / d->dec_n : 0.0, d->dec_max / 1e6);
+    if (!MD_AUDIO(d) && d->st[MDS_JOB].n) md_stage_log(d, 1);
     pthread_mutex_lock(&d->dmu); md_job(d, MDJ_QUIT); pthread_mutex_unlock(&d->dmu);
     pthread_join(d->wk, NULL);
     for (int i = 0; i < MD_NIN; i++) free(d->in[i]);
@@ -898,7 +928,7 @@ static int md_out_tex(mdec_t *d, int i, void *buf) {
     int w = d->w < tw ? d->w : tw, h = d->h < th ? d->h : th;
     // No picture (an end-of-stream output): nothing is drawn and the texture keeps the last frame, as the SDK's consumer has no frame to draw. A black frame here flashed at the
     // end of every loop of Big Brain Academy: Brain vs. Brain's activity previews, which read the end-of-stream output's buffer
-    if (d->out[i].pic && d->out[i].frm) nvn_host_write_texture(tex, d->out[i].frm, w, h, (size_t)d->w * 4, NULL, NULL);
+    if (d->out[i].pic && d->out[i].frm) { uint64_t t0 = now_ns(); nvn_host_write_texture(tex, d->out[i].frm, w, h, (size_t)d->w * 4, NULL, NULL); md_st(d, MDS_WRITE, now_ns() - t0); }
     void *sy = G.nvn_sync ? G.nvn_sync(buf) : NULL; if (sy && nvn_host_signal_sync(sy) && !d->red_dec++) LOG("[RED] movie: the buffer's sync object %p is not an NVNsync", sy);
     MD_TRACE(d, 12, "GetOutputBuffer index %d → texture %p (%d×%d format %#x)%s", i, tex, tw, th, f, d->out[i].pic ? "" : " (no picture: the texture keeps its last frame)");
     return 0;
