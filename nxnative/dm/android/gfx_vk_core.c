@@ -282,7 +282,12 @@ void vk_init(void) {
             v13 ? "yes (Vulkan 1.3)" : "no", has_e3 ? "yes" : "no", e3f.extendedDynamicState3DepthClampEnable ? "yes" : "no", e3f.extendedDynamicState3PolygonMode ? "yes" : "no",
             e3f.extendedDynamicState3DepthClipNegativeOneToOne ? "yes" : "no", why); }
     if (V.gpl) { on[non++] = "VK_KHR_pipeline_library"; on[non++] = "VK_EXT_graphics_pipeline_library"; if (V.gpl_eds3) on[non++] = "VK_EXT_extended_dynamic_state3"; }
+    int rb2_ok = fr2.robustBufferAccess2 && ff.features.robustBufferAccess;
     fr2.robustBufferAccess2 = 0; fr2.robustImageAccess2 = 0;   // nullDescriptor only: unbound slots read 0 without a dummy
+    // DM_VK_ROBUST_UBO=1 (start-up, A/B): robustBufferAccess + robustBufferAccess2, so a read past a binding's range gives 0 as on Maxwell (tried for Fire Emblem Engage's
+    // battle grass with point lights, 2026-11-16: no change, its light table binding is the whole 20 KB)
+    int robust_ubo = 0; { const char *e = getenv("DM_VK_ROBUST_UBO"); if (e && atoi(e) && rb2_ok) { fr2.robustBufferAccess2 = 1; robust_ubo = 1; } }
+    VKLOG("robustBufferAccess2: %s", robust_ubo ? "on (DM_VK_ROBUST_UBO)" : rb2_ok ? "off (offered)" : "off (not offered)");
     V.has_custom_border = fcb.customBorderColors && has_ext(ex, ne, "VK_EXT_custom_border_color");
     V.has_robust2 = fr2.nullDescriptor && has_ext(ex, ne, "VK_EXT_robustness2");
     V.has_depth_clip_ctl = fdc.depthClipControl && has_ext(ex, ne, "VK_EXT_depth_clip_control");
@@ -309,7 +314,7 @@ void vk_init(void) {
       else if (pin) { V.sg_pin_stages = st; V.sg_pin = (VkPipelineShaderStageRequiredSubgroupSizeCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, NULL, pin};
                       VKLOG("subgroups: stages %#x pinned to %u lanes (DM_VK_SUBGROUP_PIN)", st, pin); } }
     // enable: everything the shaders may use that the device has
-    VkPhysicalDeviceFeatures en = ff.features; en.robustBufferAccess = 0; en.shaderFloat64 = 0;
+    VkPhysicalDeviceFeatures en = ff.features; en.robustBufferAccess = (VkBool32)robust_ubo; en.shaderFloat64 = 0;
     f12.bufferDeviceAddressCaptureReplay = 0; f12.bufferDeviceAddressMultiDevice = 0;
     featx(xf, nxf, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES)[1] = featx(xf, nxf, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES)[2] = 0;   // (its extension's: the same two)
     f13.robustImageAccess = 0;
@@ -1306,6 +1311,15 @@ void vk_sub_update(uint64_t dst, const void *data, uint64_t n) {
     VkBuffer db, sb; VkDeviceSize dof, so;
     if (!n) return;
     if (!vk_buf_at(dst, n, &db, &dof)) { VKRED_ONCE(3, "uniform update outside the memory pools"); return; }
+    { static uint64_t wa; static char wl[32]; const char *w = getenv("DM_VK_UBD_WATCH"); extern uint64_t g_tex_frame;   // DM_VK_UBD_WATCH=<address> (live): every update there, any size
+      if (w && strcmp(w, wl)) { snprintf(wl, sizeof wl, "%s", w); wa = strtoull(w, NULL, 16); }
+      if (w && wa && dst == wa) { static int k; if (k++ < 20000) VKLOG("watch: update %#llx +%llu present %llu", (unsigned long long)dst, (unsigned long long)n, (unsigned long long)g_tex_frame); } }
+    { extern uint64_t g_trap_size, g_trap_lo, g_trap_hi, g_tex_frame; extern int g_trap_left;   // DM_VK_UBD_TRAP (gfx_vk_exec.c cbuf_desc)
+      // DM_VK_UBD_TRAP_X0=<lo>:<hi> (live): only an update whose first float is in that range (one hit's light table among the battle's: Engage's knight, x ≈ 37.5)
+      int x0ok = 1; { const char *x0 = getenv("DM_VK_UBD_TRAP_X0"); float lo, hi, f0; if (x0 && sscanf(x0, "%f:%f", &lo, &hi) == 2 && n >= 4) { memcpy(&f0, data, 4); x0ok = f0 >= lo && f0 <= hi; } }
+      if (g_trap_size && n == g_trap_size && x0ok) { static int k; g_trap_lo = dst; g_trap_hi = dst + n; g_trap_left = getenv("DM_VK_UBD_TRAP_N") ? atoi(getenv("DM_VK_UBD_TRAP_N")) : 64;   // DM_VK_UBD_TRAP_N=<bindings logged per trap> (live)
+        if (k++ < 400) { float f[8]; memcpy(f, data, sizeof f); VKLOG("trap: uniform update of %llu bytes at %#llx, present %llu: %g %g %g %g %g %g %g %g", (unsigned long long)n,
+              (unsigned long long)dst, (unsigned long long)g_tex_frame, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]); } } }
     // an update of exactly the range of a deferred one supersedes it: the older one goes (Unity rewrites the same few constant buffers before every draw,
     // so the list keeps about one entry per buffer region, which keeps the landing to a few copies and the shadows cheap to build)
     for (int i = g_nubd - 1; i >= 0; i--) if (g_ubd[i].lo == dst && g_ubd[i].hi == dst + n) { memmove(&g_ubd[i], &g_ubd[i + 1], sizeof *g_ubd * (size_t)(g_nubd - i - 1)); g_nubd--; g_ubd_superseded++; break; }

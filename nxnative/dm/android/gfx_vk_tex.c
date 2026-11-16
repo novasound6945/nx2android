@@ -717,6 +717,8 @@ static VkSampler make_sampler(const samp_par *p) {
     ci.mipLodBias = p->lod_bias;
     ci.anisotropyEnable = p->aniso > 1.0f; ci.maxAnisotropy = p->aniso > V.max_aniso ? V.max_aniso : p->aniso;
     ci.compareEnable = p->cmp_mode == 1; ci.compareOp = cmp_op(p->cmp_func);
+    { static int lit = -1; if (lit < 0) { const char *e = getenv("DM_VK_X_SHADOWLIT"); lit = e && atoi(e); }   // DM_VK_X_SHADOWLIT=1 (start-up, A/B): every depth compare passes (no shadows)
+      if (lit && ci.compareEnable) ci.compareOp = VK_COMPARE_OP_ALWAYS; }
     ci.minLod = p->lod_min; ci.maxLod = p->minf <= 1 ? 0.25f : p->lod_max;   // no mipmap filter: level 0 only (GL's rule)
     int border = ci.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER || ci.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER || ci.addressModeW == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
     ci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;

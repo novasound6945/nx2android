@@ -114,8 +114,50 @@ static long long g_watch_off = -1; static int g_watch_n; extern uint64_t g_tex_f
 // DM_VK_UBO_LOG=<shader key, hex>[#n] (live): log the next n (40) uniform buffers that shader reads (present, stage, register, address, a hash and the first 16 words)
 static uint64_t g_ubolog_key; static int g_ubolog_n;
 static void ubo_log(const vkshader_t *s, int st, int reg, uint64_t a, uint64_t n) {
+    // DM_VK_UBO_HASH=<shader key>[,<key>] (live): every frame, the first 8 constant buffer bindings of that shader, one compact line each (present, stage, register,
+    // address, size, hash of what it reads now, deferred updates over it): which buffer changes exactly when an effect starts and stops
+    { static char last[64]; static uint64_t keys[2]; static uint64_t pf; static int cnt; const char *hk = getenv("DM_VK_UBO_HASH");
+      if (hk && strcmp(hk, last)) { snprintf(last, sizeof last, "%s", hk); keys[0] = strtoull(hk, NULL, 16); const char *c = strchr(hk, ','); keys[1] = c ? strtoull(c + 1, NULL, 16) : 0; }
+      if (hk && *hk && (s->key == keys[0] || s->key == keys[1])) { if (pf != g_tex_frame) { pf = g_tex_frame; cnt = 0; }
+          if (cnt++ < 8) { static uint8_t hb[65536]; uint64_t m = n > sizeof hb ? sizeof hb : n; void vk_ubd_read(uint64_t a, uint64_t n, uint8_t *dst); vk_ubd_read(a, m, hb);
+              uint64_t h = 1469598103934665603ull; for (uint64_t i = 0; i < m; i++) h = (h ^ hb[i]) * 1099511628211ull; int vk_ubd_overlaps(uint64_t a, uint64_t n);
+              static uint64_t lasth[2][8]; int ki = s->key == keys[0] ? 0 : 1; if (lasth[ki][cnt - 1] == (h ^ a)) goto uh_done; lasth[ki][cnt - 1] = h ^ a;   // (only changes)
+              VKLOG("uhash %llu p%d %016llx s%d c%d %#llx +%llu %016llx ov%d", (unsigned long long)g_tex_frame, g_sub_pass - 1, (unsigned long long)s->key, st, reg, (unsigned long long)a, (unsigned long long)m, (unsigned long long)h, vk_ubd_overlaps(a, n)); uh_done:; } } }
+    // DM_VK_UBO_DIFF=<shader key> (live): the first draw of that shader each frame, every constant buffer register: the floats that differ from that register's last
+    // frame, logged as "udiff present cN index old new" (up to 48 a register): a global value an effect turns on and off among values the camera moves every frame
+    { static char last[40]; static uint64_t key; static uint64_t pf; static uint32_t seen; static float prev[8][1024]; static uint8_t has[8];
+      const char *dk = getenv("DM_VK_UBO_DIFF"); if (dk && strcmp(dk, last)) { snprintf(last, sizeof last, "%s", dk); key = strtoull(dk, NULL, 16); memset(has, 0, sizeof has); }
+      if (dk && key && s->key == key && reg >= 0 && reg < 8) { if (pf != g_tex_frame) { pf = g_tex_frame; seen = 0; }
+          if (!(seen >> reg & 1)) { seen |= 1u << reg; float cur[1024]; uint64_t m = n > sizeof cur ? sizeof cur : n; void vk_ubd_read(uint64_t a, uint64_t n, uint8_t *dst); vk_ubd_read(a, m, (uint8_t *)cur);
+              uint32_t nf = (uint32_t)(m / 4); if (has[reg]) { int c = 0; for (uint32_t i = 0; i < nf && c < 48; i++) if (memcmp(&cur[i], &prev[reg][i], 4)) { c++;
+                  VKLOG("udiff %llu c%d %u %g %g", (unsigned long long)g_tex_frame, reg, i, prev[reg][i], cur[i]); } }
+              memcpy(prev[reg], cur, m); has[reg] = 1; } } }
+    // DM_VK_UBO_HASH_REGS=<register>[,<register>] (live): every fragment shader's bindings of those registers, hashed at each draw and logged ("mhash") when the
+    // content at that address differs from the last time: which material buffers an effect animates
+    { static char last[16]; static int regs[2] = {-1, -1}; const char *hr = getenv("DM_VK_UBO_HASH_REGS");
+      if (hr && strcmp(hr, last)) { snprintf(last, sizeof last, "%s", hr); regs[0] = *hr ? atoi(hr) : -1; const char *c = strchr(hr, ','); regs[1] = c ? atoi(c + 1) : -1; }
+      if (hr && *hr && st == 1 && (reg == regs[0] || reg == regs[1] || regs[0] == 99) && n <= 4096) {   // (=99: every register)
+          enum { MH = 8192 }; static uint64_t ma[MH], mh[MH]; uint8_t hb[4096]; void vk_ubd_read(uint64_t a, uint64_t n, uint8_t *dst); vk_ubd_read(a, n, hb);
+          uint64_t h = 1469598103934665603ull; for (uint64_t i = 0; i < n; i++) h = (h ^ hb[i]) * 1099511628211ull;
+          unsigned k = (unsigned)((a >> 4) * 0x9E3779B1u) % MH; for (int pr = 0; pr < 16 && ma[k] && ma[k] != a; pr++) k = (k + 1) % MH;
+          if (ma[k] != a) { ma[k] = a; mh[k] = h; }
+          else if (mh[k] != h) { mh[k] = h; float f[12]; memcpy(f, hb, n < 48 ? n : 48);
+              VKLOG("mhash %llu %016llx c%d %#llx +%llu: %g %g %g %g | %g %g %g %g | %g %g %g %g", (unsigned long long)g_tex_frame, (unsigned long long)s->key, reg, (unsigned long long)a, (unsigned long long)n,
+                    f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11]); } } }
     if (!g_ubolog_key || s->key != g_ubolog_key || g_ubolog_n <= 0) return;
-    g_ubolog_n--; uint8_t buf[4096]; if (n > sizeof buf) n = sizeof buf; void vk_ubd_read(uint64_t a, uint64_t n, uint8_t *dst); vk_ubd_read(a, n, buf);
+    g_ubolog_n--; uint8_t buf[4096]; void vk_ubd_read(uint64_t a, uint64_t n, uint8_t *dst);
+    // DM_VK_UBO_DUMP=1 (live, with DM_VK_UBO_LOG / DM_VK_UBD_TRAP_LOG): each logged binding's whole range (up to 64 KB) as two files in DM_ROOT, ubo_<present>_<pass>_s<stage>c<reg>_cpu.bin
+    // (what a shadow is built from: CPU memory with the in-flight and deferred updates over it) and _gpu.bin (a copied pool's GPU copy now, what a binding with no shadow reads)
+    { const char *ud = getenv("DM_VK_UBO_DUMP"); const char *root = getenv("DM_ROOT"); if (ud && atoi(ud) && root) {
+        static uint8_t big[65536]; uint64_t m = n > sizeof big ? sizeof big : n; char path[1024]; vkpool_t *p = vk_pool_of(a, 1);
+        vk_ubd_read(a, m, big); snprintf(path, sizeof path, "%s/ubo_%llu_%d_s%dc%d_cpu.bin", root, (unsigned long long)g_tex_frame, g_sub_pass - 1, st, reg);
+        FILE *f = fopen(path, "wb"); if (f) { fwrite(big, 1, m, f); fclose(f); }
+        if (p && p->shadow && a + m <= p->hi) { snprintf(path, sizeof path, "%s/ubo_%llu_%d_s%dc%d_gpu.bin", root, (unsigned long long)g_tex_frame, g_sub_pass - 1, st, reg);
+            f = fopen(path, "wb"); if (f) { fwrite(p->shadow + (a - p->lo), 1, m, f); fclose(f); } }
+        int vk_ubd_overlaps(uint64_t a, uint64_t n);
+        VKLOG("ubo dump: present %llu pass %d stage %d c%d %#llx +%llu: pool zero-copy %d shadow %d flags %#x, deferred updates over it %d", (unsigned long long)g_tex_frame, g_sub_pass - 1, st, reg,
+              (unsigned long long)a, (unsigned long long)m, p ? p->zero_copy : -1, p && p->shadow ? 1 : 0, p ? p->flags : 0, vk_ubd_overlaps(a, n)); } }
+    if (n > sizeof buf) n = sizeof buf; vk_ubd_read(a, n, buf);
     uint64_t h = 1469598103934665603ull; for (uint64_t i = 0; i < n; i++) h = (h ^ buf[i]) * 1099511628211ull; float f[16] = {0}; memcpy(f, buf, n < 64 ? n : 64);
     // every word of 512 bytes, as floats: from byte 0, or from DM_VK_UBO_LOG_FROM=<byte offset> (live, a multiple of 16) for fields further in
     const char *fe = getenv("DM_VK_UBO_LOG_FROM"); uint32_t from = fe ? (uint32_t)atoi(fe) & ~15u : 0; if (from >= n) from = 0;
@@ -157,6 +199,8 @@ void vk_watch(const vkimg_t *im, const char *what) {
     if (g_x_listpasses && im && what[0] == 's') { uint64_t o = (uint64_t)im->off; int i = 0; while (i < g_lst_nrd && g_lst_rd[i] != o) i++; if (i == g_lst_nrd && i < 48) g_lst_rd[g_lst_nrd++] = o; }
     if (g_coll_st >= 0 && im && what[0] == 's') { if (g_stn[g_coll_st] < 32) g_stimg[g_coll_st][g_stn[g_coll_st]++] = (stimg_t){im->pool, im->off, im->size}; else g_stn[g_coll_st] = 33; }   // 33: too many to keep
     if (g_watch_off < 0 || !im || im->off != g_watch_off || g_watch_n <= 0) return;
+    { static int wo = -1; static uint64_t gen; if (gen != g_tex_frame) { gen = g_tex_frame; const char *e = getenv("DM_VK_WATCH_WRITES"); wo = e && atoi(e); }   // =1 (live): writes only
+      if (wo && what[0] == 's') return; }
     g_watch_n--; VKLOG("watch: present %llu pass %d (%ux%u): %s %ux%u fmt %d pool %#llx+%#llx (image %p, nvn flags %#x, %d overlapping)", (unsigned long long)g_tex_frame, g_sub_pass - 1, S.pass_w, S.pass_h, what, im->w, im->h, im->fmt,
                        (unsigned long long)im->pool, (unsigned long long)im->off, (const void *)im, im->flags, im->novl);
 }
@@ -167,6 +211,11 @@ static void x_read(void) { const char *c = getenv("DM_VK_CB_DRAWS"); g_x_cbdraws
     { const char *e = getenv("DM_VK_ORDER_KEEP"); g_order_keep = e ? atoi(e) != 0 : DM_GAME_ORDER_KEEP; g_order_pending = g_order_check = 0; }
     { static uint64_t until; static int done; const char *la = getenv("DM_VK_LIST_AT");   // DM_VK_LIST_AT=<present>: the pass list of every submission over two presents from there
       if (la && !done && g_tex_frame >= (uint64_t)atoll(la)) { done = 1; until = g_tex_frame + 2; }
+      { extern uint64_t g_trap_size; const char *tr = getenv("DM_VK_UBD_TRAP"); g_trap_size = tr ? strtoull(tr, NULL, 0) : 0; }
+      // DM_VK_LIST_N=<count> (a DM_CTL "env" line, live): the same pass lists over the next count presents from now, to catch an effect that lasts a second
+      // (Fire Emblem Engage's battle grass went dark for ~1 s after a hit, 2026-11-16: which passes and load ops change for those frames)
+      { const char *ln = getenv("DM_VK_LIST_N"); if (ln && atoi(ln) > 0) { until = g_tex_frame + (uint64_t)atoi(ln); setenv("DM_VK_LIST_N", "0", 1);
+          VKLOG("pass lists armed: presents %llu to %llu", (unsigned long long)g_tex_frame, (unsigned long long)until - 1); } }
       if (until && g_tex_frame < until) { g_x_tracepass = -2; g_x_listpasses = 1; g_lst_nrd = 0; VKLOG("--- submission at present %llu", (unsigned long long)g_tex_frame); } }
     { const char *w = getenv("DM_VK_WATCH"); static char last[40]; if (!w || !*w || !strcmp(w, "0")) g_watch_off = -1;
       else if (strcmp(w, last)) { g_watch_off = strtoll(w, NULL, 16); const char *h = strchr(w, '#'); g_watch_n = h ? atoi(h + 1) : 20; }
@@ -479,14 +528,14 @@ static int pass_commit(void) {
         if (P_ri.pDepthAttachment && P_att[8].im) n += snprintf(t + n, sizeof t - n, " d=%llx:%c(%ux%u)", (unsigned long long)P_att[8].im->off, LO[P_da.loadOp < 3 ? P_da.loadOp : 2], P_att[8].im->w, P_att[8].im->h);
         VKLOG("--- pass %d: %ux%u, colour formats %d %d, depth format %d;%s", g_sub_pass - 1, S.pass_w, S.pass_h, S.cfmt[0], S.cfmt[1], S.dfmt, t); }
     if (g_x_traceframe[0]) {   // DM_VK_TRACE_FRAME=WxH[:fmt[:fmt]] (live): trace every pass of the next submission whose targets match (a whole effect chain in one log)
-        char b[48]; snprintf(b, sizeof b, "%ux%u:%d:%d", S.pass_w, S.pass_h, S.cfmt[0], S.cfmt[1]);
+        char b[48]; snprintf(b, sizeof b, "%ux%u:%d:%d:%d", S.pass_w, S.pass_h, S.cfmt[0], S.cfmt[1], S.dfmt);   // (:depth format last: a prefix match, so WxH:fmt:fmt still works)
         g_x_tracepass = !strncmp(b, g_x_traceframe, strlen(g_x_traceframe)) ? g_sub_pass - 1 : -1; g_x_traceframe_on = 1; }
     if (g_x_tracesize[0] && g_x_tracepass < 0) {   // DM_VK_TRACE_SIZE=WxH[:format[:format]] (live): trace the next pass whose first colour target is that (passes are numbered anew each frame)
-        char b[48]; snprintf(b, sizeof b, "%ux%u:%d:%d", S.pass_w, S.pass_h, S.cfmt[0], S.cfmt[1]);
+        char b[48]; snprintf(b, sizeof b, "%ux%u:%d:%d:%d", S.pass_w, S.pass_h, S.cfmt[0], S.cfmt[1], S.dfmt);   // WxH[:fmt[:fmt[:depth fmt]]]
         const char *h = strchr(g_x_tracesize, '#'); size_t l = h ? (size_t)(h - g_x_tracesize) : strlen(g_x_tracesize);   // #n: the (n+1)th such pass
         if (!strncmp(b, g_x_tracesize, l)) { if (h && atoi(h + 1) > 0) { snprintf(g_x_tracesize + l, sizeof g_x_tracesize - l, "#%d", atoi(h + 1) - 1); setenv("DM_VK_TRACE_SIZE", g_x_tracesize, 1); }
             else { g_x_tracepass = g_sub_pass - 1; g_x_tracesize[0] = 0; setenv("DM_VK_TRACE_SIZE", "", 1); } } }
-    if (g_x_tracepass >= 0 && g_sub_pass - 1 == g_x_tracepass) VKLOG("=== traced pass %d: %ux%u, colour formats %d %d, depth format %d", g_x_tracepass, S.pass_w, S.pass_h, S.cfmt[0], S.cfmt[1], S.dfmt); g_pass_draws = 0; g_pass_bb[0] = g_pass_bb[1] = INT32_MAX; g_pass_bb[2] = g_pass_bb[3] = INT32_MIN;
+    if (g_x_tracepass >= 0 && g_sub_pass - 1 == g_x_tracepass) VKLOG("=== traced pass %d (present %llu): %ux%u, colour formats %d %d, depth format %d", g_x_tracepass, (unsigned long long)g_tex_frame, S.pass_w, S.pass_h, S.cfmt[0], S.cfmt[1], S.dfmt); g_pass_draws = 0; g_pass_bb[0] = g_pass_bb[1] = INT32_MAX; g_pass_bb[2] = g_pass_bb[3] = INT32_MIN;
     return 1;
 }
 void vk_ubd_land(VkCommandBuffer cb); int vk_ubd_shadow(uint64_t a, uint64_t n, VkBuffer *buf, VkDeviceSize *off); void vk_ubd_read(uint64_t a, uint64_t n, uint8_t *dst);
@@ -510,6 +559,7 @@ static void pass_dump(void) {
         if (!hit) return; } }                                                                                                                                       // over many frames
     { const char *pf = getenv("DM_VK_PASSDUMP_FMT"); int a, b;   // DM_VK_PASSDUMP_FMT=a/b (live): only passes whose first two colour formats are VkFormat a and b (pass numbers move)
       if (g_pd_state == 1 && pf && sscanf(pf, "%d/%d", &a, &b) == 2 && ((int)S.cfmt[0] != a || (int)S.cfmt[1] != b)) return; }
+    { const char *nd = getenv("DM_VK_PASSDUMP_NODEPTH"); if (g_pd_state == 1 && nd && atoi(nd) && S.dfmt) return; }   // DM_VK_PASSDUMP_NODEPTH=1 (live): only passes without a depth target
     if (g_pd_state == 1 && g_pd_from[0]) { char wh[32]; snprintf(wh, sizeof wh, "%ux%u", S.pass_w, S.pass_h); if (strcmp(wh, g_pd_from)) return; g_pd_from[0] = 0; }
     if (!g_pd_size[0]) pass_dump_depth();
     int ci = 0; while (ci < S.ncol && ci < 8 && !S.rt_has_col[ci]) ci++;   // the first colour target bound (Pokémon Legends: Arceus's G-buffer leaves colour 0 unbound)
@@ -579,6 +629,9 @@ static inline float half2f(uint16_t h) { uint32_t s = (uint32_t)(h >> 15) << 31,
     if (!e) { if (!m) f = s; else { e = 1; while (!(m & 1024)) { m <<= 1; e--; } m &= 1023; f = s | ((e + 112) << 23) | (m << 13); } } else if (e == 31) f = s | 0x7f800000 | (m << 13); else f = s | ((e + 112) << 23) | (m << 13);
     float r; memcpy(&r, &f, 4); return r; }
 void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every present: start on the switch, write once the GPU finished
+    // DM_VK_TRACE_FRAME_IN=N (live, e.g. from DM_VK_UBD_TRAP_ENV): N presents from now DM_VK_TRACE_FRAME is set to DM_VK_TRACE_FRAME_SPEC (a frame after an effect ended)
+    { const char *ti = getenv("DM_VK_TRACE_FRAME_IN"); if (ti && atoi(ti) > 0) { int v = atoi(ti) - 1; char n[16]; snprintf(n, sizeof n, "%d", v); setenv("DM_VK_TRACE_FRAME_IN", n, 1);
+        if (!v) { const char *sp = getenv("DM_VK_TRACE_FRAME_SPEC"); if (sp && *sp) { setenv("DM_VK_TRACE_FRAME", sp, 1); VKLOG("trace frame armed by the countdown at present %llu: %s", (unsigned long long)g_tex_frame, sp); } } } }
     const char *e = getenv("DM_VK_PASSDUMP");
     if (g_pd_state == 0 && e && atoi(e) > 1) { char n[16]; snprintf(n, sizeof n, "%d", atoi(e) - 1); setenv("DM_VK_PASSDUMP", n, 1); return; }   // =N: the frame after N - 1 more presents
     if (g_pd_state == 0 && e && atoi(e)) { const char *sk = getenv("DM_VK_PASSDUMP_SKIP"); g_pd_skip = sk && !strchr(sk, 'x') ? atoi(sk) : 0;
@@ -591,8 +644,27 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
     if (g_pd_state == 1 && g_npd) { g_pd_state = 2; for (int i = 0; i < g_npd; i++) g_pd[i].fence = mtl_last_fence() + 1; return; }
     if (g_pd_state != 2 || !g_npd || done_fence < g_pd[g_npd - 1].fence) return;
     const char *root = getenv("DM_ROOT");
+    // DM_VK_PASSDUMP_STATS=<batches> (live): no files; each dump's mean colour over the picture and over its green texels (g above r and b by 15%) is logged as a
+    // "pdstat" line, and the dump starts again for that many batches: a per-frame series of one effect over seconds (Fire Emblem Engage's battle grass, 2026-11-16)
+    { const char *st = getenv("DM_VK_PASSDUMP_STATS"); if (st && atoi(st) > 0) {
+        const char *se = getenv("DM_VK_PASSDUMP_STATS_STEP"); uint64_t step = se && atoi(se) > 1 ? (uint64_t)atoi(se) : 1;   // =n: every n-th texel of every n-th row
+        for (int i = 0; i < g_npd; i++) { pdump_t *d = &g_pd[i]; double sa[3] = {0}, sg[3] = {0}; uint64_t ng = 0, na = 0, nbad = 0, nzero = 0; float vmax = 0;
+            for (uint64_t y = 0; y < d->h; y += step) for (uint64_t x = 0; x < d->w; x += step) { uint64_t k = y * d->w + x; float v[3]; na++;
+                if (d->f == VK_FORMAT_R16G16B16A16_SFLOAT) { const uint16_t *p = (const uint16_t *)d->p + k * 4; for (int c = 0; c < 3; c++) v[c] = half2f(p[c]); }
+                else if (d->f == VK_FORMAT_B10G11R11_UFLOAT_PACK32) { uint32_t w = ((const uint32_t *)d->p)[k]; v[0] = half2f((uint16_t)((w & 0x7ff) << 4)); v[1] = half2f((uint16_t)((w >> 11 & 0x7ff) << 4)); v[2] = half2f((uint16_t)((w >> 22 & 0x3ff) << 5)); }
+                else if (d->f == VK_FORMAT_R8_UNORM) v[0] = v[1] = v[2] = ((const uint8_t *)d->p)[k] / 255.f;   // (one byte a texel)
+                else if (d->f == VK_FORMAT_R16_SFLOAT) v[0] = v[1] = v[2] = half2f(((const uint16_t *)d->p)[k]);
+                else { const uint8_t *p = (const uint8_t *)d->p + k * 4; for (int c = 0; c < 3; c++) v[c] = p[c] / 255.f; }
+                { int bad = 0; for (int c = 0; c < 3; c++) { if (!(v[c] == v[c]) || v[c] > 1e4f) { v[c] = 0; bad = 1; } else if (v[c] > vmax) vmax = v[c]; sa[c] += v[c]; } nbad += bad; nzero += v[0] == 0 && v[1] == 0 && v[2] == 0; }
+                if (v[1] > 0.02f && v[1] > 1.15f * v[0] && v[1] > 1.15f * v[2]) { ng++; for (int c = 0; c < 3; c++) sg[c] += v[c]; } }
+            VKLOG("pdstat: present %llu pass %d %ux%u fmt %d: all %.4f %.4f %.4f; green %llu texels %.4f %.4f %.4f; nan/inf %llu, zero %llu, max %.3f", (unsigned long long)d->present, d->pass, d->w, d->h, d->f,
+                  sa[0] / na, sa[1] / na, sa[2] / na, (unsigned long long)ng, ng ? sg[0] / ng : 0, ng ? sg[1] / ng : 0, ng ? sg[2] / ng : 0, (unsigned long long)nbad, (unsigned long long)nzero, vmax);
+            vkDestroyBuffer(V.dev, d->b, NULL); vkFreeMemory(V.dev, d->m, NULL); }
+        g_npd = 0; g_pd_state = 0; char n[16]; snprintf(n, sizeof n, "%d", atoi(st) - 1); setenv("DM_VK_PASSDUMP_STATS", n, 1); if (atoi(st) > 1) setenv("DM_VK_PASSDUMP", "1", 1);
+        return; } }
     for (int i = 0; i < g_npd; i++) {
-        pdump_t *d = &g_pd[i]; char path[1024]; snprintf(path, sizeof path, "%s/pass_%02d.ppm", root ? root : ".", i);
+        pdump_t *d = &g_pd[i]; char path[1024]; const char *pn = getenv("DM_VK_PASSDUMP_NAMED");   // =1 (live): pass_<present>_<NN>.ppm, so later dumps keep the earlier files
+        if (pn && atoi(pn)) snprintf(path, sizeof path, "%s/pass_%llu_%02d.ppm", root ? root : ".", (unsigned long long)d->present, i); else snprintf(path, sizeof path, "%s/pass_%02d.ppm", root ? root : ".", i);
         VKLOG("pass dump %02d is the submission's pass %d (present %llu)", i, d->pass, (unsigned long long)d->present);
         FILE *f = fopen(path, "wb"); if (!f) continue; fprintf(f, "P6\n%u %u\n255\n", d->w, d->h);
         uint8_t *row = malloc((size_t)d->w * 3); uint64_t bad = 0; float mx = 0, mn = 0; double sum = 0;
@@ -639,6 +711,7 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
         vkDestroyBuffer(V.dev, d->b, NULL); vkFreeMemory(V.dev, d->m, NULL);
     }
     g_npd = 0; g_pd_state = 0;
+    { const char *ag = getenv("DM_VK_PASSDUMP_AGAIN"); if (ag && atoi(ag) > 0) { setenv("DM_VK_PASSDUMP", ag, 1); setenv("DM_VK_PASSDUMP_AGAIN", "", 1); VKLOG("pass dump: again in %s presents", ag); } }   // DM_VK_PASSDUMP_AGAIN=N (live, once)
 }
 // DM_VK_CRUMBS=1 (start-up), for a device lost (a GPU hang): every pass end and dispatch writes {submission, pass} into host-visible memory after a full barrier, and the host
 // keeps the shaders each pass drew with; when the device is lost (vk_crumbs_report), the last work the GPU finished and the passes after it are logged
@@ -1430,9 +1503,28 @@ static void vk_cross(int k, uint64_t a, uint64_t n, const vkpool_t *p) {
                                                            (unsigned long long)a, (unsigned long long)n, (unsigned long long)p->hi);
 }
 // a constant buffer binding's descriptor (stage_set, set_memo_get): its pool's buffer from the alignment boundary below it, or the shadow of the deferred updates over it
+// DM_VK_UBD_TRAP=<bytes> (live): an inline uniform update of exactly that size is remembered (gfx_vk_core.c vk_sub_update), and the next 64 constant buffer
+// bindings that read its range are logged with their shader key, stage and register: which shaders read an update that only some frames make
+// (Fire Emblem Engage's 8 KB update in the second after a hit, when the battle grass went dark, 2026-11-16)
+uint64_t g_trap_size, g_trap_lo, g_trap_hi; int g_trap_left;
 static void cbuf_desc(int st, const vkshader_t *s, const dmsv_bind *b, VkDescriptorBufferInfo *bi) {
     const p_bind_buf *u = b->reg >= 0 && b->reg < 16 ? &S.ubo[st][b->reg] : NULL;
     uint64_t n = u && u->size ? (u->size > 65536 ? 65536 : u->size) : 65536; VkBuffer buf; VkDeviceSize off;
+    if (g_trap_left > 0 && u && u->addr && u->addr < g_trap_hi && g_trap_lo < u->addr + n) { g_trap_left--;
+        if (g_trap_left == (getenv("DM_VK_UBD_TRAP_N") ? atoi(getenv("DM_VK_UBD_TRAP_N")) : 64) - 1) { const char *tl = getenv("DM_VK_UBD_TRAP_LOG");   // DM_VK_UBD_TRAP_LOG=<shader key>[#n] (live): DM_VK_UBO_LOG for the rest of the trapped frame
+            if (tl && *tl) { g_ubolog_key = strtoull(tl, NULL, 16); const char *h = strchr(tl, '#'); g_ubolog_n = h ? atoi(h + 1) : 40; }
+            const char *tt = getenv("DM_VK_UBD_TRAP_TRACE");   // DM_VK_UBD_TRAP_TRACE=WxH (live): DM_VK_TRACE_SIZE armed by the trap (the next pass of that size is traced)
+            if (tt && *tt && !g_x_tracesize[0]) { snprintf(g_x_tracesize, sizeof g_x_tracesize, "%s", tt); setenv("DM_VK_TRACE_SIZE", tt, 1); VKLOG("trap: tracing the next %s pass", tt); }
+            const char *tf = getenv("DM_VK_UBD_TRAP_FRAME");   // DM_VK_UBD_TRAP_FRAME=WxH[:fmt...] (live): DM_VK_TRACE_FRAME armed by the trap (the next submission's matching passes)
+            if (tf && *tf) { setenv("DM_VK_TRACE_FRAME", tf, 1); setenv("DM_VK_UBD_TRAP_FRAME", "", 1); VKLOG("trap: tracing the next submission's %s passes", tf); }
+            { const char *dn = getenv("DM_VK_UBD_TRAP_DUMPNOW");   // =1 (live, once): the pass dump starts in this submission, from the trapped draw's pass on
+              if (dn && atoi(dn) && g_pd_state == 0) { setenv("DM_VK_UBD_TRAP_DUMPNOW", "0", 1); g_pd_state = 1; g_npd = 0; g_pd_frames = 1; g_pd_skip = 0; g_pd_from[0] = 0;
+                  const char *sz = getenv("DM_VK_PASSDUMP_SIZE"); snprintf(g_pd_size, sizeof g_pd_size, "%s", sz && strcmp(sz, "0") ? sz : ""); VKLOG("trap: pass dump from pass %d of this submission", g_sub_pass - 1); } }
+            const char *te = getenv("DM_VK_UBD_TRAP_ENV");   // DM_VK_UBD_TRAP_ENV=NAME=VALUE[;NAME=VALUE...] (live, once): set by the trap (a pass dump of the trapped frames)
+            if (te && *te) { char b[512]; snprintf(b, sizeof b, "%s", te); setenv("DM_VK_UBD_TRAP_ENV", "", 1);
+                for (char *q = strtok(b, ";"); q; q = strtok(NULL, ";")) { char *eq = strchr(q, '='); if (eq) { *eq = 0; setenv(q, eq + 1, 1); VKLOG("trap: env %s=%s", q, eq + 1); } } } }
+        VKLOG("trap: present %llu pass %d stage %d shader %016llx c%d reads %#llx +%llu (the update %#llx +%llu)", (unsigned long long)g_tex_frame, g_sub_pass - 1, st,
+              (unsigned long long)s->key, b->reg, (unsigned long long)u->addr, (unsigned long long)n, (unsigned long long)g_trap_lo, (unsigned long long)(g_trap_hi - g_trap_lo)); }
     vkpool_t *p = g_var_now != 9 && u && u->addr ? vk_pool_of(u->addr, 1) : NULL;
     if (!p) { *bi = (VkDescriptorBufferInfo){vk_zero_buffer(), 0, 65536}; return; }
     buf = p->buf; off = u->addr - p->lo;
@@ -1785,6 +1877,11 @@ static int prepare_draw(int prim, int indexed) {
     else if (g_psplit > 0 && S.pass_open == 1 && g_pass_draws == (uint64_t)g_psplit && S.daspect && !g_psplit_depth) { static int n; if (n++ < 3) VKLOG("pass split: pass %d (%ux%u) has depth (format %d): not split", g_sub_pass - 1, S.pass_w, S.pass_h, S.dfmt); }
     if (g_order_pending) { g_order_pending = 0; g_order_check = S.pass_open == 1; }   // an order-only barrier kept the pass open: decided below, once the draw's images are known
     if (!begin_pass() || !pass_commit()) { g_vkst.skip_rt++; return 0; }
+    // DM_VK_TRACE_VS=<vertex shader key>[#n] (live): the next n (1) passes with a draw of that vertex shader are traced from that draw on (which fragment shader a mesh gets frame by frame)
+    { static char last[40]; static uint64_t key; static int left; const char *tv = getenv("DM_VK_TRACE_VS");
+      if (tv && strcmp(tv, last)) { snprintf(last, sizeof last, "%s", tv); key = strtoull(tv, NULL, 16); const char *h = strchr(tv, '#'); left = key ? (h ? atoi(h + 1) : 1) : 0; }
+      if (left > 0 && S.sh[0] && S.sh[0]->key == key && g_x_tracepass < 0) { left--; g_x_tracepass = g_sub_pass - 1;
+          VKLOG("=== traced pass %d (present %llu, DM_VK_TRACE_VS from here): %ux%u, colour formats %d %d, depth format %d", g_x_tracepass, (unsigned long long)g_tex_frame, S.pass_w, S.pass_h, S.cfmt[0], S.cfmt[1], S.dfmt); } }
     if (g_x_tracepass >= 0 && g_sub_pass - 1 == g_x_tracepass) g_tracing = 1;
     uint64_t t0 = tick();
     VkCommandBuffer cb = vk_cmd();
@@ -2091,6 +2188,10 @@ static void trace_draw(const char *kind, int prim, uint32_t count, uint32_t inst
         VKLOG("  depth target: serial %llu → image %p: %ux%u fmt %d; nvn format %#x flags %#x size %llu pool %p+%#llx", (unsigned long long)t->serial, (void *)im, im ? im->w : 0, im ? im->h : 0,
               im ? im->fmt : 0, t->d.format, t->d.flags, (unsigned long long)t->L.size, (const void *)t->pool, (unsigned long long)t->off); }
     VKLOG("  scissor set %d: %d %d %d %d; depth range %.3f %.3f; viewport count first %.1f %.1f %.1f %.1f", S.sc_set, S.sc.x, S.sc.y, S.sc.w, S.sc.h, S.dnear, S.dfar, S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3]);
+    VKLOG("  depth: clamp %d, clip %s, test %d write %d func %d; polygon offset factor %g units %g clamp %g; cull %d front %d", S.depth_clamp, g_depth_zero ? "0..1" : "-1..1",
+          S.ds.dt, S.ds.dw, S.ds.df, S.pofs.factor, S.pofs.units, S.pofs.clamp, S.poly.cull, S.poly.front);
+    for (int i = 0; i < S.ncol && i < 8; i++) VKLOG("  colour %d: blend %d src %d dst %d eq %d, alpha src %d dst %d eq %d; write mask %#x", i, (S.color.blend_en >> i) & 1, S.blend[i].src_rgb, S.blend[i].dst_rgb,
+        S.blend[i].eq_rgb, S.blend[i].src_a, S.blend[i].dst_a, S.blend[i].eq_a, (S.chmask.mask >> (4 * i)) & 0xf);
     vkshader_t *vsh = S.sh[0]; uint32_t in_mask = vsh ? vsh->local[0] : 0;
     for (int l = 0; l < 16; l++) if (in_mask >> l & 1) { uint32_t a = S.vattr[l]; VKLOG("  location %d: attrib state %#x (stream %u) stride %d divisor %d buffer %#llx +%llu", l, a, (a >> 16) & 0x1f,
         S.vstream[(a >> 16) & 0xf].stride, S.vstream[(a >> 16) & 0xf].divisor, (unsigned long long)S.vbuf[(a >> 16) & 0xf].address, (unsigned long long)S.vbuf[(a >> 16) & 0xf].size); }
