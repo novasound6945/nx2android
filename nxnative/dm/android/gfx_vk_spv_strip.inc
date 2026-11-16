@@ -110,3 +110,28 @@ static uint32_t *spv_strip_caps(const uint32_t *w, uint32_t nw, uint32_t *onw) {
         i += n; }
     *onw = no; return o;
 }
+
+// A fragment shader's alpha-test discards taken out: each block that is only "OpLabel; OpKill" and is a branch of a selection ("OpSelectionMerge %m; OpBranchConditional
+// c %kill %m" or with the branches the other way) goes on to the selection's merge block in place of the OpKill. For the colour pass of a game that draws depth first
+// and tests the colour pass with EQUAL: its discard only repeats the depth pass's, so nothing changes where the two agree, and where they do not the pixel takes the
+// material's colour in place of the clear colour. A merge block that starts with OpPhi keeps its OpKill. NULL when there is none to take out. *nk: how many were
+__attribute__((unused)) static uint32_t *spv_kill_to_merge(const uint32_t *w, uint32_t nw, uint32_t *onw, uint32_t *nk) {
+    uint32_t bound = nw > 3 ? w[3] : 0, kills = 0; if (!bound) return NULL;
+    uint32_t *mg = calloc(bound, 4); uint8_t *phi = calloc(bound, 1); if (!mg || !phi) { free(mg); free(phi); return NULL; }
+    for (uint32_t i = 5, pm = 0, pl = 0; i < nw;) { uint32_t n = w[i] >> 16, op = w[i] & 0xffff; if (!n || i + n > nw) { free(mg); free(phi); return NULL; }
+        if (op == 250 && n >= 4 && pm) { uint32_t t = w[i + 2], f = w[i + 3]; if (t < bound && t != pm) mg[t] = pm; if (f < bound && f != pm) mg[f] = pm; }   // OpBranchConditional after OpSelectionMerge
+        if (op == 245 && pl && pl < bound) phi[pl] = 1;   // OpPhi: its block
+        pm = op == 247 && n >= 3 ? w[i + 1] : 0;   // OpSelectionMerge
+        pl = op == 248 ? w[i + 1] : op == 245 ? pl : 0;   // OpLabel (and the OpPhis after it)
+        i += n; }
+    uint32_t *o = malloc(((size_t)nw + nw / 2 + 8) * 4), no = 5; if (!o) { free(mg); free(phi); return NULL; }
+    memcpy(o, w, 20);
+    for (uint32_t i = 5, pl = 0; i < nw;) { uint32_t n = w[i] >> 16, op = w[i] & 0xffff;
+        if (op == 252 && pl && pl < bound && mg[pl] && mg[pl] < bound && !phi[mg[pl]]) { o[no++] = 2u << 16 | 249; o[no++] = mg[pl]; kills++; }   // OpKill → OpBranch %merge
+        else { memcpy(&o[no], &w[i], n * 4); no += n; }
+        pl = op == 248 ? w[i + 1] : 0;
+        i += n; }
+    free(mg); free(phi);
+    if (!kills) { free(o); return NULL; }
+    *onw = no; if (nk) *nk = kills; return o;
+}

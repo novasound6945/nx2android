@@ -387,6 +387,15 @@ static vkshader_t *vk_shader_q(uint64_t key, int stage, int quiet) {
           else if (op == 12 && n >= 5 && glsl && w[i + 3] == glsl) { uint32_t *x = &w[i + 4];   // OpExtInst: FMin 37 → NMin 79, FMax 40 → NMax 80, FClamp 43 → NClamp 81
               if (*x == 37) *x = 79; else if (*x == 40) *x = 80; else if (*x == 43) *x = 81; }
           i += n; } }
+    // DM_VK_FS_NOKILL=<fragment shader key>[,<key>...] (start-up; a game's android.tsv): those shaders' alpha-test discards are taken out (spv_kill_to_merge).
+    // The Legend of Zelda: Link's Awakening draws depth first with a generic alpha-tested pair and then colour with the material's own shader under an EQUAL test; on
+    // Mesa's Turnip the two disagreed at the tips of the path edges' grass (the depth pass kept pixels the colour pass discarded), which left the clear colour: black
+    // pieces that flickered. Without the colour pass's discard those pixels take the material's colour; the pixels where the passes agree are as they were
+    if (stage == 1) { static uint64_t nk[16]; static int nn = -1;
+        if (nn < 0) { int c = 0; const char *e = getenv("DM_VK_FS_NOKILL"); for (const char *q = e; q && *q && c < 16;) { char *nx; uint64_t v = strtoull(q, &nx, 16); if (nx == q) break; nk[c++] = v; q = *nx ? nx + 1 : nx; } nn = c; }
+        for (int i = 0; i < nn; i++) if (nk[i] == key) { uint32_t n2 = 0, k2 = 0, *w2 = spv_kill_to_merge(w, nw, &n2, &k2);
+            if (w2) { free(w); w = w2; nw = n2; VKLOG("shader %016llx: %u discard%s taken out (DM_VK_FS_NOKILL)", (unsigned long long)key, k2, k2 == 1 ? "" : "s"); }
+            else VKLOG("[RED] shader %016llx: DM_VK_FS_NOKILL found no discard it can take out: left as it is", (unsigned long long)key); } }
     spv_io_locs(w, nw, &s->in_locs, &s->out_locs);
     VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, (size_t)nw * 4, w};
     VkResult vr = vkCreateShaderModule(V.dev, &ci, NULL, &s->mod); s->spv = w; s->nspv = nw;
@@ -746,7 +755,8 @@ VkPipelineLayout vk_pipeline_layout_lib(VkDescriptorSetLayout sets[5], int nsets
 #include "vk_gpl.h"
 static void bundle_hash_once(void) {   // with the load-time clean-ups' version and switches (spv_xf): other modules, another mark; and the dynamic uniform buffers' stages (other set layouts)
     spv_xf(); uint32_t xf[4] = {SPV_XF_VER, (uint32_t)g_xf_clip, (uint32_t)g_xf_caps, (uint32_t)vk_dyn_ubo_mode() | 0x44590000u};
-    g_bundle_h = gpl_hash64(g_bundle, g_bundle_len) ^ gpl_hash64(xf, sizeof xf) * 0x9E3779B97F4A7C15ull; }
+    g_bundle_h = gpl_hash64(g_bundle, g_bundle_len) ^ gpl_hash64(xf, sizeof xf) * 0x9E3779B97F4A7C15ull;
+    { const char *e = getenv("DM_VK_FS_NOKILL"); if (e && *e) g_bundle_h ^= gpl_hash64(e, strlen(e)) * 0xC2B2AE3D27D4EB4Full; } }   // other modules for those shaders: another mark
 uint64_t vk_bundle_hash(uint32_t *nshaders) {
     bundle_auto(); static pthread_once_t once = PTHREAD_ONCE_INIT;
     *nshaders = g_bundle ? g_nent : 0; if (!g_bundle) return 0;

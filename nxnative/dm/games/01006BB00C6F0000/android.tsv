@@ -16,7 +16,8 @@ env	DM_VK_BIND_ALIAS=52fcbb4ca2a78907:2=3:4=3
 # Tarin's house (59-60 fps, no [RED]; naming the file writes its save at once), Mabe Village from a save with sound at 60 fps (10 minutes: no 10 s window's p90 past 30 ms),
 # docked, handheld from the start and switched while running (picture and controls). The title's dark frames in a 150 s screen recording are the movies' own (the same frame
 # for frame in both loops of 119.2 s)
-# Left: black slivers at grass tips and a fluorescent map on its first opening, reported by the user before the c9da25e uniform fix and not reproduced here since; the GPU
+# Left: a fluorescent map on its first opening, reported by the user before the c9da25e uniform fix and not reproduced here since (the black slivers at grass
+# tips: DM_VK_FS_NOKILL below); the GPU
 # turbo's +2.2 °C on average, +3 °C at most (battery drain not measured); each movie frame is written into the game's texture and uploaded again by the replay (about 6 ms a
 # frame); the field's frame work is one game thread at 100% (p50 at the 16.7 ms period); the pipelines' first preparation (68 s) once ended in a low-memory kill (PSS 4.9 GB)
 # The rate is held at 60, not adapted: the field's frame work sits at the period (p50 16.9 ms on the Retroid Pocket 6), so the adaptive rate stepped down to 40 and back
@@ -29,6 +30,15 @@ env	DM_FPS_PIN=60
 # the pack's in env.txt, or "env DM_GPU_TURBO=0" through DM_CTL. The setting is the device's: the app gives it back in the background and at its end, and sets its own at
 # the start; a force-stopped app leaves it on until the next start (perf_android.c)
 env	DM_GPU_TURBO=1
+# The black pieces at the tips of the grass along the dirt paths (Mabe Village and every field; they flicker, most while walking): the path edges are decal quads drawn
+# depth first by a generic alpha-tested pair (15c02683a10f8e9d / 7d4db3619067cb23, alpha = texture 8's, discard under 0.5) and then in colour by the material's own
+# pair (563b877866d1ab0f / b27d97baf39e51b6) under an EQUAL depth test with the same discard. On Turnip T30 the depth pass keeps pixels the colour pass discards (whole
+# parts of triangles, the colour pass's alpha there under 0.1), and nothing is drawn over the clear colour; the stock Adreno driver draws them clean. Why the passes
+# disagree is not found (same texture view, sampler, coordinates and formula; not the mip level, the coordinate's path through the vertex shader, the bound state
+# or the uniforms). DM_VK_FS_NOKILL takes the colour shader's discard out: its pixels are the depth pass's already, so where the passes agree nothing changes, and the
+# pieces take the path edge's colour. Retroid Pocket 6, the village's south: black pixels in the pieces 0 (640 on average without); the user saw it clean while walking.
+# Left: thin dark lines of 1-2 pixels at some ledges and signposts, there with and without this row (not compared with the stock driver)
+env	DM_VK_FS_NOKILL=b27d97baf39e51b6
 status	playable
 tested	v131072 Retroid Pocket 6 (Snapdragon 8 Gen 2, Adreno 740, Turnip T30, Android 13), 2026-11-16: 60 fps with the GPU turbo, boot to Marin and Tarin's house, docked and handheld
 package	org.nx2a.t01006bb00c6f0000
