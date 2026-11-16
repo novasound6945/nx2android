@@ -106,7 +106,22 @@ static int g_samp_snap = 1;   // DM_NVN_SAMP_SNAP=0 (live): samplers as register
 static uint64_t g_x_flat[8]; static int g_x_flat_mode[8], g_x_nflat;   // DM_VK_X_FLAT_VS=<vertex shader key>[:mode][,...] (debugging; pipelines made after it is set): mode bits 1 solid magenta pixel shader, 2 no depth test, 4 no blending (7 when left out)
 // Additional diagnostic bits: 8 no alpha coverage, 16 no depth bias, 32 no depth test/write, 64 no stencil. The mode is part of the pipeline key so live changes take effect.
 static uint64_t g_x_logfs;   // DM_VK_LOG_FS=<fragment shader key> (live): one line per draw with it, with its samplers as the draw sees them
-static int g_rd_touch = 1, g_x_rdkeep, g_x_nskipvs; static uint64_t g_x_skipvs[8];   // DM_VK_RD_TOUCH, DM_VK_X_RDKEEP, DM_VK_X_SKIPVS (see prepare_draw)
+static int g_rd_touch = 1, g_x_rdkeep, g_x_nskipvs, g_nskipfs; static uint64_t g_x_skipvs[8], g_skipfs[8];   // DM_VK_RD_TOUCH, DM_VK_X_RDKEEP, DM_VK_X_SKIPVS, DM_VK_SKIP_FS (see prepare_draw)
+// DM_VK_BIND_ALIAS=<shader key>:<binding>=<binding>[:<binding>=<binding>...][,<shader key>:...] (live, up to 8 pairs): that shader's texture binding (the left one) samples the texture
+// of another of its bindings (the right one). A player's switch for a post effect that mixes the finished picture with blurred copies of it: given the picture in place of the copies,
+// the mix is the picture, whatever weights the game computes. The Legend of Zelda: Link's Awakening's depth-of-field and tilt-shift composite (pfx_dof_composite_back,
+// 52fcbb4ca2a78907) is one; its profile's android.tsv has the row. The game's shaders and uniforms stay as they are (the community's "No DOF Blur" mod, MelonSpeedruns and Rodrigo,
+// 2019, replaces its postprocess.bfsha instead, which the host's shader keys would not match)
+static int g_nalias; static uint64_t g_alias_key[8]; static int g_alias_from[8], g_alias_to[8];
+static void alias_read(void) {
+    g_nalias = 0; const char *q = getenv("DM_VK_BIND_ALIAS");
+    while (q && *q && g_nalias < 8) {
+        char *n; uint64_t key = strtoull(q, &n, 16); if (n == q || *n != ':') break; q = n;
+        while (*q == ':' && g_nalias < 8) { long f = strtol(q + 1, &n, 10); if (n == q + 1 || *n != '=') break; long t = strtol(n + 1, &n, 10);
+            g_alias_key[g_nalias] = key; g_alias_from[g_nalias] = (int)f; g_alias_to[g_nalias] = (int)t; g_nalias++; q = n; }
+        if (*q != ',') break; q++;
+    }
+}
 static char g_x_tracesize[40], g_x_traceframe[40]; static int g_x_traceframe_on;
 // DM_VK_WATCH=<pool offset, hex>[#n] (live): log the next n (20) uses of images at that offset of their pool (attachment, sampled, copy), with the pass and present
 // numbers, to find what fills a texture a pass reads
@@ -232,7 +247,9 @@ static void x_read(void) { const char *c = getenv("DM_VK_CB_DRAWS"); g_x_cbdraws
     g_lrz_touch = (e = getenv("DM_VK_LRZ_TOUCH")) ? atoi(e) : 1; if (g_lrz_touch == 1) g_lrz_touch = LRZ_ALL;   /* 0 none, 1 all, else LRZ_* bits */ g_fdz = !((e = getenv("DM_VK_FDZ")) && !atoi(e)); g_atest = !((e = getenv("DM_VK_ALPHA_TEST")) && !atoi(e)); g_xfb_on = !((e = getenv("DM_VK_XFB")) && !atoi(e));
     g_psplit = (e = getenv("DM_VK_PASS_SPLIT")) ? atoi(e) : 0; g_setsplit = (e = getenv("DM_VK_SETSPLIT")) && atoi(e); g_psplit_depth = (e = getenv("DM_VK_PASS_SPLIT_DEPTH")) && atoi(e);
     g_x_rdkeep = (e = getenv("DM_VK_X_RDKEEP")) && atoi(e); g_vbound = !((e = getenv("DM_VK_VBOUND")) && !atoi(e)); g_x_logfs = (e = getenv("DM_VK_LOG_FS")) ? strtoull(e, NULL, 16) : 0; g_x_nflat = 0; if ((e = getenv("DM_VK_X_FLAT_VS"))) for (char *q = (char *)e; *q && g_x_nflat < 8; ) { char *nx; uint64_t v = strtoull(q, &nx, 16); if (nx == q) break; int m = 7; if (*nx == ':') m = (int)strtol(nx + 1, &nx, 10); g_x_flat_mode[g_x_nflat] = m; g_x_flat[g_x_nflat++] = v; q = *nx ? nx + 1 : nx; } g_samp_snap = !((e = getenv("DM_NVN_SAMP_SNAP")) && !atoi(e)); g_lin_back = !((e = getenv("DM_VK_LIN_BACK")) && !atoi(e)); g_async_pipe = !((e = getenv("DM_VK_ASYNC_PIPE")) && !atoi(e)); g_prof_on = (e = getenv("DM_VK_PROF_SLOW")) && atoi(e); { extern volatile int g_vk_samp_log; if ((e = getenv("DM_VK_SAMP_LOG")) && atoi(e) > 0) { g_vk_samp_log = atoi(e); setenv("DM_VK_SAMP_LOG", "0", 1); } } g_x_nosetmemo = (e = getenv("DM_VK_X_NOSETMEMO")) && atoi(e); g_x_setverify = (e = getenv("DM_VK_X_SETVERIFY")) && atoi(e);
-    g_x_nskipvs = 0; for (const char *q = getenv("DM_VK_X_SKIPVS"); q && *q && g_x_nskipvs < 8;) { char *n; uint64_t v = strtoull(q, &n, 16); if (n == q) break; if (v) g_x_skipvs[g_x_nskipvs++] = v; q = *n ? n + 1 : n; } }
+    g_x_nskipvs = 0; for (const char *q = getenv("DM_VK_X_SKIPVS"); q && *q && g_x_nskipvs < 8;) { char *n; uint64_t v = strtoull(q, &n, 16); if (n == q) break; if (v) g_x_skipvs[g_x_nskipvs++] = v; q = *n ? n + 1 : n; }
+    g_nskipfs = 0; for (const char *q = getenv("DM_VK_SKIP_FS"); q && *q && g_nskipfs < 8;) { char *n; uint64_t v = strtoull(q, &n, 16); if (n == q) break; if (v) g_skipfs[g_nskipfs++] = v; q = *n ? n + 1 : n; }
+    alias_read(); }
 // ---------------- conditional rendering (profile render_cond) ----------------
 // As nvn_mtl.m (OP_RENDER_COND): SetRenderEnableConditional draws while the 64-bit counters of the reports at addr and addr + 16 are equal / differ, until SetRenderEnable(true).
 // Evaluated on the CPU at replay from the records in memory: a report replayed earlier in this submission is not written yet (that happens when the GPU completes), so a timestamp
@@ -1577,6 +1594,12 @@ static int set_memo_get(int st, vkshader_t *s, uint32_t *dofs) {
 }
 // dofs (at least s->ndyn entries): the dynamic offsets of the set's dynamic uniform buffers, in binding order as vkCmdBindDescriptorSets takes them
 // indirect_c0 (compute only): a fresh segment for this dispatch's GPU-written counts; never put mutable bytes in drv_shared's content cache.
+static uint64_t bind_alias(int st, const vkshader_t *s, const dmsv_bind *b, uint64_t h) {   // DM_VK_BIND_ALIAS (alias_read above)
+    for (int j = 0; j < g_nalias; j++) if (s->key == g_alias_key[j] && b->binding == g_alias_from[j])
+        for (int i = 0; i < s->nbind; i++) { const dmsv_bind *t = &s->b[i];
+            if (t->binding == g_alias_to[j] && t->kind == RK_TEX) return vk_tex_slot_handle(S.tex[st], S.img[st], (unsigned)t->reg); }
+    return h;
+}
 static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescriptorBufferInfo *indirect_c0) {
     // Check before descriptor memo hits: storage/unknown descriptors can write beyond tracked transfer ranges.
     if (vk_readback_ranges()) for (int i = 0; i < s->nbind; i++) {
@@ -1634,6 +1657,7 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
                 uint64_t h = b->kind == RK_TEX ? vk_tex_slot_handle(S.tex[st], S.img[st], (unsigned)b->reg) :
                              b->kind == RK_TEX_UBO ? mem_handle(ubo_word(st, b->reg, b->off + 8 * k)) : (b->off >= 0 ? c2_handle(st, b->off + 8 * k) : 0);
                 g_tex_sseq = b->kind == RK_TEX && b->reg >= 0 && b->reg < 256 ? S.tex_sseq[st][b->reg] : 0;
+                if (g_nalias && b->kind == RK_TEX && cnt == 1) h = bind_alias(st, s, b, h);
                 int num = tex_desc_for(st, b, h, &ii[nii + k], 0);
                 if (num && i < 64) { if (num == 1) g_num_um |= 1ull << i; else g_num_im |= 1ull << i; }
             }
@@ -1845,6 +1869,9 @@ static int prepare_draw(int prim, int indexed) {
     if (!S.sh[0]) { g_vkst.skip_prog++; VKRED_ONCE(50, "draw with a program whose shaders are not in the bundle: skipped"); return 0; }
     if (g_x_nogs && S.sh[2]) return 0;   // DM_VK_X_NOGS=1 (live, A/B): draws with a geometry shader are left out
     for (int i = 0; i < g_x_nskipvs; i++) if (S.sh[0]->key == g_x_skipvs[i]) return 0;   // DM_VK_X_SKIPVS=<key>[,<key>...] (live, up to 8): draws with these vertex shaders are left out
+    // DM_VK_SKIP_FS=<key>[,<key>...] (live, up to 8): draws with these pixel shaders are left out (diagnostics, as DM_VK_X_SKIPVS). A left-out full-screen pass keeps what its target
+    // held from earlier frames, so it cannot turn off an effect that rewrites a target every frame: Link's Awakening's depth-of-field composite looked the same without it (DM_VK_BIND_ALIAS does that)
+    for (int i = 0; i < g_nskipfs; i++) if (S.sh[1] && S.sh[1]->key == g_skipfs[i]) return 0;
     // A run of draws with rasterizer discard gets a pass of its own: the pass ends where such a run begins and where it ends (and begin_pass puts a barrier
     // before the next). They are vertex shaders that write memory the later draws read: Xenoblade Chronicles 3 transforms its meshes with point draws
     // (724ddce6 then 37d04447, cf66cef4), which share passes with its G-buffer draws. NVN's GPU runs draws in order; Adreno, a tiled GPU, runs the vertex

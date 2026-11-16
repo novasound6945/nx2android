@@ -1960,9 +1960,15 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
           if (!known && nseen < 4) { seen[nseen++] = o; if (!(o->crop[2] > 0 && o->crop[3] > 0)) LOG("[nvn] WindowCrop not set by the game at its window's first present: the whole window texture %dx%d is shown",
                                                                                                   (int)CTX(o->tex[idx])->d.width, (int)CTX(o->tex[idx])->d.height); } }
         o->done[idx] = nvn_fence_now();
-        if (nvn_async()) { nvn_job j = {JOB_PRESENT, present_itv(o), NULL, q, CTX(o->tex[idx]), present_period(o) / 1e9, {0}, &o->ticket[idx]}; memcpy(j.crop, o->crop, sizeof j.crop);
+        // The part of the window texture shown: the window's crop; with none set, the layer's (vi::SetLayerCrop, hle_vi.c) when it lies inside the texture. The Legend of Zelda:
+        // Link's Awakening never sets a window crop and crops its layer instead: switched to handheld while running it draws 1280x720 into its 1920x1080 window textures and
+        // crops the layer to that, and the whole texture was shown (its picture in a corner, the docked frames' leftovers around it). A layer crop the size of the texture changes nothing
+        int crop[4]; memcpy(crop, o->crop, sizeof crop);
+        if (!(crop[2] > 0 && crop[3] > 0)) { int lc[4]; void dm_vi_layer_crop(int c[4]); dm_vi_layer_crop(lc); const tex_t *wt = CTX(o->tex[idx]);
+            if (lc[2] > 0 && lc[3] > 0 && lc[0] + lc[2] <= (int)wt->d.width && lc[1] + lc[3] <= (int)wt->d.height) memcpy(crop, lc, sizeof crop); }
+        if (nvn_async()) { nvn_job j = {JOB_PRESENT, present_itv(o), NULL, q, CTX(o->tex[idx]), present_period(o) / 1e9, {0}, &o->ticket[idx]}; memcpy(j.crop, crop, sizeof j.crop);
             o->ticket[idx] = ASYNC_FENCE | (g_job_enq + 1); job_push(j); }   // (the job overwrites the ticket with the present's own when it runs)
-        else { o->ticket[idx] = mtl_present(CTX(o->tex[idx]), present_period(o) / 1e9, o->crop); pres_ticket_note(o->ticket[idx], present_itv(o)); }   // enqueue only, return immediately
+        else { o->ticket[idx] = mtl_present(CTX(o->tex[idx]), present_period(o) / 1e9, crop); pres_ticket_note(o->ticket[idx], present_itv(o)); }   // enqueue only, return immediately
     }
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);

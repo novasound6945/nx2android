@@ -46,16 +46,29 @@ static int64_t perf_now(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONI
 // DM_GPU_TURBO=1 (live, read every 60 presents): Adreno's GPU at its highest clock (thermal limits still apply) through the KGSL property libadrenotools'
 // adrenotools_set_turbo sets: power control off on /dev/kgsl-3d0; 0 gives it back. A frame held at 30 fps lets the GPU governor lower the clock until the work
 // fills the frame, so its GPU time says little about what 60 would need. Any Vulkan driver on KGSL (Qualcomm's, Turnip)
-static void gpu_turbo(void) {
-    static int on;   // what was last set
-    const char *e = getenv("DM_GPU_TURBO"); int want = e && atoi(e) > 0;
-    if (want == on) return;
-    struct { unsigned type; void *value; size_t size; } prop; uint32_t enable = !want;   // (kgsl.h kgsl_device_getproperty; KGSL_PROP_PWRCTRL 0xE: 0 = power control off)
+// The property belongs to the device, not to the file or the process: on a Retroid Pocket 6 the GPU stayed at 680 MHz after the game that turned it off had ended, asleep
+// and in every other app (an idle GPU read 680 MHz, 72% busy, until a game set it back). So the state is written once at the start whatever it is (a previous run killed
+// with it off leaves it so), given back when the app goes to the background or ends (dm_perf_gpu_release), and taken again by the next check once the game presents
+static int g_turbo_on = -1;   // what was last set; -1: nothing yet (the device may hold a previous run's)
+static int kgsl_pwrctrl(uint32_t enable) {
+    struct { unsigned type; void *value; size_t size; } prop;   // (kgsl.h kgsl_device_getproperty; KGSL_PROP_PWRCTRL 0xE: 0 = power control off)
     prop.type = 0xE; prop.value = &enable; prop.size = sizeof enable;
     int fd = open("/dev/kgsl-3d0", O_RDWR); int r = fd < 0 ? -1 : ioctl(fd, _IOW(0x09, 0x32, prop), &prop);   // IOCTL_KGSL_SETPROPERTY
     if (fd >= 0) close(fd);
-    if (r) { LOG("[RED] [perf] DM_GPU_TURBO=%d: the GPU's power control could not be set (%s)", want, strerror(errno)); return; }
-    on = want; LOG("[perf] DM_GPU_TURBO=%d: %s", want, want ? "the GPU at its highest clock (power control off)" : "the GPU's own clock control again");
+    return r;
+}
+static void gpu_turbo(void) {
+    const char *e = getenv("DM_GPU_TURBO"); int want = e && atoi(e) > 0;
+    if (want == g_turbo_on) return;
+    if (kgsl_pwrctrl(!want)) {   // (no KGSL, a Mali device: only a wanted turbo is worth a red line)
+        if (want) LOG("[RED] [perf] DM_GPU_TURBO=%d: the GPU's power control could not be set (%s)", want, strerror(errno));
+        g_turbo_on = want; return; }
+    if (want || g_turbo_on >= 0) LOG("[perf] DM_GPU_TURBO=%d: %s", want, want ? "the GPU at its highest clock (power control off)" : "the GPU's own clock control again");
+    g_turbo_on = want;
+}
+void dm_perf_gpu_release(void) {   // the app goes to the background or ends: the GPU's own clock control again (front_android.c on_pause, on_destroy)
+    if (g_turbo_on != 1) return;
+    if (!kgsl_pwrctrl(1)) { g_turbo_on = 0; LOG("[perf] DM_GPU_TURBO: the GPU's own clock control again while the game is not in front"); }
 }
 
 static void hint_init(int64_t target) {
