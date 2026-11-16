@@ -10,6 +10,7 @@
 #include "vpx/vpx_decoder.h"
 #include "vpx/vp8dx.h"
 #include "hle_movie_avc.h"   // H.264 on VideoToolbox
+#include "yuv_neon.h"         // YUV → RGBA rows (Android arm64)
 #include <AudioToolbox/AudioToolbox.h>   // AAC
 // Vorbis (movie audio tracks, Link's Awakening): stb_vorbis, built into this file (dm/third_party/stb_vorbis); only its push-data API, floats out
 #define STB_VORBIS_NO_STDIO
@@ -317,7 +318,22 @@ static void md_rgba(const vpx_image_t *im, uint8_t *dst, int w, int h) {
     for (int y = 0; y < ch; y++) {
         const uint8_t *py = im->planes[0] + (size_t)y * im->stride[0], *pu = im->planes[1] + (size_t)(y >> 1) * im->stride[1], *pv = im->planes[2] + (size_t)(y >> 1) * im->stride[2];
         uint8_t *o = dst + (size_t)y * w * 4;
-        for (int x = 0; x < cw; x++) {
+        int x = 0;
+#ifdef DM_YUV_NEON
+        { dm_yuv_k k = {Y, y0, RV, GU, GV, BU, 32768, 16};
+          if (dm_yuv_neon_on()) for (; x + 16 <= cw; x += 16) dm_yuv16(&k, vld1q_u8(py + x), vld1_u8(pu + (x >> 1)), vld1_u8(pv + (x >> 1)), o + 4 * x);
+          static int checked; if (!checked && !y && x) {   // the first picture's first row once more through the scalar loop below: the NEON pixels must match it byte for byte
+              checked = 1; int bad = -1;
+              for (int i = 0; i < x && bad < 0; i++) {
+                  int l = (py[i] - y0) * Y, u = pu[i >> 1] - 128, v = pv[i >> 1] - 128;
+                  int r = (l + RV * v + 32768) >> 16, g = (l - GU * u - GV * v + 32768) >> 16, b = (l + BU * u + 32768) >> 16;
+                  if (o[4 * i] != CL(r) || o[4 * i + 1] != CL(g) || o[4 * i + 2] != CL(b) || o[4 * i + 3] != 255) bad = i;
+              }
+              if (bad >= 0) LOG("[RED] movie: the NEON YUV to RGBA conversion differs from the scalar one at pixel %d of the first row", bad);
+              else LOG("[movie] NEON YUV to RGBA conversion: the first row matches the scalar conversion (%d pixels)", x);
+          } }
+#endif
+        for (; x < cw; x++) {
             int l = (py[x] - y0) * Y, u = pu[x >> 1] - 128, v = pv[x >> 1] - 128;
             int r = (l + RV * v + 32768) >> 16, g = (l - GU * u - GV * v + 32768) >> 16, b = (l + BU * u + 32768) >> 16;
             o[4 * x] = (uint8_t)CL(r); o[4 * x + 1] = (uint8_t)CL(g); o[4 * x + 2] = (uint8_t)CL(b); o[4 * x + 3] = 255;
