@@ -681,7 +681,7 @@ static void ov_render(VkCommandBuffer cb, int mode, int menu, int fps) {
         }
     }
     for (int i = 0; i < OV_N; i++) if (OV_CTLS[i].kind == OV_MENU && mode) {   // the menu button, on top of the controls, where the player put it
-        float ma = mode == 1 && (menu < 0 || edit) ? fmaxf(op, 0.5f) : OV_MENU_ALPHA;   // (findable at any opacity)
+        float ma = menu < 0 || edit ? fmaxf(op, 0.2f) : OV_MENU_ALPHA;   // the gamepad's opacity, alone on the screen too (findable at any opacity)
         if (th) { if (!tbound) { vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_ov.layout, 0, 1, &g_tt[g_ov.lay].set, 0, NULL); tbound = 1; }
                   ov_theme_menu(cb, th, i, ma); continue; }
         const ov_ctl *c = &OV_CTLS[i]; float b[4], g = ov_glow(dm_overlay_pressed(i, 0), now); ov_box(c, W, H, b);
