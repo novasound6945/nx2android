@@ -821,7 +821,7 @@ class Port:
         out = self.aw / 'external-activity'; classes, dex = out / 'classes', out / 'dex'
         shutil.rmtree(out, ignore_errors=True); classes.mkdir(parents=True); dex.mkdir()
         sources = sorted((DM / 'android/java/org/nx2a').glob('*.java'))
-        nsp.run([javac, '-source', '8', '-target', '8', '-classpath', platform, '-d', classes, *sources], self.logs / 'android_external_java.log', env=self.env)
+        nsp.run([javac, '-encoding', 'UTF-8', '-source', '8', '-target', '8', '-classpath', platform, '-d', classes, *sources], self.logs / 'android_external_java.log', env=self.env)   # (-encoding: the sources are UTF-8, and javac reads them in the system's code page otherwise: cp949 on a Korean Windows fails on their non-ASCII characters)
         nsp.run([d8, '--min-api', '29', '--lib', platform, '--output', dex, *sorted(classes.rglob('*.class'))], self.logs / 'android_external_dex.log', env=self.env)
         activity = 'KeyboardExternalActivity' if self.o.native_keyboard else 'ExternalActivity'
         return ['--dex', dex / 'classes.dex', '--activity', 'org.nx2a.' + activity if self.o.external_display else 'org.nx2a.GameActivity']
