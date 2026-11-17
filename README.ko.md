@@ -1,18 +1,47 @@
-# nx2android (개인 포크) — 한국어 안내
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.svg">
+    <img alt="nx2android" src="docs/images/logo.svg" height="140">
+  </picture>
+</h1>
 
-[English README](README.md)
+<p align="center">
+  <a href="README.md">English</a> &nbsp;·&nbsp; <b>한국어</b>
+</p>
+
+<p align="center">
+  <a href="https://github.com/shirai91/nx2android"><img alt="shirai91/nx2android의 포크" src="https://img.shields.io/badge/fork%20of-shirai91%2Fnx2android-2f6fed"></a>
+  <img alt="기기: Retroid Pocket 6, Nova" src="https://img.shields.io/badge/devices-Retroid%20Pocket%206%20%C2%B7%20Nova-e8590c">
+  <img alt="GPU: Adreno 740" src="https://img.shields.io/badge/GPU-Adreno%20740-c92a2a">
+  <img alt="드라이버: Turnip" src="https://img.shields.io/badge/driver-Turnip-7048e8">
+  <img alt="라이선스: MIT" src="https://img.shields.io/badge/license-MIT-2b8a3e">
+</p>
+
+> [!IMPORTANT]
+> **개인 포크이며 원본 프로젝트가 아닙니다.** nx2android는 [shirai91](https://github.com/shirai91)과 기여자들의 작업이고, seedds의 [nxnative](https://github.com/seedds/nxnative) 위에 만들어졌습니다. 로더, 호스트, NVN→Vulkan 리플레이, porter, 그리고 여기 있는 게임 프로파일 거의 전부가 그분들의 것입니다. 이 포크의 모든 것은 그 작업 위에 서 있으며 감사드립니다. 릴리스·전체 게임 목록·지원은 **[shirai91/nx2android](https://github.com/shirai91/nx2android)** 로 가세요.
+
+| | |
+|---|---|
+| 🎯 **대상 기기** | **Retroid Pocket 6**와 **Retroid Pocket Nova**(Snapdragon 8 Gen 2, **Adreno 740**) + **Turnip** Vulkan 드라이버뿐입니다. 모든 기본값, 프로파일 설정, 측정값이 이 GPU 기준이고 다른 기기에서는 아무것도 시험하지 않습니다. 다른 기기에서는 될 수도, 업스트림보다 나쁠 수도, 아예 안 될 수도 있으니 업스트림을 쓰세요. |
+| 🧩 **이 포크는** | 그 기기들에서 게임 몇 개를 더 띄우고 필요했던 수정을 얹은 것입니다. 업스트림 `main`과 계속 병합하며, 작업은 `ports` 브랜치에 있고 같은 MIT 라이선스를 따릅니다. 개발은 Windows PC에서 합니다. |
+| 🛠️ **누구를 위한 것** | 받아서 자기에게 맞게 고쳐 쓰려는 분들을 위한 것입니다. 있는 그대로 제공하며 릴리스도 지원도 없습니다. 체크아웃해서 실행하세요([docs/DEVELOPMENT_GUIDE.md](docs/DEVELOPMENT_GUIDE.md)). |
+| ⚖️ **책임** | 게임도, 키도, 거기서 추출한 것도 들어 있지 않고 그런 곳으로 연결하지도 않습니다. 자기 콘솔에서 게임과 키를 덤프하는 일, 포팅하는 게임을 소유하는 일, 사는 곳의 법이 허용하는 범위는 전적으로 각자의 책임입니다. 만든 APK와 데이터 팩은 공유하지 마세요. |
+| 🐞 **문제가 생기면** | 이 포크의 변경이 원인이라고 보고, 업스트림이 아니라 여기에 알려 주세요. |
+
+<p align="center">
+  <b>이 포크가 더한 것</b><br>
+  <a href="#이-포크에서-띄운-게임">게임</a> &nbsp;·&nbsp;
+  <a href="#첫-실행-때-셰이더-준비">셰이더 준비</a> &nbsp;·&nbsp;
+  <a href="#게임-데이터를-내-서버에서-받기">내 서버에서 데이터 받기</a> &nbsp;·&nbsp;
+  <a href="#그-밖에-이-포크에서-바뀐-것">그 밖의 변경</a> &nbsp;·&nbsp;
+  <a href="docs/PORTING_NOTES.md">포팅 노트(영어)</a>
+</p>
+
+---
 
 자기가 가진 닌텐도 스위치 게임을 안드로이드로 네이티브 포팅하는 도구입니다. 게임의 arm64 코드가 기기에서 그대로 실행되고, 스위치의 시스템 서비스는 호스트가 대신하며, NVN 그래픽은 Vulkan으로 다시 그려집니다. 게임 파일과 키는 직접 준비해야 하고, 이 저장소에는 어떤 게임의 것도 들어 있지 않습니다.
 
 이 문서는 **이 포크에서 달라진 부분**만 한국어로 옮긴 것입니다. 도구 설치와 사용법, 세이브, 원본이 지원하는 게임 전체 목록은 [영어 README](README.md)와 [packaging/INSTALL.md](packaging/INSTALL.md)를 보세요.
-
-## 먼저 읽어 주세요
-
-**이것은 개인 포크이고 원본 프로젝트가 아닙니다.** nx2android는 [shirai91](https://github.com/shirai91)과 기여자들의 작업이며, seedds의 [nxnative](https://github.com/seedds/nxnative) 위에 만들어졌습니다. 로더, 호스트, NVN→Vulkan 리플레이, porter, 그리고 여기 있는 게임 프로파일 거의 전부가 그분들의 것입니다. 이 포크의 모든 것은 그 작업 위에 서 있고, 감사하게 생각합니다. 릴리스, 지원 게임 전체 목록, 지원은 **[shirai91/nx2android](https://github.com/shirai91/nx2android)** 로 가세요. 여기서 뭔가 잘못 동작하면 이 포크의 변경이 원인이라고 보고, 업스트림이 아니라 여기에 알려 주세요.
-
-**이 포크는 무엇인가.** 제가 가진 기기에서 게임 몇 개를 더 띄우고 그에 필요했던 수정을 얹은 것입니다. 업스트림 `main`과 계속 병합하며, 작업은 `ports` 브랜치에 있고 같은 MIT 라이선스를 따릅니다. **대상은 Retroid Pocket 6와 Retroid Pocket Nova(Snapdragon 8 Gen 2, Adreno 740)에 Turnip Vulkan 드라이버를 쓰는 구성뿐입니다.** 여기 있는 모든 기본값, 프로파일 설정, 측정값은 그 GPU에 맞춰 고른 것이고, 다른 기기에서는 아무것도 시험하지 않습니다. 다른 기기에서는 될 수도 있고, 업스트림보다 나쁠 수도 있고, 아예 안 될 수도 있습니다. 그런 기기는 업스트림을 쓰세요. 개발은 Windows PC에서 합니다. 자체 릴리스는 없으니 체크아웃해서 실행하세요([docs/DEVELOPMENT_GUIDE.md](docs/DEVELOPMENT_GUIDE.md)). 게임별로 무엇이 깨졌고 왜 그랬는지는 [docs/PORTING_NOTES.md](docs/PORTING_NOTES.md)(영어)에 있습니다.
-
-**누구를 위한 것이고, 책임은 누구에게 있는가.** 이 포크는 받아서 자기에게 맞게 고쳐 쓰려는 사람들에게 있는 그대로 제공합니다. 지원이나 특정 목적에 대한 적합성은 약속하지 않습니다. 게임도, 키도, 거기서 추출한 어떤 것도 들어 있지 않고 그런 곳으로 연결하지도 않습니다. 자기 콘솔에서 게임과 키를 덤프하는 일, 포팅하는 게임을 소유하는 일, 사는 곳의 법이 무엇을 허용하는지는 전적으로 각자가 책임질 몫입니다. 만든 APK와 데이터 팩은 공유하지 마세요.
 
 ## 이 포크에서 띄운 게임
 

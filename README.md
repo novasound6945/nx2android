@@ -5,17 +5,46 @@
   </picture>
 </h1>
 
+<p align="center">
+  <b>English</b> &nbsp;·&nbsp; <a href="README.ko.md">한국어</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/shirai91/nx2android"><img alt="fork of shirai91/nx2android" src="https://img.shields.io/badge/fork%20of-shirai91%2Fnx2android-2f6fed"></a>
+  <img alt="devices: Retroid Pocket 6 and Nova" src="https://img.shields.io/badge/devices-Retroid%20Pocket%206%20%C2%B7%20Nova-e8590c">
+  <img alt="GPU: Adreno 740" src="https://img.shields.io/badge/GPU-Adreno%20740-c92a2a">
+  <img alt="driver: Turnip" src="https://img.shields.io/badge/driver-Turnip-7048e8">
+  <img alt="license: MIT" src="https://img.shields.io/badge/license-MIT-2b8a3e">
+</p>
+
+> [!IMPORTANT]
+> **A personal fork, not the original project.** nx2android is the work of [shirai91](https://github.com/shirai91) and its contributors, built on [nxnative](https://github.com/seedds/nxnative) by seedds. Everything here stands on their work, with thanks. Releases, the full game list and support: **[shirai91/nx2android](https://github.com/shirai91/nx2android)**.
+>
+> **개인 포크이며 원본 프로젝트가 아닙니다.** nx2android는 [shirai91](https://github.com/shirai91)과 기여자들의 작업이고, seedds의 [nxnative](https://github.com/seedds/nxnative) 위에 만들어졌습니다. 이 포크의 모든 것은 그 작업 위에 서 있으며 감사드립니다. 릴리스·전체 게임 목록·지원은 **[shirai91/nx2android](https://github.com/shirai91/nx2android)** 로 가세요.
+
+| | English | 한국어 |
+|---|---|---|
+| 🎯 **Target** | Only the **Retroid Pocket 6** and **Retroid Pocket Nova** (Snapdragon 8 Gen 2, **Adreno 740**) with a **Turnip** Vulkan driver. Every default and measurement is chosen for that GPU; nothing is tested elsewhere. Other devices: use upstream. | 대상은 **Retroid Pocket 6**와 **Retroid Pocket Nova**(Snapdragon 8 Gen 2, **Adreno 740**) + **Turnip** 드라이버뿐입니다. 모든 기본값과 측정값이 이 GPU 기준이고 다른 기기는 시험하지 않습니다. 다른 기기는 업스트림을 쓰세요. |
+| 🧩 **What it is** | A few more games brought up on those devices and the fixes they needed, kept merged with upstream's `main`. The work is on the `ports` branch, under the same MIT license. | 그 기기들에서 게임 몇 개를 더 띄우고 필요했던 수정을 얹은 것입니다. 업스트림 `main`과 계속 병합하며, 작업은 `ports` 브랜치에 있고 같은 MIT 라이선스입니다. |
+| 🛠️ **Who it is for** | People who want to take it and adapt it for themselves. Offered as it is: no releases (run from the checkout, [guide](docs/DEVELOPMENT_GUIDE.md)), no support. | 받아서 자기에게 맞게 고쳐 쓰려는 분들을 위한 것입니다. 있는 그대로 제공하며 릴리스도 지원도 없습니다(체크아웃해서 실행, [안내](docs/DEVELOPMENT_GUIDE.md)). |
+| ⚖️ **Your responsibility** | No games, no keys, nothing extracted from either, and no links to any. Dumping from your own console, owning the games you port and what your law allows are yours alone to answer for. [More](#keys-and-game-files) | 게임도 키도 거기서 추출한 것도 없고 그런 곳으로 연결하지도 않습니다. 자기 콘솔에서 덤프하는 일, 게임을 소유하는 일, 사는 곳의 법이 허용하는 범위는 전적으로 각자의 책임입니다. [자세히](#keys-and-game-files) |
+| 🐞 **Problems** | Assume this fork's changes are the cause and report them here, not upstream. | 이 포크의 변경이 원인이라고 보고, 업스트림이 아니라 여기에 알려 주세요. |
+
+<p align="center">
+  <b>What this fork adds</b> &nbsp;/&nbsp; <b>이 포크가 더한 것</b><br>
+  <a href="#games-brought-up-in-this-fork">Games · 게임</a> &nbsp;·&nbsp;
+  <a href="#shader-preparation-at-the-first-launch">Shader preparation · 셰이더 준비</a> &nbsp;·&nbsp;
+  <a href="#the-games-data-from-your-own-server">Data from your server · 내 서버에서 데이터 받기</a> &nbsp;·&nbsp;
+  <a href="#what-else-this-fork-changes">The rest · 그 밖의 변경</a> &nbsp;·&nbsp;
+  <a href="docs/PORTING_NOTES.md">Porting notes · 포팅 노트</a>
+</p>
+
+---
+
 Port your own Nintendo Switch games to Android, natively: the game's own arm64 code runs on the device, with the Switch's system services stood in for by a host and NVN graphics replayed on Vulkan. Pick the game's folder, click **Port**, and get an APK plus the game's data, installed on your device if you like. Bring your own game files and keys; nothing from any game is in this repository.
 
 This is the Android port of [nxnative](https://github.com/seedds/nxnative), which does the same on iPhone and iPad. Supported games: [Games](#games).
 
-> 한국어 안내: [README.ko.md](README.ko.md)
->
-> **This is a personal fork, not the original project.** nx2android is the work of [shirai91](https://github.com/shirai91) and its contributors, built on [nxnative](https://github.com/seedds/nxnative) by seedds: the loader, the host, the NVN-to-Vulkan replay, the porter and nearly every game profile here are theirs. Everything in this fork stands on that work, and I am grateful for it. For releases, the full list of supported games and support, go to **[shirai91/nx2android](https://github.com/shirai91/nx2android)**. If something here misbehaves, assume this fork's changes are the cause and report it here, not upstream.
->
-> **What this fork is.** A few more games brought up on the devices I own, and the fixes those needed, kept merged with upstream's `main`; the work is on the `ports` branch and stays under the same MIT license. **Its only targets are the Retroid Pocket 6 and the Retroid Pocket Nova (Snapdragon 8 Gen 2, Adreno 740) with a Turnip Vulkan driver**: every default, profile row and measurement here is chosen for that GPU, and nothing is tested on any other device. On another device it may work, work worse than upstream, or not at all; upstream is the place for those. It is developed on a Windows PC. What it adds: [the games below](#games-brought-up-in-this-fork), [shader preparation at the first launch](#shader-preparation-at-the-first-launch), [the game's data from your own server](#the-games-data-from-your-own-server) and [the rest](#what-else-this-fork-changes). It has no releases of its own: run it from the checkout ([docs/DEVELOPMENT_GUIDE.md](docs/DEVELOPMENT_GUIDE.md)). Notes on what broke and why, game by game: [docs/PORTING_NOTES.md](docs/PORTING_NOTES.md).
->
-> **Who it is for, and whose responsibility.** This fork is offered as it is to people who want to take it and adapt it for themselves; it promises no support and no fitness for any purpose. It contains no games, no keys and nothing extracted from either, and it links to none. Dumping your games and keys from your own console, owning the games you port, and what the law where you live allows are yours alone to answer for: [Keys and game files](#keys-and-game-files).
 
 ## Games
 
