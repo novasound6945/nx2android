@@ -44,7 +44,8 @@ def _parser():
                          "(android.tsv sysdata: Mario Kart 8 Deluxe's Mii heads come from MiiModel); never shipped with the tool (default: the configured one)")
     po.add_argument('--vercode-offset', type=int, default=None, metavar='N',
                     help='add N (0-65535) to the APK\'s versionCode, so a rebuild of the same game version installs over a build with a higher one and keeps its saves '
-                         '(default: $NX2A_VERCODE_OFFSET, else 0)')
+                         '(default: $NX2A_VERCODE_OFFSET, else the game's build number: one more than this computer's last build of it). '
+                         'N above 0 is also shown after the game's version: 1.0.4-3')
     po.add_argument('--alias-headroom', type=int, default=None, metavar='GB',
                     help='GB (0-48) of extra guest address space (the alias region) for a game with virtual address memory, for a game whose log shows '
                          '"AllocateAddressRegion refused (0x1803)" before it crashes; it uses no memory (default: 8 for a game version the profile was not '
@@ -189,8 +190,8 @@ def _with_progress(mode, fn):
 def cmd_port(a):
     from porter import pipeline
     offset = a.vercode_offset
-    if offset is None:
-        env = os.environ.get('NX2A_VERCODE_OFFSET', '').strip() or '0'
+    if offset is None and os.environ.get('NX2A_VERCODE_OFFSET', '').strip():
+        env = os.environ['NX2A_VERCODE_OFFSET'].strip()
         try: offset = int(env)
         except ValueError: print(f'NX2A_VERCODE_OFFSET is not a number: {env}', file=sys.stderr); return 2
     if (a.romfs_at is not None or a.romfs_push) and not a.install: print('--romfs-at and --romfs-push are install options: add --install, or run porter install after the port', file=sys.stderr); return 2

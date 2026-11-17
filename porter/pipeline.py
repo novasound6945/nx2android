@@ -103,6 +103,20 @@ def version_code(ver, offset=0):
     return nsp.vnum(ver) + 1 + offset
 
 
+def build_number(package, offset=None):
+    """The build number of this port of a game: the versionCode offset, shown after the game's version (1.0.4-3). None counts up from this computer's last build of the
+    package (builds.json in the player's folder), so each build installs over the one before and can be told from it; a number given (--vercode-offset) is taken as it is
+    and remembered when it is higher"""
+    f = paths.user_dir() / 'builds.json'
+    try: seen = json.loads(f.read_text(encoding='utf-8'))
+    except (OSError, ValueError): seen = {}
+    last = seen.get(package, 0)
+    n = min(last + 1, VERCODE_OFFSET_MAX) if offset is None else offset
+    if n > last:
+        seen[package] = n; f.parent.mkdir(parents=True, exist_ok=True); f.write_text(json.dumps(seen, indent=1, sort_keys=True), encoding='utf-8')
+    return n
+
+
 ALIAS_HEADROOM, ALIAS_HEADROOM_MAX = 8 << 30, 48   # the automatic headroom (bytes); the most --alias-headroom takes (GB: a 64 GB block with Engage's 5 GB layout)
 def alias_headroom_gb(gb):   # --alias-headroom checked: None (automatic) or 0 .. ALIAS_HEADROOM_MAX GB
     if gb is not None and not 0 <= gb <= ALIAS_HEADROOM_MAX: raise BuildError(f'--alias-headroom {gb}: give 0 to {ALIAS_HEADROOM_MAX} GB')
@@ -214,7 +228,7 @@ class Port:
         o = self.o
         o.folder = Path(o.folder).expanduser().resolve()
         if not o.folder.is_dir(): raise BuildError(f'not a folder: {o.folder}')
-        version_code('v0', o.vercode_offset); alias_headroom_gb(o.alias_headroom)   # an offset or headroom out of range fails now, not after the shaders
+        version_code('v0', o.vercode_offset or 0); alias_headroom_gb(o.alias_headroom)   # an offset or headroom out of range fails now, not after the shaders
         if o.vulkan_driver:
             o.vulkan_driver = Path(o.vulkan_driver).expanduser().resolve()
             if not o.vulkan_driver.is_file() or o.vulkan_driver.suffix != '.so': raise BuildError(f'--vulkan-driver: not a .so library: {o.vulkan_driver}')
@@ -793,15 +807,17 @@ class Port:
         stem = app_stem(self.g, self.app_name)
         self.apk_path = self.o.out / f'{stem}.apk'; self.o.out.mkdir(parents=True, exist_ok=True)
         icon = self.icon()
-        code = version_code(self.pkg_ver, self.o.vercode_offset)
-        if self.o.vercode_offset: say(f'versionCode {code} ({self.pkg_ver} + 1 + offset {self.o.vercode_offset})')
+        offset = build_number(self.package, self.o.vercode_offset)
+        code = version_code(self.pkg_ver, offset)
+        name = f'{self.display}-{offset}' if offset else self.display
+        if offset: say(f'version {name}, versionCode {code} ({self.pkg_ver} + 1 + build number {offset})')
         external = self.external_activity() if self.o.external_display or self.o.native_keyboard else []
         driver = self.o.vulkan_driver
         if driver and driver.name != driver_lib_name(driver):   # packed under a lib*.so name (driver_lib_name), copied beside the host library
             driver = self.so.parent / driver_lib_name(driver); shutil.copyfile(self.o.vulkan_driver, driver)
             say(f'--vulkan-driver: {self.o.vulkan_driver.name} is packed as {driver.name} (Android extracts only lib*.so libraries)')
         nsp.run([PY, DM / 'android/apk/mkapk.py', self.so, self.apk_path, paths.signing_key(), '--package', self.package, '--label', self.app_name, '--lib', 'dmhost',
-                 '--version-code', str(code), '--version-name', self.display]
+                 '--version-code', str(code), '--version-name', name]
                 + (['--landscape'] if self.ap.landscape else []) + icon + self.theme() + self.ui_font() + self.data_source() + external + ([] if self.o.debug else ['--release'])
                 + (['--game-mode-performance'] if getattr(self, 'gl', None) is False else [])   # only NVN implements the mode's pacing policy; GL keeps OEM interventions
                 + [a for f in ([driver] + [self.so.parent / n for n in ADRENOTOOLS_LIBS] if driver else []) for a in ('--extra-so', str(f))],
