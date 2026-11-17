@@ -65,6 +65,8 @@ The source of each switch is in `nxnative/dm/android/` unless noted. Check the c
 | `[timeline]` lines | with `DM_NVN_ASYNC=1` (`gfx/nvn/hle_nvn.c`) | per frame: the game's gap between a sync wait and its next submission, queue delay, replay, and the GPU's tail after the replay |
 | `DM_NVN_SEQ=N` | live (`gfx/nvn/hle_nvn.c`) | the next N frames' submissions, fences, acquires, sync waits (with the time waited) and presents, in order, with thread and time: what the render thread waits for |
 | `DM_LAN_TRACE=1` | start-up (`host/hle_socket.c`, `host/hle_ldn.c`) | with `DM_LAN=1`: every `nn::socket` call (addresses, flags, result, errno) and every `nn::ldn` / `nn::nifm` query with its result, as `[lan]` lines |
+| `DM_ROMFS_PACK=<files>/packs/romfs.nxbi` | first rom mount (`host/hle_fs_pack.inc`) | the RomFS's small files read in place from tar packs (`android.tsv` `romfs_packs on`; the porter writes the row). Log: `fs: RomFS pack index … N files in M packs` and `fs mount rom: the RomFS pack is under it`; `[RED] fs: the RomFS pack index was not loaded (why)` means the game will not find its small files. A file in the RomFS folder wins over the pack's |
+| `DM_ROMFS_PACK_VERIFY=1` | first rom mount, with `DM_ROMFS_PACK` | after loading the index, read every file's tar header back from its pack (name and size) and log `RomFS pack check … (N s)`, or `[RED] … failed` with the first fault. Slow: one read per file |
 | `DM_HLECOUNT=<file>` | start-up (`host/hle_count.c`) | count every HLE call and write a TSV (category, name, count) at exit; the `ctl.txt` line `hlecount <file>` writes the counts so far, so two dumps around one action show the calls it made |
 
 ## Behaviour toggles (for A/B; defaults are the fixes)

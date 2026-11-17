@@ -10,9 +10,21 @@
 // fs_pack_fixture threads <index>                every file read by 8 threads at once, each from its own pk_open: "threads ok <files>", or "bad <path>"
 // fs_pack_fixture bench <index> <folder> <finds> "load_ms <ms> find_ms <ms> walk_ms <ms> entries <n>": pk_load, <finds> pk_find of the index's names in turn, one
 //                                                walk of <folder>
+// The host's side (dm/host/hle_fs_pack.inc, its part without host code, with HLE_FS_PACK_TEST; hle_fs.c's norm_rest, which test_fs_pack.py copies out of it into
+// hle_fs_norm_rest.c beside the fixture):
+// fs_pack_fixture key - <rest>...                "k <rest> <ok> <key>": the pack key of the path after "<mount>:", normalized as host_path_ex normalizes it
+// fs_pack_fixture merge <index> <folder> <mode> <name>...  the pack's entries a listing of <folder> adds (OpenDirectoryMode <mode>) to a RomFS folder whose own
+//                                                names are <name>..., as ReadDirectory gives them in batches of 7: "m <name> f|d <size>", then "count <n>"
+//                                                (fspk_count, as DirCount); "bad <what>" for a walk that does not end
 #define _GNU_SOURCE
 #include "fs_pack.h"
 #include <time.h>
+#define HLE_FS_PACK_TEST
+#include "hle_fs_pack.inc"
+#include "hle_fs_norm_rest.c"
+
+typedef struct { const char *guest, *phys; } name_ent;   // as hle_fs.c's directory index holds a folder's names: sorted by strcmp, a record of two pointers
+static int name_ent_cmp(const void *a, const void *b) { return strcmp(((const name_ent *)a)->guest, ((const name_ent *)b)->guest); }
 
 typedef struct { uint32_t h[8]; uint64_t n; uint8_t b[64]; size_t k; } sha;
 static const uint32_t K[64] = {
@@ -104,8 +116,35 @@ static void *thread_main(void *u) {
 static double ms(struct timespec a, struct timespec b) { return (double)(b.tv_sec - a.tv_sec) * 1e3 + (double)(b.tv_nsec - a.tv_nsec) / 1e6; }
 
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: fs_pack_fixture load|verify|walk|query|pread|open|threads|bench <index> ...\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: fs_pack_fixture load|verify|walk|query|pread|open|threads|bench|key|merge <index> ...\n"); return 2; }
     const char *mode = argv[1];
+    if (!strcmp(mode, "key")) {
+        for (int i = 3; i < argc; i++) {
+            char normed[1024], key[1024]; int ok = norm_rest(argv[i], normed, sizeof normed) && fspk_key(normed, key, sizeof key);
+            printf("k\t%s\t%d\t%s\n", argv[i], ok, ok ? key : "");
+        }
+        return 0;
+    }
+    if (!strcmp(mode, "merge") && argc >= 5) {
+        pk_t *pk = load(argv[2]);
+        if (!pk) return 0;
+        size_t nset = (size_t)(argc - 5); name_ent *set = malloc(sizeof *set * (nset ? nset : 1));
+        for (size_t i = 0; i < nset; i++) set[i] = (name_ent){argv[5 + i], argv[5 + i]};
+        qsort(set, nset, sizeof *set, name_ent_cmp);
+        int want = atoi(argv[4]); pk_cur start, cur; pk_dir_begin(pk, argv[3], &start); cur = start;
+        int64_t n = 0, limit = (int64_t)pk->nfiles + 1;   // a walk gives at most one entry per file: past that it does not end
+        for (int more = 1; more && n <= limit;) {
+            for (int b = 0; b < 7; b++) {   // a batch, as a ReadDirectory of 7 entries
+                const char *nm; size_t nl; int d; uint64_t sz;
+                if (!fspk_next(pk, &cur, set, nset, sizeof *set, want, &nm, &nl, &d, &sz)) { more = 0; break; }
+                printf("m\t%.*s\t%c\t%llu\n", (int)nl, nm, d ? 'd' : 'f', (unsigned long long)sz); n++;
+            }
+        }
+        if (n > limit) printf("bad\tthe walk of %s did not end\n", argv[3]);
+        printf("count\t%lld\n", (long long)fspk_count(pk, &start, set, nset, sizeof *set, want));
+        free(set); pk_free(pk);
+        return 0;
+    }
     if (!strcmp(mode, "bench") && argc == 5) {
         struct timespec t0, t1, t2, t3; char err[512];
         clock_gettime(CLOCK_MONOTONIC, &t0);

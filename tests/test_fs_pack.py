@@ -210,10 +210,17 @@ class Port(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, 'twice'): datapack.write_index(bad / datapack.PACK_INDEX, sizes, ents + ents[:1])
 
 
+def norm_rest_source():   # hle_fs.c's norm_rest as it is (the host's own normalization of the path after "<mount>:"), for the fixture's key mode
+    src = (REPO / 'nxnative/dm/host/hle_fs.c').read_text(encoding='utf-8')
+    start = src.index('static int norm_rest(')
+    return src[start:src.index('\n}\n', start) + 3]
+
+
 def fixture_exe(d):
     exe = d / 'fx'
-    r = subprocess.run([CC, '-O1', '-Wall', '-Wextra', '-std=gnu11', '-pthread', '-I', str(REPO / 'nxnative/dm/host'), str(Path(__file__).with_name('fs_pack_fixture.c')), '-o', str(exe)],
-                       capture_output=True, text=True)
+    (d / 'hle_fs_norm_rest.c').write_text(norm_rest_source(), encoding='utf-8')
+    r = subprocess.run([CC, '-O1', '-Wall', '-Wextra', '-std=gnu11', '-pthread', '-I', str(REPO / 'nxnative/dm/host'), '-I', str(d), str(Path(__file__).with_name('fs_pack_fixture.c')),
+                        '-o', str(exe)], capture_output=True, text=True)
     assert r.returncode == 0 and not r.stderr.strip(), r.stderr   # without a warning
     return exe
 
@@ -353,7 +360,47 @@ class Host(unittest.TestCase):
         self.assertEqual(self.fx('bench', idx, 'Data', 0)[0].split()[7], '401')   # Data: big/ and the 400 d*/ folders, each once
 
 
-QUERIES = ['top.bin', 'a/c.txt', 'a/c', 'a/c0', 'a/c/x', 'a', 'a/c/y', 'a/c.tx', 'a/c/', '/a/c.txt', 'A/c.txt', 'Data/big.bin', 'Data/edge.bin', 'Data/over.bin', 'nothing',
+    def test_host_keys(self):   # hle_fs_pack.inc's key of a path after "<mount>:": hle_fs.c's norm_rest (".", "..", repeated and end '/'), then no '/' in front
+        want = {'': '', '/': '', 'a/b': 'a/b', '/a/b': 'a/b', '/a//b/': 'a/b', '//a///b//': 'a/b', 'a/./b': 'a/b', './a': 'a', '/a/b/..': 'a', 'a/../b': 'b',
+                '/x/y/../../a/c.txt': 'a/c.txt', '/a/.hidden': 'a/.hidden', 'a/..b': 'a/..b', '/' + LONG: LONG, '..': None, '/..': None, 'a/../..': None, '/a/b/../../../c': None}
+        out = {f[1]: (f[3] if f[2] == '1' else None) for f in (ln.split('\t') for ln in self.fx('key', '-', *want))}
+        self.assertEqual(out, want)
+
+    def merged(self, index, folder, mode, real):   # the fixture's merge: [(name, kind, size)], count, bad lines
+        out = self.fx('merge', index, folder, mode, *real, timeout=120)
+        ents = [(f[1], f[2], int(f[3])) for f in (ln.split('\t') for ln in out) if f[0] == 'm']
+        return ents, int(next(ln for ln in out if ln.startswith('count\t')).split('\t')[1]), [ln for ln in out if ln.startswith('bad')]
+
+    def test_host_listing(self):   # a folder's listing: the pack's entries of the kinds asked for, less the RomFS folder's own names, in the pack's order; DirCount's count the same
+        kids = {}
+        for r, b in self.small.items():
+            parts = r.split('/')
+            for i in range(len(parts)):
+                c = kids.setdefault('/'.join(parts[:i]), {})
+                c[parts[i]] = None if i < len(parts) - 1 else len(b)
+        def want(folder, mode, real):
+            c = kids.get(folder, {})
+            order = sorted(c, key=lambda n: n.encode('utf-8') + (b'/' if c[n] is None else b''))
+            return [(n, 'd' if c[n] is None else 'f', c[n] or 0) for n in order if n not in real and mode & (1 if c[n] is None else 2)]
+        crowd_real = [f'f{i:05d}.bin' for i in range(0, self.CROWD, 20)] + ['f99999.bin']
+        cases = [('', 3, ['Data', 'top.bin', 'nothing']), ('', 1, []), ('', 2, []), ('a', 3, ['c']), ('a', 3, ['c.tx', 'c.txtx', 'c0x', 'b', 'c/']), ('a', 2, ['c.txt']),
+                 ('a', 1, ['c.txt']), ('a/c', 3, ['y']), ('Data', 3, ['big.bin', 'd0']), ('crowd', 3, crowd_real), ('crowd', 1, []), ('crowd', 2, crowd_real[:3]),
+                 ('nothing', 3, []), ('top.bin', 3, []), ('한글', 3, ['파일.bin']), ('한글', 3, ['파일'])]
+        if 'Case/A.bin' in self.small: cases += [('Case', 3, ['a.bin']), ('Case', 3, ['A.bin'])]
+        for folder, mode, real in cases:
+            ents, count, bad = self.merged(self.index, folder, mode, real)
+            self.assertEqual(bad, [], folder)
+            self.assertEqual(ents, want(folder, mode, set(real)), (folder, mode, real[:5]))
+            self.assertEqual(count, len(ents), (folder, mode))
+        self.assertEqual(len(self.merged(self.index, 'crowd', 3, crowd_real)[0]), self.CROWD - len(range(0, self.CROWD, 20)))
+        # a name longer than a DirectoryEntry holds (0x300 bytes) is not listed, nor counted; a folder of such a name not either
+        idx = self.t / 'longnames' / 'romfs.nxbi'
+        names = sorted(['x/' + 'n' * 0x300, 'x/' + 'o' * 0x301, 'x/ok', 'x/' + 'p' * 0x301 + '/f', 'x/q/f'], key=lambda n: n.encode())
+        datapack.write_index(idx, [1 << 30], [(nm, 0, 512 * (i + 1), 3) for i, nm in enumerate(names)])
+        self.assertEqual(self.merged(idx, 'x', 3, []), ([('n' * 0x300, 'f', 3), ('ok', 'f', 3), ('q', 'd', 0)], 3, []))
+
+
+QUERIES = ['top.bin','a/c.txt', 'a/c', 'a/c0', 'a/c/x', 'a', 'a/c/y', 'a/c.tx', 'a/c/', '/a/c.txt', 'A/c.txt', 'Data/big.bin', 'Data/edge.bin', 'Data/over.bin', 'nothing',
            'nothing/at/all', 'top.bin/x', 'empty.bin', LONG, '한글', '한글/파일.bin', '日本語/ファイル.dat', 'data/edge.bin', 'crowd', 'crowd/f00000.bin', 'crowd/f20499.bin',
            'crowd/f20500.bin', 'a/b/', 'Case/A.bin', 'Case/a.bin', 'case/a.bin', 'Case']
 
