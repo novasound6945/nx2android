@@ -44,8 +44,8 @@ def _parser():
                          "(android.tsv sysdata: Mario Kart 8 Deluxe's Mii heads come from MiiModel); never shipped with the tool (default: the configured one)")
     po.add_argument('--vercode-offset', type=int, default=None, metavar='N',
                     help='add N (0-65535) to the APK\'s versionCode, so a rebuild of the same game version installs over a build with a higher one and keeps its saves '
-                         '(default: $NX2A_VERCODE_OFFSET, else the game's build number: one more than this computer's last build of it). '
-                         'N above 0 is also shown after the game's version: 1.0.4-3')
+                         '(default: $NX2A_VERCODE_OFFSET, else the build number of the game: one more than the last build of it on this computer). '
+                         'N above 0 is also shown after the version of the game: 1.0.4-3')
     po.add_argument('--alias-headroom', type=int, default=None, metavar='GB',
                     help='GB (0-48) of extra guest address space (the alias region) for a game with virtual address memory, for a game whose log shows '
                          '"AllocateAddressRegion refused (0x1803)" before it crashes; it uses no memory (default: 8 for a game version the profile was not '
