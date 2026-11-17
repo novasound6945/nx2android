@@ -88,7 +88,7 @@ class Asset(unittest.TestCase):
     def test_subpath(self):
         self.assertEqual(publish.data_subpath('https://example.com/share/', 'https://example.com/share/zelda/1.1.0/'), 'zelda/1.1.0/')
         self.assertEqual(publish.data_subpath('https://example.com/share/', 'https://example.com/share/'), '')
-        for url in ('https://example.com/other/zelda/', 'https://example.com/portingx/zelda/', 'http://example.com/share/zelda/'):
+        for url in ('https://example.com/other/zelda/', 'https://example.com/sharex/zelda/', 'http://example.com/share/zelda/'):
             with self.assertRaisesRegex(BuildError, 'under --data-root', msg=url): publish.data_subpath('https://example.com/share/', url)
 
 
