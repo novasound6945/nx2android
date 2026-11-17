@@ -310,7 +310,12 @@ static _Atomic int64_t g_press_t[16], g_menu_t, g_stick_t[2];   // when each ove
 static _Atomic uint64_t g_touch_btn;   // the overlay buttons held, cleared by the menu or keyboard
 static int64_t mono_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec; }
 // A system input device can report itself as an active controller (issues #22, #210). The saved choice must still work, and the menu must stay reachable.
-int dm_overlay_visible(void) { return atomic_load(&g_set_overlay) && atomic_load(&g_overlay) ? 1 : 2; }
+// 0 while a controller is in use and neither the menu nor the layout editor is open: the menu button goes with the gamepad (the controller's Back / Mode / Menu
+// key opens the menu), and the next touch brings it back
+int dm_overlay_visible(void) {
+    if (!atomic_load(&g_overlay) && !atomic_load(&g_menu) && !atomic_load(&g_edit)) return 0;
+    return atomic_load(&g_set_overlay) && atomic_load(&g_overlay) ? 1 : 2;
+}
 int dm_overlay_layout(void) {   // the phone's layout in a window at least OV_PHONE_ASPECT wide for its height (overlay_layout.h)
     static int last_w = -1, last_h = -1, phone;
     ANativeWindow *w = phone_window(); int ww = w ? ANativeWindow_getWidth(w) : 0, wh = w ? ANativeWindow_getHeight(w) : 0;
