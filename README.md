@@ -22,13 +22,13 @@
 >
 > **개인 포크이며 원본 프로젝트가 아닙니다.** nx2android는 [shirai91](https://github.com/shirai91)과 기여자들의 작업이고, seedds의 [nxnative](https://github.com/seedds/nxnative) 위에 만들어졌습니다. 이 포크의 모든 것은 그 작업 위에 서 있으며 감사드립니다. 릴리스·전체 게임 목록·지원은 **[shirai91/nx2android](https://github.com/shirai91/nx2android)** 로 가세요.
 
-| | English | 한국어 |
-|---|---|---|
-| 🎯 **Target** | Only the **Retroid Pocket 6** and **Retroid Pocket Nova** (Snapdragon 8 Gen 2, **Adreno 740**) with a **Turnip** Vulkan driver. Every default and measurement is chosen for that GPU; nothing is tested elsewhere. Other devices: use upstream. | 대상은 **Retroid Pocket 6**와 **Retroid Pocket Nova**(Snapdragon 8 Gen 2, **Adreno 740**) + **Turnip** 드라이버뿐입니다. 모든 기본값과 측정값이 이 GPU 기준이고 다른 기기는 시험하지 않습니다. 다른 기기는 업스트림을 쓰세요. |
-| 🧩 **What it is** | A few more games brought up on those devices and the fixes they needed, kept merged with upstream's `main`. The work is on the `ports` branch, under the same MIT license. | 그 기기들에서 게임 몇 개를 더 띄우고 필요했던 수정을 얹은 것입니다. 업스트림 `main`과 계속 병합하며, 작업은 `ports` 브랜치에 있고 같은 MIT 라이선스입니다. |
-| 🛠️ **Who it is for** | People who want to take it and adapt it for themselves. Offered as it is: no releases (run from the checkout, [guide](docs/DEVELOPMENT_GUIDE.md)), no support. | 받아서 자기에게 맞게 고쳐 쓰려는 분들을 위한 것입니다. 있는 그대로 제공하며 릴리스도 지원도 없습니다(체크아웃해서 실행, [안내](docs/DEVELOPMENT_GUIDE.md)). |
-| ⚖️ **Your responsibility** | No games, no keys, nothing extracted from either, and no links to any. Dumping from your own console, owning the games you port and what your law allows are yours alone to answer for. [More](#keys-and-game-files) | 게임도 키도 거기서 추출한 것도 없고 그런 곳으로 연결하지도 않습니다. 자기 콘솔에서 덤프하는 일, 게임을 소유하는 일, 사는 곳의 법이 허용하는 범위는 전적으로 각자의 책임입니다. [자세히](#keys-and-game-files) |
-| 🐞 **Problems** | Assume this fork's changes are the cause and report them here, not upstream. | 이 포크의 변경이 원인이라고 보고, 업스트림이 아니라 여기에 알려 주세요. |
+| | |
+|---|---|
+| 🎯 | **Target: Retroid Pocket 6 and Retroid Pocket Nova only** (Snapdragon 8 Gen 2, Adreno 740) with a Turnip Vulkan driver. Every default and measurement is chosen for that GPU, and nothing is tested elsewhere. Other devices: use upstream.<br><br>**대상은 Retroid Pocket 6와 Retroid Pocket Nova뿐입니다** (Snapdragon 8 Gen 2, Adreno 740, Turnip 드라이버). 모든 기본값과 측정값이 이 GPU 기준이고 다른 기기는 시험하지 않습니다. 다른 기기는 업스트림을 쓰세요. |
+| 🧩 | **What it is.** A few more games brought up on those devices and the fixes they needed, kept merged with upstream's `main`. The work is on the `ports` branch, under the same MIT license.<br><br>**이 포크는** 그 기기들에서 게임 몇 개를 더 띄우고 필요했던 수정을 얹은 것입니다. 업스트림 `main`과 계속 병합하며, 작업은 `ports` 브랜치에 있고 같은 MIT 라이선스입니다. |
+| 🛠️ | **Who it is for.** People who want to take it and adapt it for themselves. Offered as it is: no releases (run from the checkout, [guide](docs/DEVELOPMENT_GUIDE.md)) and no support.<br><br>**받아서 자기에게 맞게 고쳐 쓰려는 분들을 위한 것입니다.** 있는 그대로 제공하며 릴리스도 지원도 없습니다(체크아웃해서 실행, [안내](docs/DEVELOPMENT_GUIDE.md)). |
+| ⚖️ | **Your responsibility.** No games, no keys, nothing extracted from either, and no links to any. Dumping from your own console, owning the games you port and what your law allows are yours alone to answer for. [More](#keys-and-game-files)<br><br>**책임은 각자에게 있습니다.** 게임도 키도 거기서 추출한 것도 없고 그런 곳으로 연결하지도 않습니다. 자기 콘솔에서 덤프하는 일, 게임을 소유하는 일, 사는 곳의 법이 허용하는 범위는 전적으로 각자의 몫입니다. [자세히](#keys-and-game-files) |
+| 🐞 | **Problems.** Assume this fork's changes are the cause and report them here, not upstream.<br><br>**문제가 생기면** 이 포크의 변경이 원인이라고 보고, 업스트림이 아니라 여기에 알려 주세요. |
 
 <p align="center">
   <b>What this fork adds</b> &nbsp;/&nbsp; <b>이 포크가 더한 것</b><br>
