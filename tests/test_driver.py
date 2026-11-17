@@ -144,6 +144,155 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(host.stale_sources(record + '\n' + '0' * 64 + '  ../../../../build/fpslock/patches.py', bdsp, modules=[fps, sdk_mod]), [])
 
 
+FILES = datapack.files_folder(PKG)
+LIBDIR = f'/data/app/{PKG}/lib/arm64'
+
+
+def elf(machine=183, cls=2):   # the first bytes of an ELF shared object (e_machine 183: arm64; 40: 32-bit ARM)
+    return b'\x7fELF' + bytes([cls, 1, 1]) + b'\0' * 9 + (3).to_bytes(2, 'little') + machine.to_bytes(2, 'little') + b'\0' * 100
+
+
+class SlotDevice(Adb):   # porter driver --push / --select / --list's made-up device: a file system of {path: bytes}, and the APK's extracted library folder
+    def __init__(self, env, apk_libs=('libdmhost.so', 'libadrenotools.so', 'libhook_impl.so', 'libvulkan.purple.so'), files=None):
+        super().__init__('adb'); self.serial = 'dev'; self.ops = []
+        self.fs = {f'{FILES}/env.txt': env.encode()} if env is not None else {}; self.fs.update(files or {})
+        self.apk_libs = apk_libs   # None: the folder cannot be listed
+    def pick(self): return 'dev'
+    def remote_sizes(self, rdir):
+        return {p[len(rdir) + 1:]: len(b) for p, b in self.fs.items() if p.startswith(rdir + '/')}
+    def run(self, *a, timeout=None, check=True, retries=3, encoding=None):
+        import shlex
+        a = [str(x) for x in a]; self.ops.append(a[0] if a[0] != 'shell' else a[1].split()[0])
+        if a[0] == 'push': self.fs[a[2]] = Path(a[1]).read_bytes(); return ''
+        if a[0] != 'shell': return ''
+        cmd = a[1]; w = shlex.split(cmd.split(';')[0].split(' 2>')[0])
+        if cmd.startswith('pm path'): return f'package:/data/app/{PKG}/base.apk\n'
+        if w[0] == 'cat': return self.fs.get(w[1], b'').decode('utf-8')
+        if w[0] == 'ls': return ('\n'.join(self.apk_libs) + '\nrc=0\n') if self.apk_libs is not None and w[1] == LIBDIR else 'rc=1\n'
+        if w[0] == 'stat': return f'{len(self.fs[w[-1]])}\n' if w[-1] in self.fs else ''
+        if w[0] == 'mv': self.fs[w[-1]] = self.fs.pop(w[-2]); return ''
+        if w[0] == 'rm': self.fs.pop(w[-1], None); return ''
+        return ''   # mkdir -p
+
+
+class SlotTest(unittest.TestCase):   # porter driver --push / --select / --list (porter/driver.py push_slot, select, listing): the drivers folder, no APK rebuilt
+    ENV = '# the pack\nDM_LANG=en-US\nDM_VK_DRIVER=libvulkan.purple.so\n# a player row\nDM_CTL=x\n'
+
+    def setUp(self):
+        self.t = Path(tempfile.mkdtemp(prefix='nx2a_slot_test_')); self.addCleanup(shutil.rmtree, self.t, ignore_errors=True)
+        from unittest import mock
+        p = mock.patch.object(driver, 'say', lambda *a, **k: None); p.start(); self.addCleanup(p.stop)
+
+    def so(self, name, body=b'turnip', machine=183):
+        f = self.t / name; f.write_bytes(elf(machine) + body); return f
+
+    def test_names(self):   # the rules vk_init drv_slot applies
+        for ok in ('turnip-25.so', 'libvulkan_freedreno.so', 'v.so', 'x' * 97 + '.so'): self.assertTrue(driver.slot_name_ok(ok), ok)
+        for bad in ('a/b.so', '../x.so', 'x..so', 'x.so.1', '.so', 'x' * 98 + '.so', ''): self.assertFalse(driver.slot_name_ok(bad), bad)
+
+    def test_push_so(self):
+        dev = SlotDevice(self.ENV); f = self.so('turnip-25.so')
+        out = driver.push_slot(dev, PKG, f)
+        self.assertEqual(out, {'package': PKG, 'name': 'turnip-25.so', 'size': f.stat().st_size})
+        self.assertEqual(dev.fs[f'{FILES}/drivers/turnip-25.so'], f.read_bytes())
+        self.assertFalse(any('.part' in p for p in dev.fs))   # pushed under another name, then moved
+        self.assertEqual(dev.fs[f'{FILES}/env.txt'].decode(), self.ENV)   # not selected
+        self.assertNotIn('install', dev.ops); self.assertNotIn('pull', dev.ops)   # no APK rebuilt
+        driver.push_slot(dev, PKG, f, 'other.so'); self.assertIn(f'{FILES}/drivers/other.so', dev.fs)
+        for bad in ('a/b.so', '../x.so', 'x.txt'):
+            with self.assertRaises(BuildError): driver.push_slot(dev, PKG, f, bad)
+        with self.assertRaises(BuildError) as e: driver.push_slot(dev, PKG, f, 'libvulkan.purple.so')   # the APK's driver's name: --select apk would load it
+        self.assertIn('--name', str(e.exception))
+
+    def test_push_not_arm64(self):
+        dev = SlotDevice(self.ENV)
+        for f in (self.so('arm32.so', machine=40), self.t / 'text.so'):
+            if f.name == 'text.so': f.write_bytes(b'not an ELF at all, just text')
+            with self.assertRaises(BuildError): driver.push_slot(dev, PKG, f)
+        (self.t / 'elf32.so').write_bytes(b'\x7fELF' + bytes([1, 1, 1]) + b'\0' * 9 + b'\x03\x00' + (183).to_bytes(2, 'little') + b'\0' * 40)
+        with self.assertRaises(BuildError): driver.push_slot(dev, PKG, self.t / 'elf32.so')
+        self.assertFalse(any('/drivers/' in p for p in dev.fs))
+
+    def zip(self, name, members):
+        z = self.t / name
+        with zipfile.ZipFile(z, 'w') as zf:
+            for n, b in members.items(): zf.writestr(n, b)
+        return z
+
+    def test_push_zip(self):
+        lib = elf() + b'mesa 25'
+        dev = SlotDevice(self.ENV)
+        z = self.zip('turnip.zip', {'meta.json': json.dumps({'schemaVersion': 1, 'name': 'Turnip', 'libraryName': 'libvulkan_freedreno.so'}), 'libvulkan_freedreno.so': lib, 'notes.txt': 'x'})
+        self.assertEqual(driver.push_slot(dev, PKG, z)['name'], 'libvulkan_freedreno.so'); self.assertEqual(dev.fs[f'{FILES}/drivers/libvulkan_freedreno.so'], lib)
+        z = self.zip('bare.zip', {'vulkan.ad07xx.so': lib, 'readme.md': 'x'})   # no meta.json: the only vulkan*.so
+        self.assertEqual(driver.push_slot(dev, PKG, z, 'ad07.so')['name'], 'ad07.so')
+        for name, members in (('two.zip', {'libvulkan_a.so': lib, 'vulkan.b.so': lib}), ('none.zip', {'readme.md': 'x'}),
+                              ('missing.zip', {'meta.json': json.dumps({'libraryName': 'libvulkan_x.so'}), 'libvulkan_y.so': lib}),
+                              ('x86.zip', {'meta.json': json.dumps({'libraryName': 'libvulkan_x.so'}), 'libvulkan_x.so': elf(62)})):
+            with self.assertRaises(BuildError, msg=name): driver.push_slot(dev, PKG, self.zip(name, members))
+        (self.t / 'bad.zip').write_bytes(b'PK not really')
+        with self.assertRaises(BuildError): driver.push_slot(dev, PKG, self.t / 'bad.zip')
+
+    def test_select(self):
+        slot = {f'{FILES}/drivers/turnip-25.so': elf()}
+        dev = SlotDevice(self.ENV, files=dict(slot))
+        out = driver.select(dev, PKG, 'turnip-25.so')
+        self.assertEqual((out['selected'], out['value']), ('drivers', 'turnip-25.so'))
+        self.assertEqual(dev.fs[f'{FILES}/env.txt'].decode(), self.ENV.replace('libvulkan.purple.so', 'turnip-25.so'))   # in place: comments, order, the rest as they were
+        self.assertEqual(driver.listing(dev, PKG), {'package': PKG, 'folder': f'{FILES}/drivers', 'drivers': [{'name': 'turnip-25.so', 'size': len(elf())}], 'selected': 'drivers', 'value': 'turnip-25.so'})
+        out = driver.select(dev, PKG, 'system'); self.assertEqual(out['value'], '')
+        self.assertEqual(dev.fs[f'{FILES}/env.txt'].decode(), self.ENV.replace('libvulkan.purple.so', ''))   # DM_VK_DRIVER= (the device's driver)
+        self.assertEqual(driver.listing(dev, PKG)['selected'], 'system')
+        out = driver.select(dev, PKG, 'apk'); self.assertEqual((out['selected'], out['value'], out['from']), ('apk', 'libvulkan.purple.so', 'the APK'))
+        self.assertEqual(dev.fs[f'{FILES}/env.txt'].decode(), self.ENV)   # back to what the pack had
+        self.assertEqual(driver.listing(dev, PKG)['selected'], 'apk')
+        for bad in ('missing.so', '../turnip-25.so', 'turnip'):
+            with self.assertRaises(BuildError, msg=bad): driver.select(dev, PKG, bad)
+        self.assertEqual(dev.fs[f'{FILES}/env.txt'].decode(), self.ENV)
+
+    def test_select_row_placement(self):
+        dev = SlotDevice('DM_LANG=en-US\nDM_CTL=x', files={f'{FILES}/drivers/t.so': elf()})   # no row, no final newline: appended on a line of its own
+        driver.select(dev, PKG, 't.so'); self.assertEqual(dev.fs[f'{FILES}/env.txt'].decode(), 'DM_LANG=en-US\nDM_CTL=x\nDM_VK_DRIVER=t.so\n')
+        self.assertEqual(driver.env_select('DM_VK_DRIVER=a.so\nX=1\nDM_VK_DRIVER=b.so\n#DM_VK_DRIVER=c.so\n', 't.so'), 'DM_VK_DRIVER=t.so\nX=1\nDM_VK_DRIVER=t.so\n#DM_VK_DRIVER=c.so\n')
+        self.assertEqual(driver.env_select('A=1\r\nDM_VK_DRIVER=a.so\r\n', ''), 'A=1\r\nDM_VK_DRIVER=\r\n')   # its line ending kept
+        self.assertEqual(driver.env_value('DM_VK_DRIVER=a.so\nDM_VK_DRIVER=b.so  \n'), 'b.so'); self.assertIsNone(driver.env_value('A=1\n'))
+        with self.assertRaises(BuildError): driver.select(SlotDevice(None), PKG, 'system')   # no env.txt: not installed
+
+    def test_select_apk_sources(self):
+        dev = SlotDevice(self.ENV, apk_libs=None, files={f'{FILES}/env.pack.txt': b'DM_VK_DRIVER=libvulkan_freedreno.so\n'})   # the library folder not listable: the downloaded pack's row
+        out = driver.select(dev, PKG, 'apk'); self.assertEqual(out['value'], 'libvulkan_freedreno.so'); self.assertIn('env.pack.txt', out['from'])
+        with self.assertRaises(BuildError) as e: driver.select(SlotDevice(self.ENV, apk_libs=None), PKG, 'apk')   # neither: nothing known to go back to
+        self.assertIn('not known', str(e.exception))
+        with self.assertRaises(BuildError): driver.select(SlotDevice(self.ENV, apk_libs=('libdmhost.so', 'libadrenotools.so')), PKG, 'apk')   # an APK without a driver
+        dev = SlotDevice(self.ENV, files={f'{FILES}/drivers/libvulkan.purple.so': elf()})   # a test driver named as the APK's would be loaded instead
+        with self.assertRaises(BuildError): driver.select(dev, PKG, 'apk')
+        self.assertEqual(driver.apk_driver(SlotDevice(self.ENV, apk_libs=('libdmhost.so', 'libVkLayer_khronos_validation.so', 'libvulkan_x.so')), PKG), ('libvulkan_x.so', 'the APK'))
+
+    def test_list(self):
+        dev = SlotDevice(self.ENV, files={f'{FILES}/drivers/b.so': b'12', f'{FILES}/drivers/a.so': b'1', f'{FILES}/drivers/.c.so.part': b'1', f'{FILES}/drivers/sub/d.so': b'1',
+                                          f'{FILES}/drivers/notes.txt': b'1'})
+        out = driver.listing(dev, PKG)
+        self.assertEqual(out['drivers'], [{'name': 'a.so', 'size': 1}, {'name': 'b.so', 'size': 2}]); self.assertEqual((out['selected'], out['value']), ('apk', 'libvulkan.purple.so'))
+        self.assertEqual(driver.listing(SlotDevice('DM_LANG=en-US\n'), PKG)['selected'], 'system')   # no row: the device's driver
+        self.assertEqual(dev.ops.count('push'), 0)
+
+    def test_cli_modes(self):   # which mode porter driver's options make, and the combinations it refuses (before any device)
+        from porter import cli
+        def mode(*argv): return cli._driver_mode(cli._parser().parse_args(['driver', *argv]))
+        self.assertEqual(mode('lib.so'), ('swap', None)); self.assertEqual(mode('--system'), ('swap', None))
+        self.assertEqual(mode('--push', 'x.zip'), ('push', None)); self.assertEqual(mode('--push', 'x.so', '--name', 'y.so', '--select'), ('push', None))
+        self.assertEqual(mode('--select', 'apk'), ('select', None)); self.assertEqual(mode('--list'), ('list', None))
+        for bad in ([], ['--select'], ['--push', 'x.so', '--select', 'other.so'], ['--list', '--select', 'apk'], ['lib.so', '--select', 'apk'], ['--select', 'apk', '--name', 'x.so']):
+            self.assertIsNone(mode(*bad)[0], bad)
+        for clash in (['lib.so', '--push', 'x.so'], ['--system', '--list'], ['--push', 'x.so', '--list']):
+            with self.assertRaises(SystemExit), contextlib_quiet(): cli._parser().parse_args(['driver', *clash])
+
+
+def contextlib_quiet():   # argparse's usage message off the test output
+    import contextlib, io
+    return contextlib.redirect_stderr(io.StringIO())
+
+
 class HostDevice(Adb):   # porter host's made-up device: a port's data pack (nx2a-data.json, mods/) and its installed APK
     def __init__(self, apk, files, debuggable=False):
         super().__init__('adb'); self.serial = 'dev'; self.apk, self.files, self.debuggable, self.ops, self.installed_apk = apk, files, debuggable, [], None

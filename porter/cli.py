@@ -94,10 +94,19 @@ def _parser():
     for x in (sa, sl, se, si):
         x.add_argument('--device', default='', help='adb serial (default: the configured device, else the only one)'); x.add_argument('--json', action='store_true')
         if x is not sa: x.add_argument('--package', default='', help='the app (default: the only ported game installed)')
-    dr = sub.add_parser('driver', help='another Vulkan driver for a port on the device, without the game files: its APK is rebuilt with the library and signed again (the saves stay)')
-    drg = dr.add_mutually_exclusive_group(required=True)
+    dr = sub.add_parser('driver', help='another Vulkan driver for a port on the device, without the game files: its APK is rebuilt with the library and signed again (the saves stay); '
+                                       '--push / --select / --list: test drivers in the app\'s drivers folder, no APK rebuilt')
+    drg = dr.add_mutually_exclusive_group()   # one of these (cmd_driver checks), or --select alone
     drg.add_argument('library', nargs='?', help='the driver library (.so, such as Mesa\'s Turnip); the app must have been ported with --vulkan-driver once')
     drg.add_argument('--system', action='store_true', help='no driver library: the device\'s own driver')
+    drg.add_argument('--push', default=None, metavar='FILE',
+                     help='a test tool: put a driver library (.so, or an AdrenoTools driver package .zip) in the app\'s drivers folder on the device, without rebuilding the APK '
+                          '(the APK\'s driver stays the reference); the app loads it once selected (--select), from its next start')
+    drg.add_argument('--list', action='store_true', help='the drivers folder\'s libraries and which driver env.txt selects (the drivers folder\'s, the APK\'s or the system\'s)')
+    dr.add_argument('--select', nargs='?', const='', default=None, metavar='NAME|apk|system',
+                    help='env.txt\'s DM_VK_DRIVER: a library of the drivers folder, apk (the APK\'s own driver) or system (the device\'s); with --push and no value, the one pushed. '
+                         'The next porter install may put the pack\'s DM_VK_DRIVER back (the pack\'s env.txt rows win): select again after an install')
+    dr.add_argument('--name', default='', help='with --push: the library\'s name in the drivers folder (default: its own; no / or .., ending in .so)')
     dr.add_argument('--package', default='', help='the app (default: the only ported game installed)')
     dr.add_argument('--device', default='', help='adb serial (default: the configured device, else the only one)'); dr.add_argument('--json', action='store_true')
     hs = sub.add_parser('host', help="a port on the device brought to this version's host, without the game files: its libdmhost.so is built again from the profile (the saves and the game's data stay)")
@@ -316,17 +325,43 @@ def cmd_saves(a):
     return 0
 
 
-def cmd_driver(a):   # porter driver and porter host: the installed APK rebuilt without the game files
+def _driver_mode(a):   # porter driver's mode: 'swap' (a library, or --system: the APK rebuilt), 'push', 'select', 'list'; or the usage error
+    if a.cmd != 'driver': return 'host', None
+    if a.push is not None: mode = 'push'
+    elif a.list: mode = 'list'
+    elif a.library is not None or a.system: mode = 'swap'
+    elif a.select is not None: mode = 'select'
+    else: return None, 'give a driver library, --system, --push FILE, --select NAME|apk|system or --list'
+    if mode == 'push' and a.select: return None, '--push takes --select without a value (the library it pushes)'
+    if mode == 'select' and not a.select: return None, '--select needs NAME, apk or system (without one only after --push)'
+    if mode in ('swap', 'list') and a.select is not None: return None, '--select goes alone, or with --push'
+    if a.name and mode != 'push': return None, '--name goes with --push'
+    return mode, None
+
+
+def cmd_driver(a):   # porter driver and porter host: the installed APK rebuilt without the game files; porter driver --push / --select / --list: the drivers folder (no APK rebuilt)
     import contextlib
     from porter import config, driver, host, paths, saves, toolchain
+    from porter.adb import AdbError
     from porter.upstream import BuildError
+    mode, err = _driver_mode(a)
+    if err: print(f'porter driver: {err}', file=sys.stderr); return 2
     try:
         with contextlib.redirect_stdout(sys.stderr if a.json else sys.stdout):   # with --json, stdout is the one JSON document
             cfg = config.load(); adb = saves.connect(toolchain.find_adb(cfg), a.device or cfg.get('device'))
-            lock = adb.hold(paths.user_dir())   # they reinstall the APK: not while porter install runs on the device
+            lock = adb.hold(paths.user_dir()) if mode != 'list' else None   # they reinstall the APK or write env.txt: not while porter install runs on the device
             try:
-                out = driver.swap(adb, saves.pick_app(adb, a.package), None if a.system else a.library) if a.cmd == 'driver' else \
-                      host.update(adb, saves.pick_app(adb, a.package), a.jobs)
+                pkg = saves.pick_app(adb, a.package)
+                if mode == 'swap': out = driver.swap(adb, pkg, None if a.system else a.library)
+                elif mode == 'host': out = host.update(adb, pkg, a.jobs)
+                else:
+                    try:
+                        if mode == 'push':
+                            out = driver.push_slot(adb, pkg, a.push, a.name or None)
+                            if a.select is not None: out['select'] = driver.select(adb, pkg, out['name'])
+                        elif mode == 'select': out = driver.select(adb, pkg, a.select)
+                        else: out = driver.listing(adb, pkg)
+                    except AdbError as e: raise BuildError(str(e)) from e
             finally:
                 if lock: lock.close()
     except BuildError as e:
@@ -334,6 +369,11 @@ def cmd_driver(a):   # porter driver and porter host: the installed APK rebuilt 
         else: print(e, file=sys.stderr)
         return 1
     if a.json: _print_json(out)
+    elif mode == 'list':
+        for d in out['drivers']: print(f'{d["name"]:40} {d["size"] / 2**20:8.1f} MB' + ('   (selected)' if out['selected'] == 'drivers' and d['name'] == out['value'] else ''))
+        if not out['drivers']: print(f'no driver libraries in {out["folder"]} (porter driver --push puts one there)')
+        print('selected: ' + {'drivers': f'{out["value"]}, from the drivers folder', 'apk': f'the APK\'s driver ({out["value"]})', 'system': 'the device\'s driver (no DM_VK_DRIVER value)'}[out['selected']])
+        print(driver.NOTE)
     return 0
 
 

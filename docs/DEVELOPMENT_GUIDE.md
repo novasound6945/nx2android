@@ -62,6 +62,20 @@ python -m porter driver --system --package org.nx2a.supermario3dworld
 
 `--system` goes back to the device's own driver. How it works: [ARCHITECTURE.md](ARCHITECTURE.md#the-port).
 
+#### Trying drivers without rebuilding the APK
+
+To tell whether a problem comes from the Turnip build or from nx2android, several drivers can sit in the app's `drivers/` folder on the device (`Android/data/<package>/files/drivers/`) and be switched by name, with no APK rebuilt; the app loads the selected one from its next start. This is a test tool: the reference driver stays the one in the APK (`--select apk` goes back to it), and a port that never uses the folder runs exactly as before. The app must have been ported with `--vulkan-driver` once (libadrenotools loads the driver):
+
+```
+python -m porter driver --push turnip-25.3.zip --name turnip-25.3.so --select --package org.nx2a.supermario3dworld
+python -m porter driver --push libvulkan_freedreno.so --name turnip-26.2.so --package org.nx2a.supermario3dworld
+python -m porter driver --select turnip-26.2.so --package org.nx2a.supermario3dworld
+python -m porter driver --list --package org.nx2a.supermario3dworld
+python -m porter driver --select apk --package org.nx2a.supermario3dworld
+```
+
+`--push` takes an arm64 `.so` or an AdrenoTools driver package (`.zip`: the library its `meta.json` names). Its name on the device must end in `.so` (no `/` or `..`, at most 100 characters) and differ from the APK's driver library. `--select` changes only `env.txt`'s `DM_VK_DRIVER` row: a file name of the folder, `apk`, or `system` (the device's own driver). The app copies the selected file into its own storage before loading it (shared storage cannot hold code that runs), again only when its size or time changed; the log says which driver it loaded and from where. The next `porter install` may put the pack's `DM_VK_DRIVER` back (the pack's rows win), so select again after an install.
+
 ### Host update
 
 `porter host` brings a port on the device to this checkout's host (the runtime: Vulkan backend, front end, Horizon services), also without the game's files: its `libdmhost.so` is built again from the profile (a few seconds) and installed over the app (the saves stay):
