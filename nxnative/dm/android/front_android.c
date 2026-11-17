@@ -1345,6 +1345,7 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
     if (!freopen(p, "w", stderr)) __android_log_print(ANDROID_LOG_ERROR, "dmhost", "cannot write %s", p);
     setvbuf(stderr, NULL, _IOLBF, 0);
     setenv("DM_ROOT", g_root, 1);
+    if (act->internalDataPath) setenv("DM_INTERNAL", act->internalDataPath, 1);   // the app's own storage, where code may be loaded from (gfx_vk_core.c drv_slot: a test driver)
     snprintf(p, sizeof p, "%s/RomFS", g_root); setenv("DM_ROMFS", p, 0);
     snprintf(p, sizeof p, "%s/save", act->internalDataPath); mkdir(p, 0700); setenv("DM_SAVE", p, 0);
     snprintf(p, sizeof p, "%s/temp", act->internalDataPath); mkdir(p, 0700); setenv("DM_TEMP", p, 0);

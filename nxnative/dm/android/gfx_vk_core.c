@@ -14,11 +14,13 @@
 #include <android/hardware_buffer.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdatomic.h>
 #include <string.h>
 #include <math.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -133,26 +135,66 @@ static int drv_has_gpu(PFN_vkGetInstanceProcAddr g) {
     return ok;
 }
 
+// DM_VK_DRIVER naming a file in the files folder's drivers/ (porter driver --push / --select): a driver to test beside the APK's, which stays the reference. Shared storage is
+// mounted noexec, so the file is copied into the app's own storage (DM_INTERNAL: ANativeActivity's internalDataPath, front_android.c) and loaded from there by adrenotools (its
+// hooks still from the APK's library folder); the copy is kept while the file's size and modification time stay the same. A name the folder cannot hold (a / or .., not *.so,
+// over 100 characters) is not looked for there. 1: the copy is in dir (ending in '/'); 0: no such file, the APK's library as before; -1: the file is there and could not be
+// copied (logged): the system's driver, never the APK's under the test's name
+static int drv_slot(const char *drv, char *dir, size_t cap) {
+    const char *root = getenv("DM_ROOT"), *in = getenv("DM_INTERNAL"); size_t n = strlen(drv); char src[700], dst[700], tmp[720]; struct stat ss, ds;
+    if (!root || !*root) return 0;
+    if (strchr(drv, '/') || strstr(drv, "..") || n < 4 || n > 100 || strcmp(drv + n - 3, ".so")) {
+        VKLOG("[RED] DM_VK_DRIVER %s: not a name the drivers folder takes (no / or .., ending in .so, at most 100 characters): not looked for there", drv); return 0; }
+    if ((size_t)snprintf(src, sizeof src, "%s/drivers/%s", root, drv) >= sizeof src || stat(src, &ss) || !S_ISREG(ss.st_mode)) return 0;
+    if (!in || !*in || (size_t)snprintf(dir, cap, "%s/drivers/", in) >= cap || (size_t)snprintf(dst, sizeof dst, "%s%s", dir, drv) >= sizeof dst ||
+        (size_t)snprintf(tmp, sizeof tmp, "%s.%s.part", dir, drv) >= sizeof tmp) {
+        VKLOG("[RED] DM_VK_DRIVER %s: in the drivers folder, but the app's storage is not known: the system's driver instead", drv); return -1; }
+    mkdir(dir, 0700);
+    if (!stat(dst, &ds) && S_ISREG(ds.st_mode) && ds.st_size == ss.st_size && ds.st_mtim.tv_sec == ss.st_mtim.tv_sec && ds.st_mtim.tv_nsec == ss.st_mtim.tv_nsec) return 1;
+    unlink(tmp);   // a copy cut short (read-only once written: it is not opened over)
+    int fi = open(src, O_RDONLY | O_CLOEXEC), fo = fi < 0 ? -1 : open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0700), err = fi < 0 || fo < 0 ? errno : 0;
+    long long got = 0; static char buf[1 << 16];   // (vk_init runs once)
+    while (!err) {
+        ssize_t r = read(fi, buf, sizeof buf); if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) { if (r < 0) err = errno; break; }
+        for (ssize_t w = 0; w < r && !err;) { ssize_t k = write(fo, buf + w, (size_t)(r - w)); if (k > 0) w += k; else if (k < 0 && errno != EINTR) err = errno; }
+        got += r;
+    }
+    if (!err && got != (long long)ss.st_size) err = EIO;   // the file changed while it was copied
+    struct timespec t[2] = {ss.st_atim, ss.st_mtim};   // its time, which the next start compares
+    if (!err && (futimens(fo, t) || fchmod(fo, 0500) || fsync(fo))) err = errno;
+    if (fo >= 0 && close(fo) && !err) err = errno;
+    if (fi >= 0) close(fi);
+    if (!err && rename(tmp, dst)) err = errno;
+    if (err) { unlink(tmp); VKLOG("[RED] DM_VK_DRIVER %s: in the drivers folder, but it could not be copied into the app's storage (%s, errno %d): the system's driver instead", drv, dst, err); return -1; }
+    VKLOG("DM_VK_DRIVER %s: copied from the drivers folder into the app's storage (%lld bytes)", drv, got);
+    return 1;
+}
+
 void vk_init(void) {
     static int done; if (done) return; done = 1;
     // DM_VK_DRIVER=<library>: a Vulkan driver the APK carries (Mesa's Turnip for Adreno; porter --vulkan-driver), loaded through libadrenotools (BSD-2-Clause), which the
     // APK carries beside it with its hook libraries: a second copy of the system's loader in a linker namespace of its own, whose driver is this library. The loader keeps
     // making the surface and the swapchain, which Turnip on Android has none of (the platform loader makes them over VK_ANDROID_native_buffer). TOTKDroid, a port of Tears
     // of the Kingdom 1.4.3 that also replays NVN on Vulkan, measured its Great Sky Island forest at GPU 16-17 ms a frame on Turnip on an Adreno 830 (docs/FPS-2026-10-31.md),
-    // against 22-27 ms here on Qualcomm's driver. A driver that does not load, or offers no Vulkan 1.3 GPU, leaves the system's
+    // against 22-27 ms here on Qualcomm's driver. A driver that does not load, or offers no Vulkan 1.3 GPU, leaves the system's. A file of that name in the files folder's
+    // drivers/ is loaded instead of the APK's (drv_slot: a test of another driver build without rebuilding the APK)
     const char *drv = getenv("DM_VK_DRIVER"); void *lib = NULL;
     if (drv && *drv) {
-        Dl_info di; char dir[512] = "", dirs[520] = "";   // the APK's extracted libraries (mkapk.py: extractNativeLibs), where adrenotools finds its hooks and the driver
+        Dl_info di; char dir[512] = "", dirs[520] = "", sdir[600] = "";   // the APK's extracted libraries (mkapk.py: extractNativeLibs), where adrenotools finds its hooks and the driver
         if (dladdr((void *)vk_init, &di) && di.dli_fname && strrchr(di.dli_fname, '/')) {
             snprintf(dir, sizeof dir, "%.*s", (int)(strrchr(di.dli_fname, '/') - di.dli_fname), di.dli_fname); snprintf(dirs, sizeof dirs, "%s/", dir); }
-        void *at = dlopen("libadrenotools.so", RTLD_NOW | RTLD_LOCAL);
+        int slot = drv_slot(drv, sdir, sizeof sdir);   // 1: the drivers folder's, copied into sdir; -1: that one, not copied (logged)
+        void *at = slot < 0 ? NULL : dlopen("libadrenotools.so", RTLD_NOW | RTLD_LOCAL);
         void *(*open_vk)(int, int, const char *, const char *, const char *, const char *, const char *, void **) =
             at ? (void *(*)(int, int, const char *, const char *, const char *, const char *, const char *, void **))dlsym(at, "adrenotools_open_libvulkan") : NULL;
-        if (!open_vk || !*dir) VKLOG("[RED] DM_VK_DRIVER %s: no libadrenotools in the APK (%s); the system's driver instead", drv, at ? "no adrenotools_open_libvulkan" : dlerror());
-        else if (!(lib = open_vk(RTLD_NOW | RTLD_LOCAL, 1 /* ADRENOTOOLS_DRIVER_CUSTOM */, NULL, dir, dirs, drv, NULL, NULL)))
-            VKLOG("[RED] DM_VK_DRIVER %s: adrenotools could not load it from %s; the system's driver instead", drv, dir);
+        if (slot < 0) {}
+        else if (!open_vk || !*dir) VKLOG("[RED] DM_VK_DRIVER %s: no libadrenotools in the APK (%s); the system's driver instead", drv, at ? "no adrenotools_open_libvulkan" : dlerror());
+        else if (!(lib = open_vk(RTLD_NOW | RTLD_LOCAL, 1 /* ADRENOTOOLS_DRIVER_CUSTOM */, NULL, dir, slot ? sdir : dirs, drv, NULL, NULL)))
+            VKLOG("[RED] DM_VK_DRIVER %s: adrenotools could not load it from %s; the system's driver instead", drv, slot ? sdir : dir);
         else if (!(p_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr")) || !drv_has_gpu(p_vkGetInstanceProcAddr)) {
             VKLOG("[RED] DM_VK_DRIVER %s: no Vulkan 1.3 GPU through it; the system's driver instead", drv); lib = NULL; }   // (left loaded: a driver does not always unload cleanly)
+        else if (slot) VKLOG("Vulkan driver %s through adrenotools from the drivers folder (copied to the app's storage, %s), not the APK's or the system's", drv, sdir);
         else VKLOG("Vulkan driver %s through adrenotools, not the system's (%s)", drv, dir);
     }
     if (!lib) {
