@@ -9,7 +9,29 @@ Port your own Nintendo Switch games to Android, natively: the game's own arm64 c
 
 This is the Android port of [nxnative](https://github.com/seedds/nxnative), which does the same on iPhone and iPad. Supported games: [Games](#games).
 
+> **This is a fork** of [shirai91/nx2android](https://github.com/shirai91/nx2android), kept merged with upstream's `main`; the work is on the `ports` branch. It is developed on a Windows PC and tested on two Retroid handhelds with a Turnip Vulkan driver. What it adds: [the games below](#games-brought-up-in-this-fork), [shader preparation at the first launch](#shader-preparation-at-the-first-launch), [the game's data from your own server](#the-games-data-from-your-own-server) and [the rest](#what-else-this-fork-changes). It has no releases of its own: run it from the checkout ([docs/DEVELOPMENT_GUIDE.md](docs/DEVELOPMENT_GUIDE.md)). Notes on what broke and why, game by game: [docs/PORTING_NOTES.md](docs/PORTING_NOTES.md).
+
 ## Games
+
+### Games brought up in this fork
+
+Tested on the Retroid Pocket 6 and the Retroid Pocket Nova (both Snapdragon 8 Gen 2, Adreno 740, Android 13) with the Turnip Vulkan driver "PurpleVK T30" (`--vulkan-driver`). Several are Asian releases, which have their own title IDs and so their own profiles.
+
+| Game | Version | Device | Result |
+|---|---|---|---|
+| The Legend of Zelda: Link's Awakening | update 1.1.0 | Retroid Pocket 6 | **Playable**, 60 fps held. The depth-of-field blur is off by default (a row in the profile turns it back on). Docked or handheld, switched while running. Korean text with `--shared-font` |
+| Disgaea 5: Alliance of Vengeance | v196608 (SDK 1.7.1) | Retroid Pocket Nova | **Playable**, 60 fps: logo, opening movie, title, field and battle, with sound effects, music and voices. An SDK this old has no audio renderer in the game's process, so the host serves `audren:u` and mixes the sound itself |
+| Disgaea 4 Return | base game | Retroid Pocket 6 | Title, new game, the opening and the hub at 60 fps. Battles not checked yet |
+| 13 Sentinels: Aegis Rim (Asian release) | base game | Retroid Pocket 6 | **Playable**, 60 fps; the busiest robot cutscene (about 6,000 draws a frame) falls below |
+| Unicorn Overlord (Asian release) | update 1.05 | Retroid Pocket 6 | **Playable**, 60 fps in most scenes; the largest maps (about 6,800 draws a frame) are at the GPU's limit |
+| Dark Souls: Remastered | update 1.0.3 | Retroid Pocket Nova | 60 fps held (30 on Switch) at the game's real speed; 4:3 screens; no colour flashes on new pipelines. `DM_FPS_TARGET=30` in `env.txt` keeps the game's own 30 |
+| Fire Emblem Engage | update 2.0.0 | Retroid Pocket Nova | **Playable**, 60 fps (30 on Switch): chapters 1 and 2, maps, battles and battle scenes, in Korean. Its 206,899 files travel as 89 bundles |
+| Tales of Eternia Remastered | update 2.1.0 | Retroid Pocket 6 | **Playable**, 60 fps held |
+| Minecraft Dungeons | base game | Retroid Pocket 6 | **Work in progress**: boots and plays the first level at 30 fps with sound. The runtime and tool support is here (two audio renderers at once, Unreal pak version 8); its profile is not committed yet |
+
+Not working yet: Minecraft Dungeons II stops right after its logo ([docs/PORTING_NOTES.md](docs/PORTING_NOTES.md#3-open-problem-minecraft-dungeons-ii-stops-after-the-logo)).
+
+### Games from upstream
 
 These games play on Android. Tested on a Lenovo Legion Y700 (Snapdragon 8 Elite, Adreno 830), unless a game names another device. The device's GPU must read BC-compressed textures (Adreno, Xclipse; not Mali or PowerVR).
 
@@ -48,6 +70,39 @@ These games play on Android. Tested on a Lenovo Legion Y700 (Snapdragon 8 Elite,
 The tag (`v0.1.3`) is the latest nx2android version the game was tested on. Older games are not tested again for each release: if a later version breaks one, a patch release fixes it. A tag newer than the [latest release](https://github.com/shirai91/nx2android/releases/latest) is the next release, and the game needs the development checkout until it ships.
 
 A game that is not in this table is not supported yet. The games we look at next, and the ones done: [docs/PORT_CHECKLIST.md](docs/PORT_CHECKLIST.md).
+
+## Shader preparation at the first launch
+
+*In this fork.* A game pipeline met for the first time used to cost the driver's whole compile in the middle of play: a stutter at every new effect, or draws left out until the pipeline was ready. With a driver that has `VK_EXT_graphics_pipeline_library` (Turnip has it; Qualcomm's own driver on the Retroid Pocket 6 does not), the app makes every shader's part once, before the game starts, behind a progress screen: Dark Souls: Remastered's 3,099 shaders take about 17 s on a Retroid Pocket 6. During play a new pipeline is linked from those parts in about 0.03 ms, so nothing is left out, and the fully optimized pipeline is built in the background and takes over.
+
+- It happens once per pack and driver. Later launches find the mark and check it in about half a second.
+- Port with a Turnip driver (`--vulkan-driver <file>`) to get it. Without the extension the app runs as before.
+- `DM_VK_GPL=0` in `env.txt` turns it off. To see a first start again, delete `files/vk_gpl.id`, `vk_pipeline_cache.bin` and `vk_pipelines.bin` with the game stopped.
+
+How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ("Graphics pipeline libraries").
+
+## The game's data from your own server
+
+*In this fork.* A port is an APK plus a data pack of several GB, normally copied over USB. Ported with `--data-url`, the APK installs by itself, on a device that never sees the PC, and fetches the pack from a web server of yours at its first launch. At every later launch it compares the server's list with its own and downloads only what changed, so a new build of the pack reaches the device without a cable.
+
+1. Port with the server folder's address: `porter port <game folder> --data-url https://<host>/<path>/` (add `--data-cred <file>`, a file of one line `user:password`, if the server asks for Basic authentication).
+2. Upload the `<App>-data` folder to that address as it is, `files.json` last. Any HTTP or HTTPS server that answers GET with Range works (a NAS's WebDAV share, for example); no directory listing is needed.
+3. Install the APK on the device and start it.
+
+After changing the pack, `porter publish <App>-data` writes the list again (unchanged files keep their hashes, so a 4 GB RomFS is hashed once). A pack of very many small files can travel as bundles (`data_bundles` in the profile's `android.tsv`): Fire Emblem Engage's 205,000 small files became 89.
+
+The address and the `user:password` are inside the APK, masked but not encrypted: anyone who has the APK can read them. Use a read-only account made for this, keep the server private, and don't share the APK. The pack is your own dump; this is for your own devices.
+
+How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ("The data from a web server").
+
+## What else this fork changes
+
+- **Sound.** Several audio renderers at once (Minecraft Dungeons opens one for movies and one for the game). `audren:u` served by the host, with a real mixer, for SDK 1.x games (Disgaea 5).
+- **Movies.** Frames go straight to the Vulkan image, and the colour conversion uses NEON: a 1080p60 VP9 opening that changed on 72 to 80% of display frames now does on 95 to 96%.
+- **Graphics.** With pipeline libraries only the vertex stage's uniform buffers are dynamic (colour flashes in Dark Souls: Remastered, lost devices in Fire Emblem Engage on Turnip). NVN's alpha test as a fragment shader variant; real occlusion queries for conditional rendering; the layer's crop honoured at present; a per-game list of shaders whose alpha-test discard is removed (`DM_VK_FS_NOKILL`); a texture binding given another's texture (`DM_VK_BIND_ALIAS`, Link's Awakening's blur switch).
+- **Running.** Docked and handheld switched while the game runs (`DM_CTL` `opmode`), with the controller events a game waits for. `DM_GPU_TURBO` gives the GPU's clock back when the app goes to the background. A frame rate limit in the pause menu.
+- **Tools.** Unreal paks of version 8 and version 1 shader archives (UE 4.22); Disgaea's shader containers; a pak folder with IoStore shader libraries no longer mistaken for inline shaders.
+- **Diagnostics.** A thread dump of a stalled game, per-renderer audio dumps, per-pass statistics over seconds, uniform buffer logs and traps for an effect that lasts one second.
 
 ## For players: port a game without programming
 
