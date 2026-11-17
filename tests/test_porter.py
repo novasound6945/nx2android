@@ -211,15 +211,15 @@ class DataPack(unittest.TestCase):
             # the same size, another mtime (set: a bind-mounted folder can keep the old one for a write this quick)
             e = t / 'env.txt'; m = e.stat().st_mtime_ns; e.write_text('DM_LANG=en\n'); os.utime(e, ns=(m + 2_000_000_000, m + 2_000_000_000))
             self.assertNotEqual(publish.manifest(t)['id'], fj['id'])
-            self.assertEqual(publish.check_url('https://h:5006/port/darksouls/1.0.0'), 'https://h:5006/port/darksouls/1.0.0/')
+            self.assertEqual(publish.check_url('https://h:8443/data/darksouls/1.0.0'), 'https://h:8443/data/darksouls/1.0.0/')
             for bad in ('ftp://h/', 'h/x', 'http://h/a b'):
                 with self.assertRaises(BuildError): publish.check_url(bad)
             (t / 'cred').write_text('reader:secret\n'); self.assertEqual(publish.read_cred(t / 'cred'), 'reader:secret')
             (t / 'bad').write_text('nocolon')
             with self.assertRaises(BuildError) as e: publish.read_cred(t / 'bad')
             self.assertNotIn('nocolon', str(e.exception))   # never the file's content in a message
-            a = publish.source_asset('https://h:5006/port/x/', 'reader:secret')
-            self.assertTrue(a.startswith(b'NX2S\x01')); self.assertNotIn(b'secret', a); self.assertNotIn(b'h:5006', a)
+            a = publish.source_asset('https://h:8443/data/x/', 'reader:secret')
+            self.assertTrue(a.startswith(b'NX2S\x01')); self.assertNotIn(b'secret', a); self.assertNotIn(b'h:8443', a)
         finally:
             shutil.rmtree(t, ignore_errors=True)
 

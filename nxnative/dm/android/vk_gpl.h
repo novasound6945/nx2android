@@ -1,4 +1,4 @@
-// Graphics pipeline libraries (gfx_vk_exec.c gpl_*): the parts of their bookkeeping that need no Vulkan, so a test on the computer runs them (C:\d2rm\tools\gpl\t_gpl.c).
+// Graphics pipeline libraries (gfx_vk_exec.c gpl_*): the parts of their bookkeeping that need no Vulkan, so a test on the computer runs them (the test is kept outside this repository).
 // The reuse mark of the shader preparation (vk_gpl_prepare), the pre-rasterization key's states left static, which pipeline a draw takes, and the timing samples logged.
 #pragma once
 #include <stddef.h>

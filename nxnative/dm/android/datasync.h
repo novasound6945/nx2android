@@ -3,7 +3,7 @@
 // then renamed into place. files.json is written last: a files folder with it holds the whole pack, so an app that cannot reach the server starts the game from it.
 // The player's own files stay: settings.txt is downloaded only when there is none; env.txt is the pack's with the rows the player added kept (ds_env_merge); a file the
 // server no longer lists is left alone. No Android here: the transport is a callback (front_android.c: java.net.HttpURLConnection through JNI) and a test on the computer
-// drives it with a folder (C:\d2rm\tools\easy-install\t_sync.c).
+// drives it with a folder (kept outside this repository).
 // A launch with nothing new costs little also for a pack of many files (Tales of Eternia Remastered: 33,696 files, an 8.6 MB files.json downloaded and every file's
 // size read on the /sdcard at each launch kept the "connecting" screen up 10-15 s on a Retroid Pocket 6, 2026-11-15): the list is asked for only if it changed
 // (the ETag / Last-Modified of the copy the folder has, kept in files.json.etag: HTTP 304 instead of the list), and a folder whose list is the server's is checked

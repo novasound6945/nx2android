@@ -1,6 +1,6 @@
 // Occlusion counters (NVN_COUNTER_TYPE_SAMPLES_PASSED) on Vulkan, the parts without Vulkan: the counter the completion thread keeps (occ_ctr), what a report carries
 // (occ_val) and writes to the guest, a report address's last completed result (occ_ent), and the CPU judgement of SetRenderEnableConditional on such results
-// (occ_pick, occ_eq). gfx_vk_core.c (completion) and gfx_vk_exec.c (replay, DM_VK_OCCLUSION) use it; C:\d2rm\tools\occlusion\t_occ.c tests it on the PC.
+// (occ_pick, occ_eq). gfx_vk_core.c (completion) and gfx_vk_exec.c (replay, DM_VK_OCCLUSION) use it; a test outside this repository runs it on the PC.
 #pragma once
 #include <stdint.h>
 
