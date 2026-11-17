@@ -2,7 +2,7 @@
 # (files.json format 2), and nxnative/dm/android/datasync.h (built on the computer: datasync_fixture.c, with a folder as the server) downloads what the folder lacks,
 # unpacks the bundles (downloaded, or pushed by porter install) and refuses what is not the list's. A pack without the row is checked to stay as it was.
 # python -m unittest tests.test_datasync (a C compiler: $CC, else cc, clang or gcc; without one the sync's half is skipped, and says which names were tried)
-import atexit, hashlib, io, json, os, shutil, subprocess, sys, tarfile, tempfile, types, unittest
+import atexit, base64, hashlib, io, json, os, shutil, subprocess, sys, tarfile, tempfile, types, unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -401,6 +401,76 @@ class Tar(unittest.TestCase):
     def test_newer_format(self):   # a list of a format this app does not know: refused, with what to do
         x = sync(self.server([('RomFS/a.bin', b'aa', tarfile.REGTYPE)], fmt=3), self.root())
         self.assertEqual(x['result'], 'ERR_SERVER', x['text']); self.assertIn('format 3', x['err'])
+
+
+@unittest.skipUnless(CC, NO_CC)
+class PointerC(unittest.TestCase):
+    """The pointer file and the APK's asset as the app reads them (datasync.h ds_pointer_open, ds_source, ds_hmac): what porter/publish.py writes opens to the same text,
+    anything changed is refused (tests/test_pointer.py has the Python half)"""
+    KEY = bytes(range(32))
+    def setUp(self): self.t = Path(tempfile.mkdtemp(prefix='nx2a_test_ptrc_'))
+    def tearDown(self): shutil.rmtree(self.t, ignore_errors=True)
+
+    def fx(self, *a):
+        r = subprocess.run([str(fixture()), *map(str, a)], capture_output=True, text=True, encoding='utf-8', timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr); return r.stdout
+
+    def open_line(self, line, key=None):
+        p = self.t / 'line'; p.write_bytes(line.encode() if isinstance(line, str) else line)
+        return self.fx('--pointer', (key or self.KEY).hex(), p)
+
+    def test_hmac_rfc4231(self):   # RFC 4231 test cases 1 and 2, and a key longer than a block (case 6) against Python's hmac
+        import hmac
+        self.assertEqual(self.fx('--hmac', '0b' * 20, b'Hi There'.hex()).strip(), 'b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7')
+        self.assertEqual(self.fx('--hmac', b'Jefe'.hex(), b'what do ya want for nothing?'.hex()).strip(), '5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843')
+        k, m = b'\xaa' * 131, b'Test Using Larger Than Block-Size Key - Hash Key First'
+        self.assertEqual(self.fx('--hmac', k.hex(), m.hex()).strip(), '60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54')
+        self.assertEqual(self.fx('--hmac', k.hex(), m.hex()).strip(), hmac.new(k, m, hashlib.sha256).hexdigest())
+
+    def test_python_line_opens(self):   # the cross-check: Python seals, C opens to the same root and credentials (a long one: several keystream blocks)
+        for root, cred in (('https://example.com/share/', 'reader:s3cr3t'), ('https://example.com:5006/a/b/c/', ''), ('https://example.com/' + 'd' * 300 + '/', 'u:' + 'p' * 390)):
+            line = publish.pointer_seal(root, cred, self.KEY)
+            self.assertEqual(self.open_line(line), f'ok {root}\ncred {cred}\n')
+            self.assertEqual(self.open_line('\r\n  ' + line + '\n\n'), f'ok {root}\ncred {cred}\n')   # around it: ignored
+
+    def test_tampered(self):   # a byte of the nonce, the ciphertext or the tag changed, cut short, another key, another magic, not base64: refused before decrypting
+        line = publish.pointer_seal('https://example.com/share/', 'reader:s3cr3t', self.KEY); raw = bytearray(base64.b64decode(line[6:]))
+        for at in (0, 15, 16, 30, len(raw) - 33, len(raw) - 32, len(raw) - 1):
+            b = bytearray(raw); b[at] ^= 0x80; out = self.open_line('NX2P1:' + base64.b64encode(bytes(b)).decode())
+            self.assertTrue(out.startswith('bad '), (at, out)); self.assertNotIn('s3cr3t', out); self.assertNotIn('example', out)
+        out = self.open_line(line, bytes(32)); self.assertIn('key', out); self.assertTrue(out.startswith('bad '))
+        for bad in (line[:-4], 'NX2P0:' + line[6:], line[6:], 'NX2P1:' + line[6:-1] + '!', 'NX2P1:' + base64.b64encode(bytes(raw[:47])).decode(), 'NX2P1:' + 'A' * 6000, ''):
+            self.assertTrue(self.open_line(bad).startswith('bad '), bad[:24])
+
+    def seal_raw(self, plain):   # a line around any plaintext, sealed as publish.pointer_seal does (to see what the app refuses inside a good tag)
+        import hmac
+        nonce = b'\x07' * 16; enc, mac = publish._pointer_keys(self.KEY)
+        ct = bytes(a ^ b for a, b in zip(plain, publish._keystream(enc, nonce, len(plain))))
+        return 'NX2P1:' + base64.b64encode(nonce + ct + hmac.new(mac, b'NX2P1' + nonce + ct, hashlib.sha256).digest()).decode()
+
+    def test_content_refused(self):   # inside a good tag: plain HTTP, no / at the end, one line or three, credentials without a colon, a NUL, a space
+        self.assertTrue(self.open_line(self.seal_raw(b'https://example.com/ok/\nu:p')).startswith('ok '))
+        for plain in (b'http://example.com/share/\n', b'https://example.com/share\n', b'https://example.com/share/', b'https://example.com/share/\nu:p\nx',
+                      b'https://example.com/share/\nnocolon', b'https://example.com/share/\n:p', b'https://exa\0mple.com/share/\n', b'https://exa mple.com/share/\n'):
+            out = self.open_line(self.seal_raw(plain)); self.assertTrue(out.startswith('bad '), (plain, out))
+
+    def source(self, asset):
+        p = self.t / 'source.bin'; p.write_bytes(asset); return self.fx('--source', p).split('\n')
+
+    def test_asset_versions(self):   # version 1 as before (no pointer); version 2 with the pointer's fields; a damaged one refused
+        self.assertEqual(self.source(publish.source_asset('https://h:8443/data/x/', 'reader:secret'))[:6], ['v1', 'https://h:8443/data/x/', 'reader:secret', '', '00' * 32, ''])
+        self.assertEqual(self.source(publish.source_asset('http://example.com/p/', ''))[:3], ['v1', 'http://example.com/p/', ''])
+        a = publish.source_asset('https://example.com/share/zelda/1.1.0/', 'reader:s3cr3t', ('https://example.org/raw/pointer.txt', self.KEY, 'zelda/1.1.0/'))
+        self.assertEqual(self.source(a)[:6], ['v2', 'https://example.com/share/zelda/1.1.0/', 'reader:s3cr3t', 'https://example.org/raw/pointer.txt', self.KEY.hex(), 'zelda/1.1.0/'])
+        self.assertEqual(self.source(publish.source_asset('https://example.com/r/', '', ('https://example.org/p', self.KEY, '')))[:6],
+                         ['v2', 'https://example.com/r/', '', 'https://example.org/p', self.KEY.hex(), ''])
+        long = publish.source_asset('https://example.com/' + 'x' * 870 + '/', 'u:' + 'p' * 390, ('https://example.org/' + 'y' * 870, self.KEY, 'x' * 870 + '/'))
+        self.assertGreater(len(long), 2048); self.assertEqual(self.source(long)[0], 'v2')   # past version 1's 2,048 bytes
+        m = lambda v, t: b'NX2S' + bytes([v]) + publish.mask(t.encode())
+        for bad in (m(3, 'https://e/\n'), m(2, 'https://e/\n\nhttp://p\n' + '00' * 32 + '\n'), m(2, 'https://e/\n\nhttps://p\n' + '0' * 63 + '\n'),
+                    m(2, 'https://e/\n\nhttps://p\n' + 'zz' * 32 + '\n'), m(2, 'https://e/\n\nhttps://p\n' + '00' * 32 + '\n../'), m(2, 'https://e/\n\nhttps://p\n' + '00' * 32 + '\na/b'),
+                    m(2, 'https://e/\n\nhttps://p\n' + '00' * 32), m(2, 'https://e/\n\nhttps://p\n' + '00' * 32 + '\na/\nextra'), m(1, 'no newline'), m(1, 'x' * 2049 + '\n'), b'NX2S'):
+            self.assertEqual(self.source(bad)[0], 'bad', bad[:8])
 
 
 if __name__ == '__main__':

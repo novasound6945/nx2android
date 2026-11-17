@@ -13,7 +13,7 @@
 # the server only inside its bundle, which the app downloads (or finds pushed by porter install) and takes the files it needs out of. An app from before format 2 reads
 # "files" and asks for each file on its own: the bundled ones come first, so its first download is a bundled file's, an HTTP 404 it stops at with nothing else downloaded,
 # and it never starts the game on half a pack (a folder that already holds every bundled file is whole for it, and it downloads the rest as before).
-import hashlib, json, os, shutil, tarfile, time
+import base64, hashlib, json, os, shutil, tarfile, time
 from pathlib import Path
 
 from porter import datapack
@@ -44,8 +44,103 @@ MASK = b'nx2a-data-source:not-a-secret!'
 def mask(b): return bytes(x ^ MASK[i % len(MASK)] ^ (i * 131 & 255) for i, x in enumerate(b))
 
 
-def source_asset(url, cred=''):   # "NX2S", 1, then the masked "url\ncred"
-    return b'NX2S\x01' + mask(f'{check_url(url)}\n{cred}'.encode())
+def source_asset(url, cred='', pointer=None):
+    """"NX2S", 1, then the masked "url\\ncred" (as before: an APK without a pointer gets exactly these bytes). pointer (pointer_url, key bytes, subpath): "NX2S", 2, then
+    the masked "url\\ncred\\npointer_url\\nkey_hex\\nsubpath": the app reads the server's root from the pointer file first (pointer_seal), url and cred being its fallback"""
+    if pointer is None: return b'NX2S\x01' + mask(f'{check_url(url)}\n{cred}'.encode())
+    purl, key, sub = pointer
+    return b'NX2S\x02' + mask(f'{check_url(url)}\n{cred}\n{check_pointer_url(purl)}\n{bytes(key).hex()}\n{check_subpath(sub)}'.encode())
+
+
+# ---- the pointer file: where the data server is now (porter port --data-pointer; porter pointer). One ASCII line, "NX2P1:" + base64(nonce 16 ‖ ciphertext ‖ tag 32),
+# of "<root URL>\n<user:password or nothing>" encrypted with a 32-byte key the APK carries: the server can move (a new line in that file) without porting the games again.
+# SHA-256 only (no dependency, and the app has it already: dm/android/datasync.h ds_pointer_open does the same): enc = SHA256("nx2p-enc" ‖ K), mac = SHA256("nx2p-mac" ‖ K),
+# keystream block i = SHA256(enc ‖ nonce ‖ LE32(i)), ciphertext = plaintext XOR keystream, tag = HMAC-SHA256(mac, "NX2P1" ‖ nonce ‖ ciphertext), checked first.
+POINTER_MAGIC = 'NX2P1:'
+POINTER_MAX, POINTER_PLAIN_MAX = 4096, 2048   # the line's bytes, the plaintext's
+
+
+def _url_ok(u): return not any(c in u for c in '\r\n\0 \t\\') and all(32 < ord(c) < 127 for c in u)
+
+
+def check_pointer_url(url):   # --data-pointer: the pointer file's address, https:// only (the app fetches it without credentials)
+    u = (url or '').strip()
+    if not u.startswith('https://') or len(u) <= len('https://') or not _url_ok(u) or len(u) > 900:
+        raise BuildError(f'--data-pointer takes the https:// address of the pointer file: {url!r}')
+    return u
+
+
+def check_root(url, what='--root'):   # a pointer's server root: https://, ending in / (the app refuses anything else: plain HTTP is not a server one moves to)
+    u = (url or '').strip()
+    if not u.startswith('https://') or len(u) <= len('https://') or not _url_ok(u) or len(u) > 900:
+        raise BuildError(f'{what} takes the https:// address of the folder the game packs are under: {url!r}')
+    return u if u.endswith('/') else u + '/'
+
+
+def check_subpath(sub):   # the pack's folder under the root: relative, ending in / ('' for the root itself), no .. and no backslash
+    s = sub or ''
+    if s and (not s.endswith('/') or s.startswith('/') or not _url_ok(s) or len(s) > 900 or any(p in ('', '.', '..') for p in s[:-1].split('/'))):
+        raise BuildError(f'the data pack\'s folder under --data-root is not a plain relative path: {sub!r}')
+    return s
+
+
+def data_subpath(root, url):   # --data-root and --data-url (both as check_url makes them): the pack's folder under the root
+    if not url.startswith(root): raise BuildError(f'--data-url must be under --data-root: {url} is not under {root}')
+    return check_subpath(url[len(root):])
+
+
+def read_key(path, what='--data-pointer-key'):   # a key file: one line of 64 hex digits; the errors never show its content
+    try: t = Path(path).read_text(encoding='utf-8-sig').strip()
+    except OSError as e: raise BuildError(f'{what}: cannot read {path} ({e.strerror})') from None
+    if len(t) != 64 or any(c not in '0123456789abcdefABCDEF' for c in t): raise BuildError(f'{what}: {path} must hold one line of 64 hex digits (porter pointer --new-key makes one)')
+    return bytes.fromhex(t)
+
+
+def new_key(path):   # a fresh random key into a new file (never over one: the APKs that carry the old key would no longer read the pointer)
+    p = Path(path)
+    try: fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError: raise BuildError(f'{p} exists already: the APKs ported with it need it, give another name') from None
+    except OSError as e: raise BuildError(f'cannot write {p} ({e.strerror})') from None
+    with os.fdopen(fd, 'w', encoding='ascii', newline='\n') as f: f.write(os.urandom(32).hex() + '\n')
+    return p
+
+
+def _pointer_keys(key):
+    if len(key) != 32: raise BuildError('a pointer key is 32 bytes')
+    return hashlib.sha256(b'nx2p-enc' + key).digest(), hashlib.sha256(b'nx2p-mac' + key).digest()
+
+
+def _keystream(enc, nonce, n):
+    return b''.join(hashlib.sha256(enc + nonce + i.to_bytes(4, 'little')).digest() for i in range((n + 31) // 32))[:n]
+
+
+def pointer_seal(root, cred, key, nonce=None):   # the pointer file's line for the server root (check_root) and its user:password ('' for none)
+    import hmac
+    plain = f'{check_root(root)}\n{cred or ""}'.encode()
+    if '\n' in (cred or '') or len(plain) > POINTER_PLAIN_MAX: raise BuildError('the pointer\'s address and credentials are too long, or the credentials are not one line')
+    enc, mac = _pointer_keys(key); nonce = os.urandom(16) if nonce is None else nonce
+    ct = bytes(a ^ b for a, b in zip(plain, _keystream(enc, nonce, len(plain))))
+    tag = hmac.new(mac, b'NX2P1' + nonce + ct, hashlib.sha256).digest()
+    return POINTER_MAGIC + base64.b64encode(nonce + ct + tag).decode('ascii')
+
+
+def pointer_open(line, key):   # (root, cred) from a pointer line, as the app reads it; BuildError for any line it would refuse (the reason never shows the content)
+    import binascii, hmac
+    t = (line.decode('ascii', 'replace') if isinstance(line, bytes) else line or '').strip()
+    if len(t) > POINTER_MAX or not t.startswith(POINTER_MAGIC): raise BuildError('not a pointer line (NX2P1:…)')
+    try: raw = base64.b64decode(t[len(POINTER_MAGIC):], validate=True)
+    except (binascii.Error, ValueError): raise BuildError('the pointer line is not base64') from None
+    if len(raw) < 16 + 32 or len(raw) - 48 > POINTER_PLAIN_MAX: raise BuildError('the pointer line has the wrong length')
+    nonce, ct, tag = raw[:16], raw[16:-32], raw[-32:]
+    enc, mac = _pointer_keys(key)
+    if not hmac.compare_digest(hmac.new(mac, b'NX2P1' + nonce + ct, hashlib.sha256).digest(), tag): raise BuildError('the pointer line does not open with this key (another key, or changed)')
+    try: plain = bytes(a ^ b for a, b in zip(ct, _keystream(enc, nonce, len(ct)))).decode('utf-8')
+    except UnicodeDecodeError: raise BuildError('the pointer\'s content is not text') from None
+    root, sep, cred = plain.partition('\n')
+    if not sep or '\n' in cred or '\0' in plain: raise BuildError('the pointer\'s content is not two lines')
+    if not root.startswith('https://') or len(root) <= len('https://') or not root.endswith('/') or not _url_ok(root): raise BuildError('the pointer\'s server is not an https:// folder address ending in /')
+    if cred and (':' not in cred or not cred.split(':', 1)[0] or any(ord(c) < 32 or ord(c) == 127 for c in cred)): raise BuildError('the pointer\'s credentials are not user:password')
+    return root, cred
 
 
 def sha256_file(p, progress=None, done=0):

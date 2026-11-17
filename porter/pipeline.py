@@ -54,6 +54,9 @@ class Options:
     romfs_push: bool = False           # with romfs_at: push the pack's RomFS into that folder first
     data_url: str = ''                 # the folder on a web server (http/https) the published data pack is in: the app downloads it itself (porter/publish.py, dm/android/datasync.h)
     data_cred: Path = None             # a file of one line, user:password, for the server's Basic authentication (masked in the APK, never printed)
+    data_root: str = ''                # with data_pointer: the server's folder all packs are under (data_url is under it; the rest is this pack's folder, kept when the server moves)
+    data_pointer: str = ''             # the https:// address of the pointer file, which says where the server is now (porter pointer; publish.pointer_seal)
+    data_pointer_key: Path = None      # with data_pointer: the file of the key the pointer is encrypted with (64 hex digits; carried masked in the APK, never printed)
     jobs: int = field(default_factory=lambda: os.cpu_count() or 8)
 
 
@@ -222,6 +225,13 @@ class Port:
             from porter import publish
             o.data_url = publish.check_url(o.data_url)
             if o.data_cred: o.data_cred = Path(o.data_cred).expanduser().resolve(); publish.read_cred(o.data_cred)   # a bad file fails now, not after the shaders
+        if o.data_pointer or o.data_root or o.data_pointer_key:   # --data-pointer and its companions: all together, checked now as well
+            from porter import publish
+            if not (o.data_pointer and o.data_root and o.data_pointer_key and o.data_url):
+                raise BuildError('--data-pointer needs --data-url, --data-root (the folder --data-url is under) and --data-pointer-key, all four together')
+            o.data_pointer = publish.check_pointer_url(o.data_pointer)
+            o.data_root = publish.check_url(o.data_root); publish.data_subpath(o.data_root, o.data_url)
+            o.data_pointer_key = Path(o.data_pointer_key).expanduser().resolve(); publish.read_key(o.data_pointer_key)
         if fw := o.firmware or self.cfg.get('firmware'):
             o.firmware = Path(fw).expanduser().resolve()
             if not o.firmware.is_dir(): raise BuildError(f'--firmware: not a folder: {o.firmware}')
@@ -822,8 +832,12 @@ class Port:
         if not getattr(self.o, 'data_url', None): return []   # (getattr: a caller's own options object, as tests/test_game_mode.py's, has none)
         from porter import publish
         f = self.aw / 'data_source.bin'
-        f.write_bytes(publish.source_asset(self.o.data_url, publish.read_cred(self.o.data_cred) if self.o.data_cred else ''))
+        ptr = None
+        if getattr(self.o, 'data_pointer', ''):   # (checked in _run: all four options together)
+            ptr = (self.o.data_pointer, publish.read_key(self.o.data_pointer_key), publish.data_subpath(self.o.data_root, self.o.data_url))
+        f.write_bytes(publish.source_asset(self.o.data_url, publish.read_cred(self.o.data_cred) if self.o.data_cred else '', ptr))
         say(f'data server: {self.o.data_url}' + (' (with credentials)' if self.o.data_cred else ''))   # the credentials themselves are never printed
+        if ptr: say(f'data server pointer: {self.o.data_pointer} (the server root it names, then this pack\'s folder {ptr[2] or "(the root itself)"} under it)')   # never the key
         return ['--asset', f'{publish.SOURCE_ASSET}={f}'] + (['--cleartext'] if self.o.data_url.lower().startswith('http://') else [])
 
     def theme(self):

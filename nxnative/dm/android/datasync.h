@@ -87,6 +87,29 @@ static void ds_sha_hex(ds_sha *s, char out[65]) {
     ds_sha_update(s, len, 8);
     for (int i = 0; i < 8; i++) snprintf(out + 8 * i, 9, "%08x", s->h[i]);
 }
+static void ds_sha_raw(ds_sha *s, uint8_t out[32]) {   // the digest's 32 bytes (ds_sha_hex's, not as hex)
+    uint64_t bits = s->n * 8; uint8_t pad = 0x80, z = 0, len[8];
+    ds_sha_update(s, &pad, 1); while (s->k != 56) ds_sha_update(s, &z, 1);
+    for (int i = 0; i < 8; i++) len[i] = (uint8_t)(bits >> (56 - 8 * i));
+    ds_sha_update(s, len, 8);
+    for (int i = 0; i < 8; i++) { out[4 * i] = (uint8_t)(s->h[i] >> 24); out[4 * i + 1] = (uint8_t)(s->h[i] >> 16); out[4 * i + 2] = (uint8_t)(s->h[i] >> 8); out[4 * i + 3] = (uint8_t)s->h[i]; }
+}
+// HMAC-SHA256 (RFC 2104): the pointer file's tag (ds_pointer_open)
+typedef struct { ds_sha in, out; } ds_hmac;
+static void ds_hmac_init(ds_hmac *h, const uint8_t *key, size_t kn) {
+    uint8_t k[64], p[64]; memset(k, 0, sizeof k);
+    if (kn > 64) { ds_sha s; ds_sha_init(&s); ds_sha_update(&s, key, kn); ds_sha_raw(&s, k); memset(&s, 0, sizeof s); } else memcpy(k, key, kn);
+    for (int i = 0; i < 64; i++) p[i] = k[i] ^ 0x36;
+    ds_sha_init(&h->in); ds_sha_update(&h->in, p, 64);
+    for (int i = 0; i < 64; i++) p[i] = k[i] ^ 0x5c;
+    ds_sha_init(&h->out); ds_sha_update(&h->out, p, 64);
+    memset(k, 0, sizeof k); memset(p, 0, sizeof p);
+}
+static void ds_hmac_update(ds_hmac *h, const void *d, size_t n) { ds_sha_update(&h->in, d, n); }
+static void ds_hmac_final(ds_hmac *h, uint8_t out[32]) {
+    uint8_t t[32]; ds_sha_raw(&h->in, t); ds_sha_update(&h->out, t, 32); ds_sha_raw(&h->out, out);
+    memset(t, 0, sizeof t); memset(h, 0, sizeof *h);
+}
 
 // ---- files.json: a small JSON reader for the list porter/publish.py writes (objects, arrays, strings with escapes, numbers, true / false / null) ----
 typedef struct { char *path; uint64_t size; char sha[65]; int bundle; } ds_file;   // bundle: its index in the list's bundles, -1 for a file the server has on its own
@@ -286,15 +309,100 @@ static size_t ds_base64(char *out, const char *in, size_t n) {   // out holds 4 
     }
     out[k] = 0; return k;
 }
-// the APK's asset of the server (porter/publish.py source_asset): "NX2S", 1, then "url\ncred" masked. The mask is no protection, only against reading the password by accident
-static int ds_source(const uint8_t *a, size_t n, char *url, size_t ucap, char *cred, size_t ccap) {
+static long ds_unbase64(uint8_t *out, size_t cap, const char *in, size_t n) {   // standard base64 with its padding: the bytes, or -1 for anything else or more than cap bytes
+    if (n % 4) return -1;
+    size_t k = 0;
+    for (size_t i = 0; i < n; i += 4) {
+        uint32_t v = 0; int pad = 0;
+        for (int j = 0; j < 4; j++) {
+            char c = in[i + j]; int d;
+            if (c >= 'A' && c <= 'Z') d = c - 'A'; else if (c >= 'a' && c <= 'z') d = c - 'a' + 26; else if (c >= '0' && c <= '9') d = c - '0' + 52;
+            else if (c == '+') d = 62; else if (c == '/') d = 63;
+            else if (c == '=' && i + 4 == n && j >= 2) { d = 0; pad++; }
+            else return -1;
+            if (pad && c != '=') return -1;   // (data after the padding)
+            v = v << 6 | (uint32_t)d;
+        }
+        size_t m = (size_t)(3 - pad); if (k + m > cap) return -1;
+        out[k++] = (uint8_t)(v >> 16); if (m > 1) out[k++] = (uint8_t)(v >> 8); if (m > 2) out[k++] = (uint8_t)v;
+    }
+    return (long)k;
+}
+static int ds_url_text(const char *s) { if (!*s) return 0; for (; *s; s++) if ((unsigned char)*s <= 0x20 || (unsigned char)*s >= 0x7f || *s == '\\') return 0; return 1; }   // printable ASCII, no space
+
+// ---- the pointer file (porter/publish.py pointer_seal; porter port --data-pointer): where the data server is now, so it can move without porting the games again. One line,
+// "NX2P1:" + base64(nonce 16 ‖ ciphertext ‖ tag 32), of "<root URL>\n<user:password or nothing>" under the APK's 32-byte key K: enc = SHA256("nx2p-enc" ‖ K),
+// mac = SHA256("nx2p-mac" ‖ K), keystream block i = SHA256(enc ‖ nonce ‖ LE32(i)), ciphertext = plaintext XOR keystream, tag = HMAC-SHA256(mac, "NX2P1" ‖ nonce ‖ ciphertext).
+// The tag is checked first, in constant time: a line it does not fit is never decrypted
+#define DS_PTR_MAX 4096     // the line's bytes
+#define DS_PTR_PLAIN 2048   // the plaintext's
+// 0 with root (https://, ending in /) and cred ("" for none); -1 with *why (never anything of the line's content)
+static int ds_pointer_open(const char *line, size_t n, const uint8_t key[32], char *root, size_t rcap, char *cred, size_t ccap, const char **why) {
+    const char *s = line, *e = line + n;
+    while (s < e && (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n')) s++;
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) e--;
+    if ((size_t)(e - s) > DS_PTR_MAX || e - s < 6 || memcmp(s, "NX2P1:", 6)) { *why = "not a pointer line (NX2P1:...)"; return -1; }
+    uint8_t raw[DS_PTR_MAX], enc[32], mac[32], tag[32], ks[32]; char pt[DS_PTR_PLAIN + 1]; int rc = -1;
+    long rn = ds_unbase64(raw, sizeof raw, s + 6, (size_t)(e - s - 6));
+    if (rn < 0) { *why = "the line is not base64"; return -1; }
+    if (rn < 48 || (size_t)rn - 48 > DS_PTR_PLAIN) { *why = "the line has the wrong length"; return -1; }
+    size_t cn = (size_t)rn - 48; const uint8_t *nonce = raw, *ct = raw + 16, *tg = raw + rn - 32;
+    ds_sha h; ds_sha_init(&h); ds_sha_update(&h, "nx2p-enc", 8); ds_sha_update(&h, key, 32); ds_sha_raw(&h, enc);
+    ds_sha_init(&h); ds_sha_update(&h, "nx2p-mac", 8); ds_sha_update(&h, key, 32); ds_sha_raw(&h, mac);
+    ds_hmac m; ds_hmac_init(&m, mac, 32); ds_hmac_update(&m, "NX2P1", 5); ds_hmac_update(&m, nonce, 16); ds_hmac_update(&m, ct, cn); ds_hmac_final(&m, tag);
+    uint8_t diff = 0; for (int i = 0; i < 32; i++) diff |= (uint8_t)(tag[i] ^ tg[i]);
+    if (diff) { *why = "the line does not open with the app's key (another key, or changed)"; goto out; }
+    for (size_t i = 0; i < cn; i++) {
+        if (!(i % 32)) { uint8_t le[4] = {(uint8_t)(i / 32), (uint8_t)(i / 32 >> 8), (uint8_t)(i / 32 >> 16), (uint8_t)(i / 32 >> 24)};
+            ds_sha_init(&h); ds_sha_update(&h, enc, 32); ds_sha_update(&h, nonce, 16); ds_sha_update(&h, le, 4); ds_sha_raw(&h, ks); }
+        pt[i] = (char)(ct[i] ^ ks[i % 32]);
+    }
+    pt[cn] = 0;
+    char *nl = memchr(pt, 0, cn) ? NULL : strchr(pt, '\n');
+    if (!nl || strchr(nl + 1, '\n')) { *why = "the content is not two lines"; goto out; }
+    *nl = 0; const char *c = nl + 1; size_t rl = strlen(pt);
+    if (rl <= 8 || memcmp(pt, "https://", 8) || pt[rl - 1] != '/' || !ds_url_text(pt)) { *why = "the server is not an https:// folder address ending in /"; goto out; }
+    if (rl >= rcap || strlen(c) >= ccap) { *why = "the server's address or credentials are too long"; goto out; }
+    if (*c) { int ok = c[0] != ':' && strchr(c, ':'); for (const char *q = c; *q; q++) if ((unsigned char)*q < 0x20 || *q == 0x7f) ok = 0;
+        if (!ok) { *why = "the credentials are not user:password"; goto out; } }
+    memcpy(root, pt, rl + 1); memcpy(cred, c, strlen(c) + 1); rc = 0;
+out:
+    memset(raw, 0, sizeof raw); memset(pt, 0, sizeof pt); memset(enc, 0, sizeof enc); memset(mac, 0, sizeof mac); memset(ks, 0, sizeof ks); memset(&h, 0, sizeof h);
+    return rc;
+}
+
+// the APK's asset of the server (porter/publish.py source_asset), masked (no protection, only against reading the password by accident):
+//   version 1: "NX2S", 1, then "url\ncred"
+//   version 2: "NX2S", 2, then "url\ncred\npointer_url\nkey_hex\nsubpath": the server root from the pointer file (+ subpath, this pack's folder under it), url and cred its fallback
+typedef struct { int version; char url[1024], cred[512], pointer[1024], sub[1024]; uint8_t key[32]; } ds_src;   // version 1: pointer, sub and key empty
+static int ds_source(const uint8_t *a, size_t n, ds_src *o) {
     static const char M[] = "nx2a-data-source:not-a-secret!"; const size_t ml = sizeof M - 1;
-    if (n < 6 || memcmp(a, "NX2S\x01", 5) || n - 5 > 2048) return -1;
-    char t[2049]; size_t k = n - 5;
+    memset(o, 0, sizeof *o);
+    if (n < 6 || memcmp(a, "NX2S", 4) || (a[4] != 1 && a[4] != 2) || n - 5 > (a[4] == 1 ? 2048u : 4096u)) return -1;
+    char t[4097]; size_t k = n - 5; int rc = -1;
     for (size_t i = 0; i < k; i++) t[i] = (char)(a[5 + i] ^ (uint8_t)M[i % ml] ^ (uint8_t)(i * 131 & 255));
-    t[k] = 0; char *nl = strchr(t, '\n'); if (!nl) return -1;
-    *nl = 0; if (strlen(t) >= ucap || strlen(nl + 1) >= ccap) return -1;
-    strcpy(url, t); strcpy(cred, nl + 1); memset(t, 0, sizeof t); return 0;
+    t[k] = 0; char *nl = strchr(t, '\n'); if (!nl) goto out;
+    *nl = 0;
+    if (a[4] == 1) {   // as it always was
+        if (strlen(t) >= sizeof o->url || strlen(nl + 1) >= sizeof o->cred) goto out;
+        strcpy(o->url, t); strcpy(o->cred, nl + 1); o->version = 1; rc = 0; goto out;
+    }
+    char *f[5] = {t, nl + 1}; for (int i = 2; i < 5; i++) { char *x = strchr(f[i - 1], '\n'); if (!x) goto out; *x = 0; f[i] = x + 1; }
+    if (strchr(f[4], '\n') || strlen(f[0]) >= sizeof o->url || strlen(f[1]) >= sizeof o->cred || strlen(f[2]) >= sizeof o->pointer || strlen(f[4]) >= sizeof o->sub) goto out;
+    if (strncmp(f[2], "https://", 8) || strlen(f[2]) <= 8 || !ds_url_text(f[2]) || strlen(f[3]) != 64) goto out;
+    for (int i = 0; i < 32; i++) { unsigned v = 0;
+        for (int j = 0; j < 2; j++) { char h = f[3][2 * i + j]; int d = h >= '0' && h <= '9' ? h - '0' : h >= 'a' && h <= 'f' ? h - 'a' + 10 : h >= 'A' && h <= 'F' ? h - 'A' + 10 : -1; if (d < 0) goto out; v = v << 4 | (unsigned)d; }
+        o->key[i] = (uint8_t)v; }
+    size_t sl = strlen(f[4]);
+    if (sl) {   // the pack's folder under the root: relative, ending in / (publish.check_subpath)
+        if (f[4][sl - 1] != '/' || !ds_url_text(f[4])) goto out;
+        f[4][sl - 1] = 0; int ok = ds_rel_ok(f[4]); f[4][sl - 1] = '/'; if (!ok) goto out;
+    }
+    strcpy(o->url, f[0]); strcpy(o->cred, f[1]); strcpy(o->pointer, f[2]); strcpy(o->sub, f[4]); o->version = 2; rc = 0;
+out:
+    memset(t, 0, sizeof t);
+    if (rc) memset(o, 0, sizeof *o);
+    return rc;
 }
 
 // ---- the sync ----

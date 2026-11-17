@@ -9,6 +9,9 @@
 // An APK without the asset runs the sync too when its files folder has a bundles folder (a pack whose small files porter install pushed in bundles: datasync.h), with
 // no server: the bundles are unpacked, then the game starts
 // The same screen shows the shader preparation (dm_prep_begin: gfx_vk_gpl.inc vk_gpl_prepare), after the sync or without one, before the game starts
+// An asset of version 2 (porter port --data-pointer) names a pointer file as well: the sync thread reads it before files.json (pointer_resolve), without the Authorization
+// header, and takes the server root and credentials it holds (+ the pack's folder under the root); without an answer, the pointer line it last read (kept in the app's
+// internal storage, encrypted as it came); without that, the asset's own address. An asset of version 1 never goes that way
 #include "dm.h"
 #include "datasync.h"
 #include "pixel_font.h"
@@ -35,6 +38,9 @@ static struct {
     void (*done)(void); int pipe[2];
 } S = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, .status = -1, .pipe = {-1, -1}};
 static struct { int on, done, total, gl_tried; } P;   // the shader preparation (dm_prep_begin), under S.mu: the screen shows it instead of the sync
+// the pointer (an asset of version 2): its address, key and the pack's folder under the root; the asset's own server (base, auth) for when neither the pointer nor the
+// cache answers; cache: the file in the app's internal storage the last pointer line read is kept in (as it came, encrypted). fresh: the pointer itself answered this run
+static struct { int on, fresh; char pointer[1024], sub[1024], base[1024], auth[600], cache[600]; uint8_t key[32]; } PT;
 static int64_t now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
 
 // ---- JNI ----
@@ -122,6 +128,75 @@ out:
     (*E)->PopLocalFrame(E, NULL);
     if (rc) LOG("data: %s%s: %s", rel, from ? " (resumed)" : "", why[0] ? why : "failed");   // the address only: the credentials are in a header, never in the log
     return rc;
+}
+// The pointer file, an absolute https:// address: GET with no Authorization header (the data server's credentials never go to the pointer's host, another one), the list's
+// short timeouts, nothing from a cache; its body (at most cap - 1 bytes) into out, NUL-terminated. 0, or -1 with why (the reason, never the body)
+static int http_get_plain(jhttp *h, const char *url, char *out, size_t cap, size_t *got, char *why, size_t wcap) {
+    JNIEnv *E = h->E; int rc = -1; size_t n = 0; jobject U = NULL, C = NULL, in = NULL; why[0] = 0; *got = 0;
+    if ((*E)->PushLocalFrame(E, 32)) { jx(E, NULL, 0); snprintf(why, wcap, "no JNI frame"); return -1; }
+    jstring su = (*E)->NewStringUTF(E, url); if (jx(E, why, wcap) || !su) goto out;
+    U = (*E)->NewObject(E, h->cUrl, h->mUrl, su); if (jx(E, why, wcap) || !U) goto out;
+    C = (*E)->CallObjectMethod(E, U, h->mOpen); if (jx(E, why, wcap) || !C || !(*E)->IsInstanceOf(E, C, h->cConn)) goto out;
+    (*E)->CallVoidMethod(E, C, h->mConnTo, 4000); if (jx(E, why, wcap)) goto out;
+    (*E)->CallVoidMethod(E, C, h->mReadTo, 8000); if (jx(E, why, wcap)) goto out;
+    (*E)->CallVoidMethod(E, C, h->mCaches, JNI_FALSE); if (jx(E, why, wcap)) goto out;
+    if (jprop(h, C, "Cache-Control", "no-cache", why, wcap) || jprop(h, C, "Accept-Encoding", "identity", why, wcap)) goto out;
+    int code = (*E)->CallIntMethod(E, C, h->mCode); if (jx(E, why, wcap)) goto out;
+    if (code != 200) { snprintf(why, wcap, "HTTP %d", code); goto out; }
+    in = (*E)->CallObjectMethod(E, C, h->mIn); if (jx(E, why, wcap) || !in) goto out;
+    for (int idle = 0;;) {
+        jint k = (*E)->CallIntMethod(E, in, h->mRead, h->buf); if (jx(E, why, wcap)) goto out;
+        if (k < 0) break;
+        if (!k) { if (++idle > 1000) { snprintf(why, wcap, "the answer did not end"); goto out; } continue; }
+        if ((size_t)k > cap - 1 - n) { snprintf(why, wcap, "the answer is longer than %d bytes", (int)(cap - 1)); goto out; }
+        (*E)->GetByteArrayRegion(E, h->buf, 0, k, (jbyte *)(out + n)); n += (size_t)k;
+    }
+    out[n] = 0; *got = n; rc = 0;
+out:
+    jx(E, why[0] ? NULL : why, why[0] ? 0 : wcap);
+    if (in) { (*E)->CallVoidMethod(E, in, h->mClose); jx(E, NULL, 0); }
+    if (C && h->mDisc) { (*E)->CallVoidMethod(E, C, h->mDisc); jx(E, NULL, 0); }
+    (*E)->PopLocalFrame(E, NULL);
+    if (rc && !why[0]) snprintf(why, wcap, "failed");
+    if (rc) memset(out, 0, cap);
+    return rc;
+}
+static void basic_auth(char *out, size_t cap, const char *cred) {   // "Basic <base64 of user:password>", "" for no credentials (or ones too long for out)
+    out[0] = 0; size_t n = strlen(cred); if (!n) return;
+    char b64[sizeof S.auth]; if (4 * ((n + 2) / 3) + 1 + 6 > sizeof b64 || 4 * ((n + 2) / 3) + 1 + 6 > cap) { LOG("[RED] data: the pointer's credentials are too long: none are sent"); return; }
+    ds_base64(b64, cred, n); snprintf(out, cap, "Basic %s", b64); memset(b64, 0, sizeof b64);
+}
+// The server for this try (an asset of version 2), on the sync thread before files.json: the pointer, else the pointer line kept from the last time, else the asset's own.
+// A pointer that cannot be read costs one short timeout (4 s to connect, 8 s to read), and the sync then goes on as before (no server: the game starts with what it has)
+static void pointer_resolve(jhttp *h) {
+    char line[DS_PTR_MAX + 1], why[256] = "", root[1024], cred[512], base[1100]; const char *bad = NULL; size_t n = 0; int src = 0;   // src: 1 the pointer, 2 the cache, 0 the asset
+    if (!http_get_plain(h, PT.pointer, line, sizeof line, &n, why, sizeof why)) {
+        if (!ds_pointer_open(line, n, PT.key, root, sizeof root, cred, sizeof cred, &bad)) src = 1;
+        else { LOG("[RED] data: the pointer file %s is refused: %s", PT.pointer, bad); snprintf(why, sizeof why, "it was refused: %s", bad); }
+    }
+    if (src == 1 && PT.cache[0]) {   // kept for a launch the pointer does not answer (written only when it changed)
+        size_t cn = 0; char *had = ds_read(PT.cache, &cn, DS_PTR_MAX + 1);
+        if (!had || cn != n || memcmp(had, line, n)) { if (ds_write(PT.cache, line, n)) LOG("[RED] data: cannot keep the pointer in the app's storage (errno %d)", errno); }
+        if (had) { memset(had, 0, cn); free(had); }
+    }
+    if (!src && PT.cache[0]) {
+        size_t cn = 0; char *had = ds_read(PT.cache, &cn, DS_PTR_MAX + 1);
+        if (had && !ds_pointer_open(had, cn, PT.key, root, sizeof root, cred, sizeof cred, &bad)) src = 2;
+        else if (had) LOG("[RED] data: the pointer kept in the app's storage is refused: %s", bad);
+        if (had) { memset(had, 0, cn); free(had); }
+    }
+    if (src && (size_t)snprintf(base, sizeof base, "%s%s", root, PT.sub) >= sizeof S.base) { LOG("[RED] data: the pointer's server address is too long"); src = 0; }
+    pthread_mutex_lock(&S.mu);
+    if (src) { snprintf(S.base, sizeof S.base, "%s", base); basic_auth(S.auth, sizeof S.auth, cred); }
+    else { snprintf(S.base, sizeof S.base, "%s", PT.base); snprintf(S.auth, sizeof S.auth, "%s", PT.auth); }
+    int auth = S.auth[0] != 0;
+    pthread_mutex_unlock(&S.mu);
+    if (src == 1) LOG("data: server from the pointer");
+    else if (src == 2) LOG("data: server from the cached pointer (the pointer could not be read: %s)", why);
+    else LOG("data: server from the APK (no pointer answer and no cache: %s)", why[0] ? why : "the cache could not be read");
+    LOG("data: the app's data comes from %s%s", S.base, auth ? " (Basic authentication)" : "");   // the address only: the credentials are in a header, never in the log
+    PT.fresh = src == 1;
+    memset(line, 0, sizeof line); memset(cred, 0, sizeof cred);
 }
 static uint64_t free_bytes(void *u, const char *root) { (void)u; struct statvfs v; return statvfs(root, &v) ? (uint64_t)-1 : (uint64_t)v.f_bavail * v.f_frsize; }
 static void sync_note(void *u, const ds_progress *p) { (void)u; pthread_mutex_lock(&S.mu); S.pr = *p; pthread_mutex_unlock(&S.mu); }
@@ -295,6 +370,7 @@ static void *sync_thread(void *a) {
         int delay = 2;
         for (int round = 1;; round++) {
             pthread_mutex_lock(&S.mu); S.status = -1; S.msg[0] = 0; pthread_mutex_unlock(&S.mu);
+            if (net && PT.on && !PT.fresh) pointer_resolve(&h);   // (again at each try until the pointer itself answers: a launch before the network is up reaches it later)
             rc = ds_sync(&c);
             if (rc == DS_DONE || rc == DS_UPTODATE || rc == DS_OFFLINE) break;
             if (c.pr.phase == DS_PH_DOWNLOAD && c.pr.done) delay = 2;   // it moved on: the next break waits from the start again
@@ -336,15 +412,22 @@ int dm_sync_begin(ANativeActivity *act, const char *root, void (*done)(void)) {
     int unpack = ds_bundles_dir(root);   // bundles porter install pushed: unpacked before the game starts, with a server or without
     if (!as && !unpack) return 0;
     if (as) {
-        char cred[512]; const void *b = AAsset_getBuffer(as); int bad = !b || ds_source(b, (size_t)AAsset_getLength(as), S.base, sizeof S.base, cred, sizeof cred);
+        static ds_src src; const void *b = AAsset_getBuffer(as); int bad = !b || ds_source(b, (size_t)AAsset_getLength(as), &src);
         AAsset_close(as);
+        char *cred = src.cred;
+        if (!bad) snprintf(S.base, sizeof S.base, "%s", src.url);
         if (bad) {
-            S.base[0] = 0; memset(cred, 0, sizeof cred);
+            S.base[0] = 0; memset(&src, 0, sizeof src);
             LOG("[RED] data: the APK's nx2a/source.bin cannot be read: the game starts with the data the app has%s", unpack ? " (once its bundles are unpacked)" : "");
             if (!unpack) return 0;
         } else {
             if (cred[0]) { char b64[sizeof S.auth - 8]; if (strlen(cred) * 4 / 3 + 8 < sizeof b64) { ds_base64(b64, cred, strlen(cred)); snprintf(S.auth, sizeof S.auth, "Basic %s", b64); memset(b64, 0, sizeof b64); } }
-            memset(cred, 0, sizeof cred);
+            if (src.version == 2) {   // a pointer: the sync thread decides the server (pointer_resolve); the asset's own is the fallback
+                PT.on = 1; memcpy(PT.key, src.key, sizeof PT.key); snprintf(PT.pointer, sizeof PT.pointer, "%s", src.pointer); snprintf(PT.sub, sizeof PT.sub, "%s", src.sub);
+                snprintf(PT.base, sizeof PT.base, "%s", S.base); snprintf(PT.auth, sizeof PT.auth, "%s", S.auth);
+                if (act->internalDataPath && (size_t)snprintf(PT.cache, sizeof PT.cache, "%s/nx2a_pointer.txt", act->internalDataPath) >= sizeof PT.cache) PT.cache[0] = 0;   // (none: no cache)
+            }
+            memset(&src, 0, sizeof src);
         }
     }
     if (package_name(act, S.package, sizeof S.package)) { LOG("[RED] data: the app's package is not known: the game starts with the data the app has"); return 0; }
@@ -352,7 +435,8 @@ int dm_sync_begin(ANativeActivity *act, const char *root, void (*done)(void)) {
     S.done = done;
     ALooper *lp = ALooper_forThread();
     if (!lp || pipe(S.pipe) || ALooper_addFd(lp, S.pipe[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, sync_ready, NULL) != 1) { LOG("[RED] data: no looper on the main thread: the game starts with the data the app has"); return 0; }
-    if (S.base[0]) LOG("data: the app's data comes from %s%s", S.base, S.auth[0] ? " (Basic authentication)" : "");
+    if (S.base[0] && PT.on) LOG("data: the data server is read from the pointer %s first (else the last one read, else %s)", PT.pointer, S.base);
+    else if (S.base[0]) LOG("data: the app's data comes from %s%s", S.base, S.auth[0] ? " (Basic authentication)" : "");
     else LOG("data: no data server; the bundles in the files folder are unpacked before the game starts");
     G.ok = !gl_load(); if (!G.ok) LOG("[RED] data: no EGL / GLES 2: the download runs without its screen");
     pthread_mutex_lock(&S.mu); S.act = act; pthread_mutex_unlock(&S.mu);

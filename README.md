@@ -92,6 +92,8 @@ How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ("Graphics pipelin
 
 After changing the pack, `porter publish <App>-data` writes the list again (unchanged files keep their hashes, so a 4 GB RomFS is hashed once). A pack of very many small files can travel as bundles (`data_bundles` in the profile's `android.tsv`): Fire Emblem Engage's 205,000 small files became 89.
 
+To move the server later without porting the games again, port with a pointer file: a one-line encrypted file on another host that says where the server is now. Make a key once (`porter pointer --new-key ptr.key`), put the line `porter pointer --root https://<host>/<share>/ --cred <file> --key ptr.key` prints at an `https://` address of your choice, and port with `--data-root https://<host>/<share>/ --data-pointer <that address> --data-pointer-key ptr.key` next to `--data-url https://<host>/<share>/<game>/`. After a move, write a new line for the new root into that file: the APKs read it at their next launch (and keep the last one they read, so a pointer that does not answer is no problem). The pointer is fetched without your server's credentials.
+
 The address and the `user:password` are inside the APK, masked but not encrypted: anyone who has the APK can read them. Use a read-only account made for this, keep the server private, and don't share the APK. The pack is your own dump; this is for your own devices.
 
 How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ("The data from a web server").

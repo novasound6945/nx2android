@@ -81,6 +81,8 @@ Retroid Pocket 6와 Retroid Pocket Nova(둘 다 Snapdragon 8 Gen 2, Adreno 740, 
 
 팩을 고친 뒤에는 `porter publish <App>-data`가 목록을 다시 씁니다(바뀌지 않은 파일은 해시를 유지하므로 4 GB짜리 RomFS는 한 번만 해시합니다). 작은 파일이 아주 많은 팩은 묶음으로 보낼 수 있습니다(프로파일 `android.tsv`의 `data_bundles`). 파이어 엠블렘 인게이지의 작은 파일 205,000개가 묶음 89개가 됐습니다.
 
+나중에 게임을 다시 포팅하지 않고 서버를 옮기려면 안내 파일(pointer)을 씁니다. 다른 호스트에 두는 한 줄짜리 암호화 파일로, 지금 서버가 어디 있는지 알려 줍니다. 열쇠를 한 번 만들고(`porter pointer --new-key ptr.key`), `porter pointer --root https://<호스트>/<공유>/ --cred <파일> --key ptr.key`가 출력한 줄을 원하는 `https://` 주소에 올린 뒤, `--data-url https://<호스트>/<공유>/<게임>/`와 함께 `--data-root https://<호스트>/<공유>/ --data-pointer <그 주소> --data-pointer-key ptr.key`로 포팅합니다. 서버를 옮기면 그 파일에 새 루트로 만든 줄만 다시 쓰면 APK가 다음 실행 때 읽습니다(마지막으로 읽은 줄을 기억하므로 안내 파일이 응답하지 않아도 괜찮습니다). 안내 파일을 받을 때는 내 서버의 계정을 보내지 않습니다.
+
 주소와 `user:password`는 APK 안에 들어가며, 가려져 있을 뿐 암호화되지는 않습니다. APK를 가진 사람은 누구나 읽을 수 있습니다. 이 용도로 만든 읽기 전용 계정을 쓰고, 서버는 비공개로 두고, APK를 공유하지 마세요. 팩은 자기 덤프이고, 이 기능은 자기 기기를 위한 것입니다.
 
 구조 설명: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)의 "The data from a web server".

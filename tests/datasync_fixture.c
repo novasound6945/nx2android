@@ -3,6 +3,10 @@
 // datasync.h (an app from before bundles).
 // datasync_fixture <server dir|-|none> <root> <package> [--break BYTES] [--free BYTES]
 // Prints "fetch <path> <from>" for each file the server sent, then: result <R> fetched_files <n> fetched_bytes <b> space_need <B> space_free <B> [err <c->err>]
+// The pointer file and the APK's asset (a datasync.h with them, DS_PTR_MAX):
+// datasync_fixture --hmac <key hex> <message hex>   prints the HMAC-SHA256 in hex
+// datasync_fixture --pointer <key hex> <file>       prints "ok <root>" and "cred <cred>" on two lines (ds_pointer_open), or "bad <why>"
+// datasync_fixture --source <file>                  prints "v<N>", then url, cred, pointer, key (hex), sub on a line each (ds_source), or "bad"
 #include <locale.h>
 #ifdef DS_H
 #include DS_H
@@ -39,8 +43,43 @@ static uint64_t freeb(void *u, const char *root) { (void)root; return *(uint64_t
 static void logf_(void *u, const char *m) { (void)u; printf("log: %s\n", m); }
 static const char *NAMES[] = {"DONE", "UPTODATE", "OFFLINE", "ERR_NET", "ERR_SERVER", "ERR_PACKAGE", "ERR_SPACE", "ERR_DATA", "ERR_DISK", "ERR_LOCAL"};
 
+#ifdef DS_PTR_MAX
+static size_t unhex(const char *s, uint8_t *out, size_t cap) {   // (the tests give well-formed hex)
+    size_t n = strlen(s) / 2; if (n > cap) n = cap;
+    for (size_t i = 0; i < n; i++) { unsigned v = 0; if (sscanf(s + 2 * i, "%2x", &v) != 1) v = 0; out[i] = (uint8_t)v; }
+    return n;
+}
+static int extra(int argc, char **argv) {   // the pointer's and the asset's modes; -1: not one of them
+    if (argc == 4 && !strcmp(argv[1], "--hmac")) {
+        static uint8_t k[4096], m[8192]; uint8_t t[32]; size_t kn = unhex(argv[2], k, sizeof k), mn = unhex(argv[3], m, sizeof m);
+        ds_hmac h; ds_hmac_init(&h, k, kn); ds_hmac_update(&h, m, mn); ds_hmac_final(&h, t);
+        for (int i = 0; i < 32; i++) printf("%02x", t[i]);
+        printf("\n"); return 0;
+    }
+    if (argc == 4 && !strcmp(argv[1], "--pointer")) {
+        uint8_t k[32] = {0}; unhex(argv[2], k, sizeof k); size_t n = 0; char *t = ds_read(argv[3], &n, 1 << 20);
+        char root[1024], cred[512]; const char *why = "";
+        if (!t) { printf("bad cannot read\n"); return 0; }
+        if (ds_pointer_open(t, n, k, root, sizeof root, cred, sizeof cred, &why)) printf("bad %s\n", why);
+        else printf("ok %s\ncred %s\n", root, cred);
+        free(t); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "--source")) {
+        size_t n = 0; char *t = ds_read(argv[2], &n, 1 << 20); static ds_src s;
+        if (!t || ds_source((const uint8_t *)t, n, &s)) { printf("bad\n"); free(t); return 0; }
+        printf("v%d\n%s\n%s\n%s\n", s.version, s.url, s.cred, s.pointer);
+        for (int i = 0; i < 32; i++) printf("%02x", s.key[i]);
+        printf("\n%s\n", s.sub); free(t); return 0;
+    }
+    return -1;
+}
+#endif
+
 int main(int argc, char **argv) {
     setlocale(LC_ALL, ".UTF8");   // Windows' UCRT: narrow file names are UTF-8, as on Android (elsewhere the call does nothing)
+#ifdef DS_PTR_MAX
+    { int r = extra(argc, argv); if (r >= 0) return r; }
+#endif
     if (argc < 4) { fprintf(stderr, "usage: datasync_fixture <server|-|none> <root> <package> [--break N] [--free N]\n"); return 2; }
     int none = !strcmp(argv[1], "none");
     srv s = {strcmp(argv[1], "-") && !none ? argv[1] : NULL, -1, 0, 0}; uint64_t fr = 0; int use_free = 0;

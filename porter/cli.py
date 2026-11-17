@@ -54,6 +54,13 @@ def _parser():
                     help='the folder on a web server (http:// or https://, GET with Range) where the data pack is put as it is: the APK downloads its data from there at launch, '
                          'only the files that changed, and the pack gets the files.json the app compares (porter publish)')
     po.add_argument('--data-cred', default=None, metavar='FILE', help='with --data-url: a file of one line, user:password, for the server\'s Basic authentication (masked in the APK, never printed)')
+    po.add_argument('--data-root', default='', metavar='URL',
+                    help='with --data-pointer: the server folder the game packs are under; --data-url must be under it, and the rest of --data-url is this pack\'s folder, '
+                         'kept when the pointer names another root')
+    po.add_argument('--data-pointer', default='', metavar='URL',
+                    help='the https:// address of a pointer file (porter pointer) that says where the data server is now: the app reads it first, so the server can move '
+                         'without porting again; without an answer it uses the last pointer it read, else --data-url. Needs --data-root and --data-pointer-key')
+    po.add_argument('--data-pointer-key', default=None, metavar='FILE', help='with --data-pointer: the key file the pointer is encrypted with (porter pointer --new-key; never printed)')
     po.add_argument('--jobs', type=int, default=os.cpu_count() or 8)
     po.add_argument('--progress', default='auto', choices=('auto', 'bar', 'lines', 'json', 'off'), help='json: one JSON event per line, for the GUI')
     ins = sub.add_parser('install', help='install a port made earlier'); ins.add_argument('data', help='the data pack folder (<App>-data)'); ins.add_argument('--apk', help='the APK (default: <App>.apk beside the pack)')
@@ -61,6 +68,14 @@ def _parser():
     _romfs_at(ins)
     pb = sub.add_parser('publish', help='write the data pack\'s files.json (paths, sizes, SHA-256), which an APK ported with --data-url compares and downloads by')
     pb.add_argument('data', help='the data pack folder (<App>-data)'); pb.add_argument('--progress', default='auto', choices=('auto', 'bar', 'lines', 'json', 'off'))
+    pt = sub.add_parser('pointer', help='the pointer file an APK ported with --data-pointer reads the data server from: a new key, a pointer line, or a check of one')
+    ptm = pt.add_mutually_exclusive_group(required=True)
+    ptm.add_argument('--new-key', default=None, metavar='FILE', help='write a new random key into FILE (not over an existing one; the key is never printed)')
+    ptm.add_argument('--root', default=None, metavar='URL', help='the https:// server folder the game packs are under now: prints the pointer line to put in the pointer file')
+    ptm.add_argument('--check', default=None, metavar='FILE', help="open a pointer line (a file, or '-' for stdin): prints its server folder and whether it has credentials")
+    pt.add_argument('--cred', default=None, metavar='FILE', help='with --root: the server\'s user:password file (as --data-cred; never printed)')
+    pt.add_argument('--key', default=None, metavar='FILE', help='with --root or --check: the key file')
+    pt.add_argument('-o', '--out', default=None, metavar='FILE', help='with --root: write the line into FILE instead of printing it')
     dv = sub.add_parser('devices', help='the devices adb sees'); dv.add_argument('--json', action='store_true')
     t = sub.add_parser('tools', help='list, or download, the missing tools (Android NDK, .NET SDK, platform-tools) from Google and Microsoft')
     t.add_argument('--download', action='store_true', help='download and unpack them into the nx2android folder (you accept their licenses)')
@@ -177,7 +192,7 @@ def cmd_port(a):
     opts = pipeline.Options(folder=Path(a.folder), keys=Path(a.keys) if a.keys else None, firmware=Path(a.firmware) if a.firmware else None, out=Path(a.out) if a.out else None, version=a.version, language=a.language,
                             app_name=a.app_name, install=a.install, device=a.device, replace_signer=a.replace_signer, debug=a.debug, experimental=a.experimental, package=a.package, fps60=a.fps60, touch=a.touch, mt_replay=a.mt_replay, vulkan_driver=a.vulkan_driver, shared_font=a.shared_font,
                             vercode_offset=offset, alias_headroom=a.alias_headroom, romfs_at=a.romfs_at, romfs_push=a.romfs_push, external_display=a.external_display, native_keyboard=a.native_keyboard,
-                            data_url=a.data_url, data_cred=a.data_cred, jobs=a.jobs)
+                            data_url=a.data_url, data_cred=a.data_cred, data_root=a.data_root, data_pointer=a.data_pointer, data_pointer_key=a.data_pointer_key, jobs=a.jobs)
     return _with_progress(a.progress, lambda: pipeline.emit_result(pipeline.Port(opts).run()))
 
 
@@ -202,6 +217,34 @@ def cmd_publish(a):
         PROG.end(f'{publish.FILES}: {len(fj["files"]):,} files, {fj["bytes"] / 2**30:.2f} GB, {fj["hashed"]:,} hashed, id {fj["id"][:16]}')
         say(f'upload {Path(a.data).resolve()} as it is (files.json last) to the folder the APK was ported with (--data-url)')
     return _with_progress(a.progress, go)
+
+
+def cmd_pointer(a):   # porter pointer: the key and the line never reach the screen but as the line itself (which is encrypted)
+    from porter import publish
+    from porter.upstream import BuildError
+    try:
+        if a.new_key is not None:
+            if a.cred or a.key or a.out: raise BuildError('--new-key takes no other option')
+            p = publish.new_key(a.new_key); print(f'a new pointer key is in {p}: keep it, the APKs ported with --data-pointer-key {p} need it to read the pointer')
+            return 0
+        if not a.key: raise BuildError('--root and --check need --key FILE')
+        key = publish.read_key(a.key, '--key')
+        if a.root is not None:
+            line = publish.pointer_seal(a.root, publish.read_cred(a.cred) if a.cred else '', key)
+            if a.out:
+                try: Path(a.out).write_text(line + '\n', encoding='ascii', newline='\n')
+                except OSError as e: raise BuildError(f'cannot write {a.out} ({e.strerror})') from None
+                print(f'the pointer line is in {a.out}: put it as the pointer file', file=sys.stderr)
+            else: print(line)
+            return 0
+        if a.cred or a.out: raise BuildError('--check takes only --key')
+        try: text = sys.stdin.read() if a.check == '-' else Path(a.check).read_text(encoding='ascii', errors='replace')
+        except OSError as e: raise BuildError(f'cannot read {a.check} ({e.strerror})') from None
+        root, cred = publish.pointer_open(text, key)
+        print(f'{root} ({"with credentials" if cred else "no credentials"})')
+        return 0
+    except BuildError as e:
+        print(e, file=sys.stderr); return 1
 
 
 def cmd_devices(a):
@@ -297,4 +340,4 @@ def cmd_driver(a):   # porter driver and porter host: the installed APK rebuilt 
 def main(argv):
     if hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8', errors='replace')   # game names and progress bars on a Windows console
     a = _parser().parse_args(argv)
-    return {'doctor': cmd_doctor, 'profiles': cmd_profiles, 'inspect': cmd_inspect, 'port': cmd_port, 'install': cmd_install, 'publish': cmd_publish, 'devices': cmd_devices, 'tools': cmd_tools, 'config': cmd_config, 'saves': cmd_saves, 'driver': cmd_driver, 'host': cmd_driver}[a.cmd](a)
+    return {'doctor': cmd_doctor, 'profiles': cmd_profiles, 'inspect': cmd_inspect, 'port': cmd_port, 'install': cmd_install, 'publish': cmd_publish, 'pointer': cmd_pointer, 'devices': cmd_devices, 'tools': cmd_tools, 'config': cmd_config, 'saves': cmd_saves, 'driver': cmd_driver, 'host': cmd_driver}[a.cmd](a)
