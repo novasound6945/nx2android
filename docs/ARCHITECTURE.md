@@ -68,6 +68,11 @@ the old format.
 
 SPIR-V is cleaned up when a shader module is made (`gfx_vk_spv_strip.inc`, `tests/test_vk_spv_strip.py`): unused trailing `ClipDistance` / `CullDistance` members of a vertex output block are dropped (not for a bundle with geometry or tessellation shaders), and the `Float64` capability without 64-bit floats and the fragment-shader-interlock capabilities without interlock use. Both are folded into the shader bundle's hash, so a preparation made with other transforms is made again.
 
+Before committing a single-sample depth pass with all colour channels disabled
+and alpha-to-coverage off, LOAD-only colour attachments without resolves or BC
+stand-ins are omitted. Colour
+writes, clears or alpha-to-coverage end that pass before restoring the targets.
+
 Vulkan colour attachments outside the fragment shader's reflected output map
 have writes and blending disabled, so undefined outputs cannot overwrite them.
 The replacement flat diagnostic fragment shader writes all eight outputs and

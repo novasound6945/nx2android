@@ -30,7 +30,8 @@ static VkImageView P_alias_views[8];static uint8_t P_alias[8];
 static VkRenderingAttachmentInfo P_ca[8];static VkRenderingInfo P_ri;static int P_cleared,ended,clears;static uint32_t cleared_slot;
 static struct {unsigned folded;} g_vkst;
 typedef struct {int w;} vkimg_t;static vkimg_t g_s0_image;static struct {vkimg_t *im;} P_att[8];
-static void vk_end_pass(void) {ended++;S.pass_open=0;}
+static uint32_t g_pruned_color; /* colour targets left out of the open depth pass (prune_masked_color) */
+static void vk_end_pass(void) {ended++;S.pass_open=0;g_pruned_color=0;}
 static int begin_pass(void) {return 1;}
 static int pass_commit(void) {return 1;}
 static int clear_masked(const p_clear_color *c,VkRect2D r) {(void)c;(void)r;return 0;}
@@ -71,6 +72,10 @@ int main(void) {
  S.pass_open=1;clear_color(&c);assert(clears==1 && cleared_slot==3);
  c.index=-1;clear_color(&c);c.index=8;clear_color(&c);assert(clears==1);
  P_att[3].im=&g_s0_image;c.index=4;clear_color(&c);assert(clears==1);P_att[3].im=NULL;clear_color(&c);assert(clears==2);
+ // A depth pass with its colour targets left out: a mask that still writes nothing keeps it, colour writes or a clear end it first
+ S.pass_open=1;g_pruned_color=0xf;int e0=ended;bind_chmask(0);assert(ended==e0 && g_pruned_color==0xf);
+ bind_chmask(0x0000f000u);assert(ended==e0+1 && g_pruned_color==0);
+ S.pass_open=1;g_pruned_color=0xf;e0=ended;clear_color(&c);assert(ended==e0+1 && g_pruned_color==0);
  return 0;
 }
 '''
