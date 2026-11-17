@@ -26,3 +26,4 @@ tested	v327680 Retroid Pocket Nova (QCS8550, Adreno 740, Turnip T30, Android 13)
 package	org.nx2a.t0100a6301214e000
 orientation	landscape
 data_bundles	1048576	67108864
+romfs_packs	on
