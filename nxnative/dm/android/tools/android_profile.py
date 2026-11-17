@@ -21,6 +21,9 @@
 #                small files that creating each one on the device over adb (Android's FUSE layer) or downloading each one takes hours (Fire Emblem Engage: 205,000 of its
 #                207,000 files are under 1 MB)
 #   romfs        raw (default) | zstd: zstd puts the RomFS files that compress in the data pack as packed files (porter/romfs_pack.py), which the host reads back
+#   romfs_packs  off (default) | on: with data_bundles (its <max file bytes> and <bundle bytes>), the RomFS's small files go into tar packs the app never unpacks
+#                (packs/pNNNN.tar) and their index (packs/romfs.nxbi), which the host reads them from in place (porter/datapack.py, dm/host/fs_pack.h); aoc/ and
+#                sysdata/ keep their bundles. Not with romfs zstd
 # Usage: android_profile.py header <id> <out.h> (android_profile.h for the host: the gamepad layouts, written only when it changes); android_profile.py list;
 #   android_profile.py <id> [<key>] (the profile's keys, or one key's value); android_profile.py theme <id> (the gamepad theme pack porter puts in the APK)
 # From Python: import android_profile; p = android_profile.load(<id>) (None without android.tsv); p.status, p.package, p.settings, p.env, p.overlay_table();
@@ -39,7 +42,7 @@ SETTINGS = {'overlay': ('0', '1'), 'rumble': ('0', '1'), 'docked': ('0', '1'), '
             'rate': ('0', '60', '40', '30')}                                                       # the frame rate limit, 0 auto (front_android.c RATE_STEPS)
 REQUIRES = ('bcn',)
 KINDS = {'stick_l': 'OV_STICK_L', 'stick_r': 'OV_STICK_R', 'button': 'OV_BUTTON', 'dpad': 'OV_DPAD', 'menu': 'OV_MENU'}
-SINGLE = ('status', 'tested', 'package', 'orientation', 'requires', 'sysdata', 'romfs', 'data_bundles')
+SINGLE = ('status', 'tested', 'package', 'orientation', 'requires', 'sysdata', 'romfs', 'data_bundles', 'romfs_packs')
 BUNDLE_MAX = 1 << 30   # data_bundles: the largest bundle (the app downloads one whole and reads it twice, its SHA-256 then its files, before deleting it)
 REPEAT = ('setting', 'env', 'overlay', 'variant')
 VARIANTS = ('4x3',)   # the variants the app knows how to pick (front_android.c aspect_variant)
@@ -116,6 +119,9 @@ class AndroidProfile:
     def romfs_zstd(self): return self.get('romfs', 'raw') == 'zstd'   # the data pack's RomFS compressed (porter/romfs_pack.py)
 
     @property
+    def romfs_packs(self): return self.get('romfs_packs', 'off') == 'on'   # the RomFS's small files in packs the host reads in place (porter/datapack.py)
+
+    @property
     def settings(self):   # {'overlay': '1', ...}: the defaults the data pack's settings.txt starts with
         return dict(v.split('=', 1) for v in self.values('setting'))
 
@@ -145,6 +151,8 @@ class AndroidProfile:
         bad += [f'sysdata {t!r}: a 16-digit hex title ID' for t in self.get('sysdata').split() if not re.fullmatch(r'[0-9A-Fa-f]{16}', t)]
         if self.get('data_bundles') and not (self.bundles and 0 < self.bundles[0] < self.bundles[1] <= BUNDLE_MAX):
             bad.append(f'data_bundles {self.get("data_bundles")!r}: <max file bytes> <bundle bytes>, 0 < max file < bundle <= {BUNDLE_MAX}')
+        if self.get('romfs_packs', 'off') not in ('on', 'off'): bad.append(f'romfs_packs {self.get("romfs_packs")!r}: on or off')
+        elif self.romfs_packs and not self.get('data_bundles'): bad.append('romfs_packs on needs a data_bundles <max file bytes> <bundle bytes> row (the packs\' sizes)')
         for v in self.values('setting'):
             k, eq, val = v.partition('=')
             if not eq or k not in SETTINGS or val not in SETTINGS[k]: bad.append(f'setting {v!r}: ' + ', '.join(f'{n}={"|".join(vs)}' for n, vs in SETTINGS.items()))

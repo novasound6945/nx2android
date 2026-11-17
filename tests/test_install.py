@@ -434,6 +434,71 @@ class Bundles(unittest.TestCase):
         self.run_on(Device(text=env), romfs_at='app')
 
 
+class Packs(unittest.TestCase):
+    """A pack with packs (android.tsv romfs_packs): packs/ goes as plain files (the packs and their index), never a RomFS small file; the small files an earlier pack had
+    on their own go as stale ones; the room counts the packs and not those files as freed; --romfs-at refused"""
+    def setUp(self):
+        import types
+        self.t = Path(tempfile.mkdtemp(prefix='nx2a_test_packs_')); self.real, PROG.mode = install.Adb, 'off'
+        src = self.src = self.t / 'src'
+        for i in range(40): p = src / f'RomFS/d{i % 3}/f{i:02d}.bin'; p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(bytes([i]) * (100 + i * 37))
+        (src / 'RomFS/big.bin').write_bytes(b'b' * 5000); (src / 'mods').mkdir(); (src / 'mods/main').write_bytes(b'm' * 300)
+        (src / 'aoc/1').mkdir(parents=True); (src / 'aoc/1/a.bin').write_bytes(b'a' * 50)
+        self.prof = types.SimpleNamespace(name='Test Game', id='0100000000AAA000', package=PKG, env=[], settings={}, requires=[], bundles=(2000, 8192), romfs_packs=True, romfs_zstd=False)
+        self.data = self.t / 'Test-data'
+        datapack.build(self.data, profile=self.prof, version='v65536', display='1.1.0', patched=src / 'mods', romfs=src / 'RomFS', shaders=None)
+        self.apk = apk_file(self.t / 'Test.apk')
+        self.local = {p.relative_to(self.data).as_posix(): p.stat().st_size for p in self.data.rglob('*') if p.is_file()}
+        self.packs = sorted(r for r in self.local if r.startswith('packs/'))
+        self.assertGreater(len(self.packs), 3); self.assertFalse(datapack.bundled(datapack.read_manifest(self.data)))
+
+    def tearDown(self): install.Adb = self.real; shutil.rmtree(self.t, ignore_errors=True)
+
+    def run_on(self, dev, **kw):
+        install.Adb = lambda exe, serial=None, log=print: dev
+        install.install(self.apk, self.data, 'adb', **kw)
+        return dev
+
+    def test_fresh(self):   # the pack folder as it is: the packs and the index pushed, no RomFS small file, no bundle
+        dev = self.run_on(Device())
+        for r in self.packs: self.assertEqual(dev.fs.get(f'{FILES}/{r}'), self.local[r], r)
+        self.assertEqual({k for k in dev.fs if k.startswith(f'{FILES}/RomFS/')}, {f'{FILES}/RomFS/big.bin'})
+        self.assertEqual([o for o in dev.ops if o[0] == 'push_whole'], [])
+        self.assertIn(f'DM_ROMFS_PACK={FILES}/packs/romfs.nxbi', dev.text[f'{FILES}/env.txt'])
+
+    def test_stale(self):   # the small files an earlier pack had on their own, and a pack this one does not have, go; the player's files stay
+        old = {f'{FILES}/RomFS/d0/f00.bin': 100, f'{FILES}/RomFS/d1/f01.bin': 137, f'{FILES}/packs/p0099.tar': 10240, f'{FILES}/log.txt': 9}
+        dev = self.run_on(Device(old))
+        rm = ' '.join(o[1] for o in dev.ops if o[0] == 'shell' and 'rm -f' in o[1])
+        for gone in ('RomFS/d0/f00.bin', 'RomFS/d1/f01.bin', 'packs/p0099.tar'): self.assertIn(gone, rm)
+        for kept in self.packs + ['log.txt', 'RomFS/big.bin']: self.assertNotIn(kept, rm)
+
+    def test_with_bundles(self):   # the DLC's small file in a bundle: a pack with bundles for the installer; the packs go with the loose files, the RomFS small files are stale
+        from porter import publish
+        datapack.build(self.data, profile=self.prof, version='v65536', display='1.1.0', patched=self.src / 'mods', romfs=self.src / 'RomFS', shaders=None, aoc=self.src / 'aoc')
+        fj = publish.manifest(self.data); self.assertEqual([b['path'] for b in fj['bundles']], ['bundles/b0000.tar'])
+        dev = self.run_on(Device({f'{FILES}/RomFS/d0/f00.bin': 100}))
+        self.assertEqual([o[1] for o in dev.ops if o[0] == 'push_whole'], [f'{FILES}/bundles/b0000.tar'])
+        for r in self.packs: self.assertIn(f'{FILES}/{r}', dev.fs)
+        self.assertIn('RomFS/d0/f00.bin', ' '.join(o[1] for o in dev.ops if o[0] == 'shell' and 'rm -f' in o[1]))
+
+    def test_space(self):   # what the push writes (the packs, not the small files' bytes the manifest counts), with an earlier pack's loose small files not counted as freed
+        want = sum(self.local.values())
+        self.run_on(Device(free=want))
+        with self.assertRaisesRegex(BuildError, 'GB more'): self.run_on(Device(free=want - 1))
+        loose = {f'{FILES}/RomFS/{p.relative_to(self.src / "RomFS").as_posix()}': p.stat().st_size for p in (self.src / 'RomFS').rglob('*') if p.is_file()}
+        with self.assertRaisesRegex(BuildError, 'GB more'): self.run_on(Device(loose, free=want - 5001))   # (big.bin is there at its size: not pushed)
+        self.run_on(Device(loose, free=want - 5000))
+
+    def test_no_romfs_at(self):   # the RomFS's small files are in the packs: --romfs-at refused before the device is touched, and an earlier install's folder too
+        dev = Device()
+        with self.assertRaisesRegex(BuildError, 'romfs_packs'): self.run_on(dev, romfs_at=DUMP)
+        self.assertEqual(dev.ops, [])
+        env = {f'{FILES}/env.txt': install.env_with_romfs('DM_LANG=en-US\n', DUMP)}
+        with self.assertRaisesRegex(BuildError, '--romfs-at app'): self.run_on(Device(text=env))
+        self.run_on(Device(text=env), romfs_at='app')
+
+
 class Hold(unittest.TestCase):
     """Adb.hold, the lock that keeps two porter installs off one device: two Adb objects for one serial (two installs), a lock file in a temporary folder"""
     def setUp(self):

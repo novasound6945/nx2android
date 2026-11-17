@@ -877,6 +877,7 @@ class Port:
             font_env, font_files = font_env + [f'DM_SHARED_FONT={datapack.files_folder(self.package)}/standard.ttf'], {**font_files, 'standard.ttf': self.o.shared_font}
         dst = self.o.out / f'{app_stem(self.g, self.app_name)}-data'
         romfs, zenv = self.game / 'RomFS', []
+        datapack.check_romfs_packs(self.ap)   # (romfs_packs with romfs zstd: refused before the RomFS is compressed)
         if self.ap.romfs_zstd and romfs.is_dir():   # android.tsv romfs zstd: packed copies of the files that compress, made once into the build folder; the rest stay links to the extraction
             PROG.set(step='compressing the RomFS', done=0, total=1, unit='B')
             nf, npk, raw, out = romfs_pack.pack_tree(romfs, self.aw / 'romfs_zstd' / self.pkg_ver, self.o.jobs, progress=lambda d, t: PROG.set(step='compressing the RomFS', done=d, total=t, unit='B'))
@@ -888,9 +889,10 @@ class Port:
                              files={**self.fps_files, **font_files}, variants={v: (d, self.ap.variants[v]) for v, d in getattr(self, 'variants', {}).items()}, profile_h=getattr(self, 'profile_h', None),
                              progress=lambda what: PROG.set(step=f'linking {what}'))
         self.data_path = dst; self.result['data'] = str(dst)
-        b = man.get('bundles')
+        b, pk = man.get('bundles'), man.get('packs')
         PROG.end(f'{man["files"]:,} files, {man["bytes"] / 2**30:.1f} GB' + (f', variants {", ".join(man["variants"])}' if man.get('variants') else '')
-                 + (f', {b["files"]:,} of them in {b["count"]:,} bundles ({b["tar_bytes"] / 2**30:.1f} GB)' if b else ''))
+                 + (f', {b["files"]:,} of them in {b["count"]:,} bundles ({b["tar_bytes"] / 2**30:.1f} GB)' if b else '')
+                 + (f', {pk["files"]:,} RomFS files in {pk["count"]:,} packs read in place ({pk["tar_bytes"] / 2**30:.1f} GB)' if pk else ''))
         # --data-url: the pack's files.json, which the app compares with its own (porter/publish.py); the folder goes to the server as it is. A pack with bundles has it
         # in any case: the app unpacks them by it (also when porter install pushed them)
         if self.o.data_url or b:

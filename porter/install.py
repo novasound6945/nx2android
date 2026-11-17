@@ -11,6 +11,8 @@
 # own go as before, then files.json (the list the app unpacks by) and the manifest last. A bundle is pushed only when the device lacks one of its files at its size, and
 # one the device has at its size (an earlier push, not unpacked yet) is kept when its MD5 is the pack's, so a rerun goes on where the last one stopped. --romfs-at is not
 # offered for such a pack (its RomFS is in its bundles).
+# A pack with packs (android.tsv romfs_packs: datapack.py): packs/ holds plain files (the packs and their index), pushed as any file of the pack; the RomFS's small files
+# an earlier pack had on their own are not the pack's and go as stale ones. --romfs-at is not offered for it either.
 import hashlib, json, posixpath, re, shlex, tempfile, zipfile
 from pathlib import Path
 
@@ -159,7 +161,8 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
     if romfs_push and not target: raise BuildError('--romfs-push needs --romfs-at <a folder on the device outside the app\'s files folder>')
     bund = datapack.bundled(man)
     no_romfs_at = f'{man["name"]}\'s pack keeps its small files in bundles (android.tsv data_bundles), which the app unpacks into its files folder: --romfs-at is not offered for it'
-    if bund and target: raise BuildError(f'{no_romfs_at}; install without --romfs-at')
+    if man.get('packs'): no_romfs_at = f'{man["name"]}\'s pack keeps its RomFS\'s small files in packs the host reads in place (android.tsv romfs_packs): --romfs-at is not offered for it'
+    if (bund or man.get('packs')) and target: raise BuildError(f'{no_romfs_at}; install without --romfs-at')
     packed = packed_romfs(data)
     if packed and target: raise BuildError(PACKED_ELSEWHERE)
     adb = Adb(adb_exe, serial, log=say)
@@ -180,7 +183,7 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
         # --replace-signer uninstalls the app first, and Android deletes the files folder with it (the device's manifest is pushed last, so the one there is the previous pack's)
         if romfs_at is None and was:
             target = romfs_target(was, files)
-            if target and bund: raise BuildError(f'{no_romfs_at}, and an earlier install had the app read its RomFS from {target}: install with --romfs-at app')
+            if target and (bund or man.get('packs')): raise BuildError(f'{no_romfs_at}, and an earlier install had the app read its RomFS from {target}: install with --romfs-at app')
             if packed and target: raise BuildError(f'the app reads its RomFS from {target} (an earlier install\'s --romfs-at). ' + PACKED_ELSEWHERE)
             if target: say(f'the app reads its RomFS from {target} (an earlier install\'s --romfs-at; --romfs-at app moves it into its files folder)')
         rom = datapack.romfs_sizes(data) if target else {}
@@ -216,6 +219,9 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
             nwrite = sum(1 for f in fj['files'] if have.get(f['path']) != f['size'])   # the files the device lacks at their size: written by the push or by the unpacking
             need = sum(fj['bundles'][k]['size'] for k in bneed if k not in bthere) + sum(f['size'] for f in loose if have.get(f['path']) != f['size']) \
                 + min(UNPACKERS, len(bneed)) * max((fj['bundles'][k]['size'] for k in bneed), default=0) + nwrite * FILE_SLACK + MARGIN
+        elif man.get('packs'):   # the pack's files the device lacks at their size, the packs among them: the RomFS's small files an earlier pack left on their own go only after
+            # the push (stale, below), so they are not counted as freed (man['bytes'] counts the small files, not the packs that hold them)
+            need = sum(s for r, s in ((p.relative_to(data).as_posix(), p.stat().st_size) for p in data.rglob('*') if p.is_file()) if have.get(r) != s)
         else: need = man['bytes'] - sum(have.values())
         if free is not None and need > free: raise BuildError(f'the device has {free / 2**30:.1f} GB free; the game needs {need / 2**30:.1f} GB more')
         if target and not replace_signer and adb.installed(man['package']):   # an update: the grant (the app's uid's, which the update keeps) before the APK goes in

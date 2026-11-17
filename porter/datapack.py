@@ -20,21 +20,32 @@
 #                  (dm/android/datasync.h: downloaded, or pushed by porter install), which costs seconds where creating each small file over adb (Android's FUSE layer) or
 #                  downloading each one took hours. The pack then always has its files.json (publish.py), the list of every game file and the bundle it is in, by which
 #                  the app unpacks and the installer pushes: a pack built without the row is as before
+#   packs/pNNNN.tar, packs/romfs.nxbi  with android.tsv romfs_packs on (beside data_bundles, whose <max> and <size> it takes) only: the RomFS's files of at most <max>
+#                  bytes in tar packs of up to <size> bytes (the bundles' tar format, members RomFS/...), which nothing unpacks: the host reads each file where it lies
+#                  in its pack (dm/host/fs_pack.h), by the index romfs.nxbi (write_index: the NXBI format), so the device never holds 205,000 small files (the manifest's
+#                  "packs"; env.txt's DM_ROMFS_PACK). A folder of their own, not bundles/: bundles/ holds what the app takes out and deletes (datasync.h), packs/ what
+#                  stays; for the app's download and the installer they are plain files (files.json lists them as any file, and not the files in them). The small
+#                  files of aoc/ and sysdata/ still go into bundles (the host looks at those folders on the disk: the DLC count, the system fonts)
 # Big trees are hard links into the extraction when the volume allows, so the pack takes no extra space (bundles are copies: the small files' bytes once more); the pack
 # is rebuilt whole when anything in it changes.
-import hashlib, json, os, shutil, tarfile, time
+import hashlib, json, os, shutil, struct, tarfile, time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+from porter.upstream import BuildError
 
 MANIFEST = 'nx2a-data.json'
 ENV = 'env.txt'
 KEEP_ON_DEVICE = ('settings.txt',)          # the player's choices win over the pack's defaults; env.txt is not kept whole: install.py merges it with the pack's (merge_env)
-OWNED = ('mods', 'RomFS', 'aoc', 'sysdata')            # folders the pack owns on the device: files there that the pack lacks are stale (an older version's) and removed
+OWNED = ('mods', 'RomFS', 'aoc', 'sysdata', 'packs')   # folders the pack owns on the device: files there that the pack lacks are stale (an older version's) and removed
 ROMFS = 'RomFS'
 VARIANT_PREFIX = 'mods-'                    # mods-<variant>/: owned as mods/ is (owned)
 BUNDLES = 'bundles'                         # the bundles' folder, in the pack and in the files folder (where the app deletes each bundle once it took its files out)
 BUNDLED = ('RomFS', 'aoc', 'sysdata')       # the trees whose small files go into bundles: the game's own files, which change only with its version. mods/ stays loose (a
                                             # rewriter cut changes a module at the same size: one file again, not a bundle), and so do the files the app and the installer
                                             # treat one by one (env.txt, settings.txt, the manifest, files.json)
+PACKS = 'packs'                             # with romfs_packs: the RomFS's small files in tar packs read in place, and their index
+PACK_INDEX = f'{PACKS}/romfs.nxbi'
 
 
 def owned(rel):   # whether a file (a '/'-separated path in the files folder) is in a folder the pack owns
@@ -105,6 +116,102 @@ def long_path(p):   # a path Python can open on Windows past 260 characters (a d
     return '\\\\?\\' + s if os.name == 'nt' and not s.startswith('\\\\') else s
 
 
+# ---- romfs_packs: the packs' index (NXBI version 1, read by dm/host/fs_pack.h; little-endian):
+#   header, 32 bytes: "NXBI", u32 version 1, u32 npacks, u32 nfiles, u64 names_bytes, u64 0
+#   the packs, npacks x 16 bytes: u64 the pack's size, u64 0
+#   the files, nfiles x 24 bytes: u32 name_off, u16 name_len, u16 pack, u64 data_off (the file's first byte in its pack, past its tar header), u64 size;
+#     sorted by the UTF-8 bytes of their names (a name that is another's start first), each name once
+#   the names, without NULs: each file's path from the RomFS's root ('Data/a.bin'), as the game names it
+NXBI_HEAD, NXBI_PACK, NXBI_FILE = struct.Struct('<4sIIIQQ'), struct.Struct('<QQ'), struct.Struct('<IHHQQ')
+NXBI_VERSION = 1
+
+
+def pack_name(k): return f'{PACKS}/p{k:04d}.tar'
+
+
+def check_romfs_packs(profile):   # what romfs_packs cannot go with, refused before anything is made
+    if not getattr(profile, 'romfs_packs', False): return
+    if getattr(profile, 'romfs_zstd', False):
+        raise BuildError(f'{profile.name}: android.tsv romfs_packs on and romfs zstd cannot go together (the host reads a packed file from its own file, not from inside a pack)')
+    if not getattr(profile, 'bundles', None): raise BuildError(f'{profile.name}: android.tsv romfs_packs on needs data_bundles <max file bytes> <pack bytes>')
+
+
+def index_entries(folder, count):
+    """[(name in the RomFS, pack, data offset, size)] of packs 0..count-1 in folder, as their tar headers say (tarfile's offset_data: past a GNU long name too). BuildError
+    for a member that is not a regular file under RomFS/"""
+    out, pre = [], ROMFS + '/'
+    for k in range(count):
+        with tarfile.open(long_path(Path(folder) / pack_name(k)), 'r:', encoding='utf-8') as tar:
+            for m in tar:
+                if not m.isreg() or not m.name.startswith(pre) or len(m.name) == len(pre): raise BuildError(f'{pack_name(k)}: {m.name} is not a RomFS file (a pack holds the RomFS\'s files only)')
+                out.append((m.name[len(pre):], k, m.offset_data, m.size))
+    return out
+
+
+def write_index(path, pack_sizes, entries):
+    """The index of packs of pack_sizes [bytes] holding entries [(name in the RomFS, pack, data offset, size)], sorted here. BuildError for a name twice, or what the
+    format cannot hold"""
+    ents = sorted(((n.encode('utf-8'), k, o, s) for n, k, o, s in entries), key=lambda e: e[0])
+    if len(pack_sizes) > 1 << 16: raise BuildError(f'{len(pack_sizes):,} packs: an index names at most 65,536 (make data_bundles\' <bundle bytes> bigger)')
+    names, recs, off = [], [], 0
+    for i, (n, k, o, s) in enumerate(ents):
+        if i and n == ents[i - 1][0]: raise BuildError(f'{n.decode("utf-8")} is in the packs twice')
+        if not n or len(n) > 0xFFFF or not 0 <= k < len(pack_sizes): raise BuildError(f'{n.decode("utf-8", "replace")!r}: not a name or a pack an index can hold')
+        names.append(n); recs.append(NXBI_FILE.pack(off, len(n), k, o, s)); off += len(n)
+    if off >= 1 << 32: raise BuildError('the RomFS\'s names in the packs are past 4 GB')
+    blob = b''.join(names)
+    data = NXBI_HEAD.pack(b'NXBI', NXBI_VERSION, len(pack_sizes), len(ents), len(blob), 0) + b''.join(NXBI_PACK.pack(s, 0) for s in pack_sizes) + b''.join(recs) + blob
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(long_path(path), 'wb') as f: f.write(data)
+
+
+def read_index(path):
+    """(pack sizes, [(name, pack, data offset, size)] in the index's order) of an index; BuildError for one that is not whole"""
+    with open(long_path(path), 'rb') as f: b = f.read()
+    if len(b) < NXBI_HEAD.size: raise BuildError(f'{path}: shorter than an index\'s header')
+    magic, ver, np_, nf, nb, _ = NXBI_HEAD.unpack_from(b)
+    if magic != b'NXBI' or ver != NXBI_VERSION: raise BuildError(f'{path}: not an NXBI version {NXBI_VERSION} index')
+    po, fo = NXBI_HEAD.size, NXBI_HEAD.size + np_ * NXBI_PACK.size
+    no = fo + nf * NXBI_FILE.size
+    if no + nb != len(b): raise BuildError(f'{path}: {len(b):,} bytes, where its counts make {no + nb:,}')
+    sizes = [NXBI_PACK.unpack_from(b, po + k * NXBI_PACK.size)[0] for k in range(np_)]
+    ents = []
+    for i in range(nf):
+        o, ln, k, d, s = NXBI_FILE.unpack_from(b, fo + i * NXBI_FILE.size)
+        if o + ln > nb or k >= np_: raise BuildError(f'{path}: file {i}\'s name or pack is outside the index')
+        ents.append((b[no + o:no + o + ln].decode('utf-8'), k, d, s))
+    return sizes, ents
+
+
+def check_packs(folder, sources, progress=None):
+    """The port's own check of a pack's packs: every file of the index read back from its pack at the index's offset and size and compared with its source
+    (sources {name in the RomFS: path}) by SHA-256; the index's names exactly the sources', its pack sizes the packs'. BuildError at the first difference"""
+    folder = Path(folder)
+    sizes, ents = read_index(folder / PACK_INDEX)
+    for k, s in enumerate(sizes):
+        if (got := (folder / pack_name(k)).stat().st_size) != s: raise BuildError(f'{pack_name(k)}: {got:,} bytes, its index says {s:,}')
+    names = [e[0] for e in ents]
+    if len(names) != len(sources) or set(names) != set(sources):
+        miss, extra = sorted(set(sources) - set(names)), sorted(set(names) - set(sources))
+        raise BuildError(f'{PACK_INDEX} does not list the RomFS\'s small files: {len(miss):,} missing ({", ".join(miss[:3])}), {len(extra):,} not the RomFS\'s or twice ({", ".join(extra[:3])})')
+    by = {}
+    for e in ents: by.setdefault(e[1], []).append(e)
+    sha = lambda b: hashlib.sha256(b).digest()
+    def one(k):   # one pack: its files in pack order (reads go forward)
+        with open(long_path(folder / pack_name(k)), 'rb') as f:
+            for name, _, off, size in sorted(by[k], key=lambda e: e[2]):
+                f.seek(off); got = f.read(size)
+                with open(long_path(sources[name]), 'rb') as s: want = s.read()
+                if len(got) != size or sha(got) != sha(want): return f'{name}: the {size:,} bytes at {off:,} in {pack_name(k)} are not its file\'s'
+        return None
+    done = 0
+    with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as ex:   # reading a small file costs its opening on Windows: several at once
+        for bad in ex.map(one, sorted(by)):
+            if bad: raise BuildError(f'the packs\' check failed: {bad}')
+            done += 1
+            if progress and (done % 16 == 0 or done == len(by)): progress(f'the packs checked against the RomFS\'s files ({done:,} of {len(by):,})')
+
+
 # <pack>.bundles.json beside the pack (not in it: not uploaded, not pushed): each bundle's files as a key (their paths, sizes and the mtimes of their sources) and the tar's
 # size and mtime. A port again keeps a bundle whose key did not change, as a hard link to the earlier pack's (the same tar, with its mtime, so publish keeps its hashes
 # too): writing Fire Emblem Engage's 89 bundles read 205,000 small files and took 45 minutes on Windows, where linking the whole pack took 4
@@ -130,6 +237,8 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
     files: {name in the pack: source} (the 60 fps memory writes, fpslock.tsv; the button-icon font); variants: {name: (its rewritten modules, [its env rows])}; profile_h: sha256 of the
     game_profile.h the host was built with (porter host). Returns the manifest"""
     package = package or profile.package
+    check_romfs_packs(profile)
+    packs_on = bool(getattr(profile, 'romfs_packs', False))   # android.tsv romfs_packs on: the RomFS's small files into packs/, not bundles/
     tmp = dst.with_name(dst.name + '.partial')
     if tmp.exists(): shutil.rmtree(tmp)
     tmp.mkdir(parents=True)
@@ -144,30 +253,47 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
         got = [] if bund and sub in BUNDLED else None
         dn, db = link_tree(src, tmp / sub, got, bund[0] if got is not None else 0); n += dn; b += db
         if got: small += [(f'{sub}/{r}', p, s, m) for r, p, s, m in got]
-    bundles, keys = None, {}
-    if small:   # the small files into bundles (copies: a bundle is the files' bytes once more), or an earlier port's bundle of the same files (reuse_file)
-        groups = bundle_groups(small, bund[1])
+    rsmall = [f for f in small if f[0].startswith(ROMFS + '/')] if small and packs_on else []   # romfs_packs: the RomFS's small files go into packs, the others' into bundles
+    if rsmall: small = [f for f in small if not f[0].startswith(ROMFS + '/')]
+    bundles, packs, keys = None, None, {}
+    old = {}
+    if small or rsmall:
         try: old = json.loads(reuse_file(dst).read_text(encoding='utf-8'))
         except (OSError, ValueError): old = {}
+
+    def tars(files, name_of, kind, what):   # files into tars of up to bund[1] bytes (copies: a tar is the files' bytes once more), or an earlier port's tar of the same files (reuse_file)
+        groups = bundle_groups(files, bund[1])
         kept = 0
         for k, g in enumerate(groups):
-            name, key = bundle_name(k), bundle_key(g); o, was = old.get(name) or {}, dst / name
+            name, key = name_of(k), bundle_key(g); o, was = old.get(name) or {}, dst / name
             try: same = o.get('key') == key and (st := was.stat()).st_size == o.get('size') and st.st_mtime_ns == o.get('mtime')
             except OSError: same = False
             if same: link_or_copy(was, tmp / name); kept += 1
             else:
-                if progress: progress(f'the small files into bundle {k + 1:,} of {len(groups):,} ({len(small):,} files of at most {bund[0]:,} bytes' + (f'; {kept:,} kept from the last port)' if kept else ')'))   # (pipeline: "linking …")
+                if progress: progress(f'{what} into {kind} {k + 1:,} of {len(groups):,} ({len(files):,} files of at most {bund[0]:,} bytes' + (f'; {kept:,} kept from the last port)' if kept else ')'))   # (pipeline: "linking …")
                 write_bundle(tmp / name, g)
             st = (tmp / name).stat(); keys[name] = dict(key=key, size=st.st_size, mtime=st.st_mtime_ns)
-        if progress and kept: progress(f'{kept:,} of {len(groups):,} bundles kept from the last port (their files did not change)')
+        if progress and kept: progress(f'{kept:,} of {len(groups):,} {kind}s kept from the last port (their files did not change)')
+        return groups
+
+    if small:   # the small files into bundles, which the app takes out
+        groups = tars(small, bundle_name, 'bundle', 'the small files')
         bundles = dict(max=bund[0], size=bund[1], count=len(groups), files=len(small), bytes=sum(f[2] for f in small),
                        tar_bytes=sum((tmp / bundle_name(k)).stat().st_size for k in range(len(groups))))
+    if rsmall:   # the RomFS's small files into packs, which stay as they are, and their index (where each file's bytes are), checked against the files themselves
+        groups = tars(rsmall, pack_name, 'pack', 'the RomFS\'s small files')
+        sizes = [(tmp / pack_name(k)).stat().st_size for k in range(len(groups))]
+        if progress: progress(f'the packs\' index ({len(rsmall):,} files in {len(groups):,} packs)')
+        write_index(tmp / PACK_INDEX, sizes, index_entries(tmp, len(groups)))
+        check_packs(tmp, {r[len(ROMFS) + 1:]: p for r, p, _, _ in rsmall}, progress)
+        packs = dict(count=len(groups), files=len(rsmall), bytes=sum(f[2] for f in rsmall), tar_bytes=sum(sizes))
     if shaders: link_or_copy(shaders, tmp / 'shaders.dmsv'); n += 1; b += shaders.stat().st_size   # none for an OpenGL ES game
     for name, src in (files or {}).items(): shutil.copyfile(src, tmp / name); n += 1; b += Path(src).stat().st_size
     rows = [f'# Written by nx2android\'s porter for {profile.name} ({profile.id}); KEY=VALUE per line, read by the app at launch',
             f'DM_LANG={language}']
     if aoc: rows.append(f'DM_AOC_DIR={files_folder(package)}/aoc')
     if sysdata: rows.append(f'DM_SYSDATA={files_folder(package)}/sysdata')
+    if packs: rows.append(f'DM_ROMFS_PACK={files_folder(package)}/{PACK_INDEX}')
     rows += profile.env + list(env)
     (tmp / ENV).write_text('\n'.join(rows) + '\n', encoding='utf-8', newline='\n')
     for v, (_, venv) in variants.items():
@@ -178,6 +304,7 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
                files=n, bytes=b, dlc=sorted(int(p.name) for p in aoc.iterdir() if p.is_dir() and p.name.isdigit()) if aoc else [],
                sysdata=sorted(p.name for p in sysdata.iterdir() if p.is_dir()) if sysdata else [], variants=list(variants), made=time.strftime('%Y-%m-%d %H:%M:%S'))
     if bundles: man['bundles'] = bundles   # (no key at all for a pack without: its manifest stays as it was)
+    if packs: man['packs'] = packs         # (the same: no key without romfs_packs)
     if profile_h: man['profile_h'] = profile_h
     (tmp / MANIFEST).write_text(json.dumps(man, indent=2), encoding='utf-8')
     if dst.exists(): shutil.rmtree(dst)

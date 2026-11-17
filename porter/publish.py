@@ -13,6 +13,8 @@
 # the server only inside its bundle, which the app downloads (or finds pushed by porter install) and takes the files it needs out of. An app from before format 2 reads
 # "files" and asks for each file on its own: the bundled ones come first, so its first download is a bundled file's, an HTTP 404 it stops at with nothing else downloaded,
 # and it never starts the game on half a pack (a folder that already holds every bundled file is whole for it, and it downloads the rest as before).
+# A pack with packs (android.tsv romfs_packs: datapack.py) needs nothing of its own here: packs/pNNNN.tar and packs/romfs.nxbi are listed as any file (path, size,
+# SHA-256, mtime), and the RomFS files inside them are not listed at all (the host reads them in the packs); its format is 1, or 2 for its aoc/ and sysdata/ bundles.
 import base64, hashlib, json, os, shutil, tarfile, time
 from pathlib import Path
 
