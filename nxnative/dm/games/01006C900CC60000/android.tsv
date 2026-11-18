@@ -8,5 +8,5 @@ orientation	landscape
 # draws +744,600, passes +744,600; DM_VK_TRACE_PASS=-2: "ended from" the barrier, "1 draws", the same quad shaders over and over). On the Retroid Pocket Nova
 # (Adreno 740, Turnip T30, Normal mode) a menu took 46.9 ms a frame (21 fps; 1,937 draws, replay 17.45 ms, GPU 14.75 ms) and a battle pop-up 30.8 ms (1,241 draws,
 # replay 12.3 ms, GPU 8.9 ms), with Turnip's pass set-up (tu_framebuffer_init_tiling_config 6.4%, tu_render_pass_gmem_config 3.2%, ...) the top of a profile.
-# DM_VK_ORDER_KEEP=1 alone changed nothing (0x30 has no order bits). Not measured with this yet (2026-11-18)
+# Measured on the Retroid Pocket Nova (Normal mode, 2026-11-18), the mode menu: frame time p50 47.9 -> 16.6 ms (21 -> 60 fps), 2,155 barriers a frame kept inside their pass, none ending it; the picture the same but for the animated background
 env	DM_VK_INVAL_KEEP=1
