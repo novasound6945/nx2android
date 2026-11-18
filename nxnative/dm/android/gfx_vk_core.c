@@ -1655,12 +1655,12 @@ void vk_sub_update(uint64_t dst, const void *data, uint64_t n) {
     VkBuffer db, sb; VkDeviceSize dof, so;
     if (!n) return;
     if (!vk_buf_at(dst, n, &db, &dof)) { VKRED_ONCE(3, "uniform update outside the memory pools"); return; }
-    { static uint64_t wa; static char wl[32]; const char *w = getenv("DM_VK_UBD_WATCH"); extern uint64_t g_tex_frame;   // DM_VK_UBD_WATCH=<address> (live): every update there, any size
+    { static uint64_t wa; static char wl[32]; extern const char *g_env_ubd_watch; const char *w = g_env_ubd_watch; extern uint64_t g_tex_frame;   // DM_VK_UBD_WATCH=<address> (live): every update there, any size
       if (w && strcmp(w, wl)) { snprintf(wl, sizeof wl, "%s", w); wa = strtoull(w, NULL, 16); }
       if (w && wa && dst == wa) { static int k; if (k++ < 20000) VKLOG("watch: update %#llx +%llu present %llu", (unsigned long long)dst, (unsigned long long)n, (unsigned long long)g_tex_frame); } }
     { extern uint64_t g_trap_size, g_trap_lo, g_trap_hi, g_tex_frame; extern int g_trap_left;   // DM_VK_UBD_TRAP (gfx_vk_exec.c cbuf_desc)
       // DM_VK_UBD_TRAP_X0=<lo>:<hi> (live): only an update whose first float is in that range (one hit's light table among the battle's: Engage's knight, x ≈ 37.5)
-      int x0ok = 1; { const char *x0 = getenv("DM_VK_UBD_TRAP_X0"); float lo, hi, f0; if (x0 && sscanf(x0, "%f:%f", &lo, &hi) == 2 && n >= 4) { memcpy(&f0, data, 4); x0ok = f0 >= lo && f0 <= hi; } }
+      int x0ok = 1; { extern const char *g_env_ubd_trap_x0; const char *x0 = g_env_ubd_trap_x0; float lo, hi, f0; if (x0 && sscanf(x0, "%f:%f", &lo, &hi) == 2 && n >= 4) { memcpy(&f0, data, 4); x0ok = f0 >= lo && f0 <= hi; } }
       if (g_trap_size && n == g_trap_size && x0ok) { static int k; g_trap_lo = dst; g_trap_hi = dst + n; g_trap_left = getenv("DM_VK_UBD_TRAP_N") ? atoi(getenv("DM_VK_UBD_TRAP_N")) : 64;   // DM_VK_UBD_TRAP_N=<bindings logged per trap> (live)
         if (k++ < 400) { float f[8]; memcpy(f, data, sizeof f); VKLOG("trap: uniform update of %llu bytes at %#llx, present %llu: %g %g %g %g %g %g %g %g", (unsigned long long)n,
               (unsigned long long)dst, (unsigned long long)g_tex_frame, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]); } } }

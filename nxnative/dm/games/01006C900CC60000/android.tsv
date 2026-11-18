@@ -1,0 +1,12 @@
+# SUPER ROBOT WARS T on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android")
+# SDK 6, NVN, update 1.0.5. The game profile beside this is the provisional one porter wrote from the survey (not checked by hand); the shader tables are its own.
+status	experimental
+package	org.nx2a.t01006c900cc60000
+orientation	landscape
+# Invalidate-only barriers keep the pass open (android/gfx_vk_exec.c g_inval_keep): the menus and the battle pop-ups put an NVN barrier 0x30 (INVALIDATE_TEXTURE |
+# INVALIDATE_SHADER) between almost every two draws of their text and sprite quads, and each barrier ended the render pass: one pass per draw (600 frames:
+# draws +744,600, passes +744,600; DM_VK_TRACE_PASS=-2: "ended from" the barrier, "1 draws", the same quad shaders over and over). On the Retroid Pocket Nova
+# (Adreno 740, Turnip T30, Normal mode) a menu took 46.9 ms a frame (21 fps; 1,937 draws, replay 17.45 ms, GPU 14.75 ms) and a battle pop-up 30.8 ms (1,241 draws,
+# replay 12.3 ms, GPU 8.9 ms), with Turnip's pass set-up (tu_framebuffer_init_tiling_config 6.4%, tu_render_pass_gmem_config 3.2%, ...) the top of a profile.
+# DM_VK_ORDER_KEEP=1 alone changed nothing (0x30 has no order bits). Not measured with this yet (2026-11-18)
+env	DM_VK_INVAL_KEEP=1

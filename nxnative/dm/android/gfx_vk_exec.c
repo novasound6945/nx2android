@@ -138,10 +138,18 @@ static char g_x_tracesize[40], g_x_traceframe[40]; static int g_x_traceframe_on;
 static long long g_watch_off = -1; static int g_watch_n; extern uint64_t g_tex_frame;
 // DM_VK_UBO_LOG=<shader key, hex>[#n] (live): log the next n (40) uniform buffers that shader reads (present, stage, register, address, a hash and the first 16 words)
 static uint64_t g_ubolog_key; static int g_ubolog_n;
+// Debug variables read at every uniform binding, draw or uniform update, copied once a submission (x_read) instead: getenv walks the whole environment, and these
+// calls were 1.9% of a profile of SUPER ROBOT WARS T's menus (thousands of draws a frame). NULL when unset; still live, from the next submission on
+static char g_es[6][64]; const char *g_env_ubo_hash, *g_env_ubo_diff, *g_env_ubo_hash_regs, *g_env_trace_vs, *g_env_ubd_watch, *g_env_ubd_trap_x0;   // (the last two: gfx_vk_core.c)
+static const char *env_copy(int i, const char *name) { const char *e = getenv(name); if (!e) return NULL; snprintf(g_es[i], sizeof g_es[i], "%s", e); return g_es[i]; }
+static void env_snap(void) {
+    g_env_ubo_hash = env_copy(0, "DM_VK_UBO_HASH"); g_env_ubo_diff = env_copy(1, "DM_VK_UBO_DIFF"); g_env_ubo_hash_regs = env_copy(2, "DM_VK_UBO_HASH_REGS");
+    g_env_trace_vs = env_copy(3, "DM_VK_TRACE_VS"); g_env_ubd_watch = env_copy(4, "DM_VK_UBD_WATCH"); g_env_ubd_trap_x0 = env_copy(5, "DM_VK_UBD_TRAP_X0");
+}
 static void ubo_log(const vkshader_t *s, int st, int reg, uint64_t a, uint64_t n) {
     // DM_VK_UBO_HASH=<shader key>[,<key>] (live): every frame, the first 8 constant buffer bindings of that shader, one compact line each (present, stage, register,
     // address, size, hash of what it reads now, deferred updates over it): which buffer changes exactly when an effect starts and stops
-    { static char last[64]; static uint64_t keys[2]; static uint64_t pf; static int cnt; const char *hk = getenv("DM_VK_UBO_HASH");
+    { static char last[64]; static uint64_t keys[2]; static uint64_t pf; static int cnt; const char *hk = g_env_ubo_hash;
       if (hk && strcmp(hk, last)) { snprintf(last, sizeof last, "%s", hk); keys[0] = strtoull(hk, NULL, 16); const char *c = strchr(hk, ','); keys[1] = c ? strtoull(c + 1, NULL, 16) : 0; }
       if (hk && *hk && (s->key == keys[0] || s->key == keys[1])) { if (pf != g_tex_frame) { pf = g_tex_frame; cnt = 0; }
           if (cnt++ < 8) { static uint8_t hb[65536]; uint64_t m = n > sizeof hb ? sizeof hb : n; void vk_ubd_read(uint64_t a, uint64_t n, uint8_t *dst); vk_ubd_read(a, m, hb);
@@ -151,7 +159,7 @@ static void ubo_log(const vkshader_t *s, int st, int reg, uint64_t a, uint64_t n
     // DM_VK_UBO_DIFF=<shader key> (live): the first draw of that shader each frame, every constant buffer register: the floats that differ from that register's last
     // frame, logged as "udiff present cN index old new" (up to 48 a register): a global value an effect turns on and off among values the camera moves every frame
     { static char last[40]; static uint64_t key; static uint64_t pf; static uint32_t seen; static float prev[8][1024]; static uint8_t has[8];
-      const char *dk = getenv("DM_VK_UBO_DIFF"); if (dk && strcmp(dk, last)) { snprintf(last, sizeof last, "%s", dk); key = strtoull(dk, NULL, 16); memset(has, 0, sizeof has); }
+      const char *dk = g_env_ubo_diff; if (dk && strcmp(dk, last)) { snprintf(last, sizeof last, "%s", dk); key = strtoull(dk, NULL, 16); memset(has, 0, sizeof has); }
       if (dk && key && s->key == key && reg >= 0 && reg < 8) { if (pf != g_tex_frame) { pf = g_tex_frame; seen = 0; }
           if (!(seen >> reg & 1)) { seen |= 1u << reg; float cur[1024]; uint64_t m = n > sizeof cur ? sizeof cur : n; void vk_ubd_read(uint64_t a, uint64_t n, uint8_t *dst); vk_ubd_read(a, m, (uint8_t *)cur);
               uint32_t nf = (uint32_t)(m / 4); if (has[reg]) { int c = 0; for (uint32_t i = 0; i < nf && c < 48; i++) if (memcmp(&cur[i], &prev[reg][i], 4)) { c++;
@@ -159,7 +167,7 @@ static void ubo_log(const vkshader_t *s, int st, int reg, uint64_t a, uint64_t n
               memcpy(prev[reg], cur, m); has[reg] = 1; } } }
     // DM_VK_UBO_HASH_REGS=<register>[,<register>] (live): every fragment shader's bindings of those registers, hashed at each draw and logged ("mhash") when the
     // content at that address differs from the last time: which material buffers an effect animates
-    { static char last[16]; static int regs[2] = {-1, -1}; const char *hr = getenv("DM_VK_UBO_HASH_REGS");
+    { static char last[16]; static int regs[2] = {-1, -1}; const char *hr = g_env_ubo_hash_regs;
       if (hr && strcmp(hr, last)) { snprintf(last, sizeof last, "%s", hr); regs[0] = *hr ? atoi(hr) : -1; const char *c = strchr(hr, ','); regs[1] = c ? atoi(c + 1) : -1; }
       if (hr && *hr && st == 1 && (reg == regs[0] || reg == regs[1] || regs[0] == 99) && n <= 4096) {   // (=99: every register)
           enum { MH = 8192 }; static uint64_t ma[MH], mh[MH]; uint8_t hb[4096]; void vk_ubd_read(uint64_t a, uint64_t n, uint8_t *dst); vk_ubd_read(a, n, hb);
@@ -214,7 +222,15 @@ static stimg_t g_stimg[3][32]; static int g_stn[3], g_coll_st = -1;
 // of only ORDER_PRIMITIVES / ORDER_FRAGMENTS / ORDER_FRAGMENTS_TILED leaves the pass open and is decided at the next draw (prepare_draw): the pass ends there, with the
 // barrier, when that draw samples one of the pass's attachments, or a shader of it or of an earlier draw of the pass writes memory (shader_wmem). Attachment writes
 // themselves keep their order inside a pass (primitive order). Off by default: Xenoblade Chronicles 3's characters tore with such barriers kept
-static int g_order_keep, g_order_pending, g_order_check, g_pass_wmem; uint64_t g_order_kept, g_order_ended;   // (kept / ended: gfx_vk_present.c reports them)
+// Invalidate-only barriers the same way (DM_VK_INVAL_KEEP=0/1, live, off by default; an android.tsv "env" line turns it on for a game): a barrier of only
+// INVALIDATE_TEXTURE / INVALIDATE_SHADER / INVALIDATE_TEXTURE_DESCRIPTOR (0x10 0x20 0x40) leaves the pass open and is decided at the next draw by the same check.
+// What such a barrier can make visible to a later draw of the open pass: writes of the pass's own draws (its attachments: the feedback check; shader memory writes:
+// shader_wmem), since every pass begins after a full barrier (begin_pass) and copies, clears of textures and dispatches end the pass with barriers of their own;
+// and the CPU's writes, which reach the GPU by the upload command buffer, run before the submission's main ones whether the pass ends or not (gfx_vk_core.c
+// vk_upload_cmd): a re-uploaded texture (a glyph atlas the game fills as it goes) is the same with or without the pass end. Descriptors are read at replay.
+// SUPER ROBOT WARS T puts a barrier 0x30 between almost every two draws of its menus and battle pop-ups (text and sprite quads): one pass per draw, 1,937 passes
+// a frame in a menu on the Retroid Pocket Nova (Turnip), the driver's pass set-up the top of a profile
+static int g_order_keep, g_inval_keep, g_order_pending, g_order_check, g_pass_wmem; uint64_t g_order_kept, g_order_ended;   // (kept / ended: gfx_vk_present.c reports them)
 static void list_reads(const char *what) {
     if (!g_lst_nrd) return;
     char t[1024]; int k = 0; for (int i = 0; i < g_lst_nrd && k < (int)sizeof t - 24; i++) k += snprintf(t + k, sizeof t - k, " %llx", (unsigned long long)g_lst_rd[i]);
@@ -237,7 +253,9 @@ static void x_read(void) { cpu_ready_config(); const char *c = getenv("DM_VK_CB_
     const char *fy = getenv("DM_VK_FLIPY"); g_flipy = !(fy && !atoi(fy));   // on unless DM_VK_FLIPY=0
     if (g_x_listpasses) { g_x_listpasses = 0; setenv("DM_VK_TRACE_PASS", "-1", 1); }
     const char *tp = getenv("DM_VK_TRACE_PASS"); g_x_tracepass = tp ? atoi(tp) : -1;
-    { const char *e = getenv("DM_VK_ORDER_KEEP"); g_order_keep = e ? atoi(e) != 0 : DM_GAME_ORDER_KEEP; g_order_pending = g_order_check = 0; }
+    { const char *e = getenv("DM_VK_ORDER_KEEP"); g_order_keep = e ? atoi(e) != 0 : DM_GAME_ORDER_KEEP; g_order_pending = g_order_check = 0;
+      e = getenv("DM_VK_INVAL_KEEP"); g_inval_keep = e && atoi(e) != 0; }
+    env_snap();
     { static uint64_t until; static int done; const char *la = getenv("DM_VK_LIST_AT");   // DM_VK_LIST_AT=<present>: the pass list of every submission over two presents from there
       if (la && !done && g_tex_frame >= (uint64_t)atoll(la)) { done = 1; until = g_tex_frame + 2; }
       { extern uint64_t g_trap_size; const char *tr = getenv("DM_VK_UBD_TRAP"); g_trap_size = tr ? strtoull(tr, NULL, 0) : 0; }
@@ -2273,7 +2291,7 @@ static int prepare_draw(int prim, int indexed) {
     if (g_order_pending) { g_order_pending = 0; g_order_check = S.pass_open == 1; }   // an order-only barrier kept the pass open: decided below, once the draw's images are known
     if (!begin_pass() || !pass_commit()) { g_vkst.skip_rt++; return 0; }
     // DM_VK_TRACE_VS=<vertex shader key>[#n] (live): the next n (1) passes with a draw of that vertex shader are traced from that draw on (which fragment shader a mesh gets frame by frame)
-    { static char last[40]; static uint64_t key; static int left; const char *tv = getenv("DM_VK_TRACE_VS");
+    { static char last[40]; static uint64_t key; static int left; const char *tv = g_env_trace_vs;
       if (tv && strcmp(tv, last)) { snprintf(last, sizeof last, "%s", tv); key = strtoull(tv, NULL, 16); const char *h = strchr(tv, '#'); left = key ? (h ? atoi(h + 1) : 1) : 0; }
       if (left > 0 && S.sh[0] && S.sh[0]->key == key && g_x_tracepass < 0) { left--; g_x_tracepass = g_sub_pass - 1;
           VKLOG("=== traced pass %d (present %llu, DM_VK_TRACE_VS from here): %ux%u, colour formats %d %d, depth format %d", g_x_tracepass, (unsigned long long)g_tex_frame, S.pass_w, S.pass_h, S.cfmt[0], S.cfmt[1], S.dfmt); } }
@@ -3279,9 +3297,10 @@ static void exec_ops(const uint8_t *p) {
             pixel_history_record(4, g_draw_i - 1, g_vkst.draws != before, d->count, d->instances, d->ibuf, d->base_vertex); break; }
         case OP_DISPATCH: dispatch((const p_dispatch *)a); break;
         case OP_BARRIER: {   // the pass ends at every barrier: kept across XC3's fragment- and primitive-order barriers (0x1 0x2 0x4) its characters drew torn in some frames
-            int32_t bits = *(const int32_t *)a;
-            if (g_x_listpasses) VKLOG("    barrier %#x%s", bits, g_order_keep && S.pass_open == 1 && !(bits & ~0x7) ? " (order only: decided at the next draw)" : "");
-            if (g_order_keep && S.pass_open == 1 && !(bits & ~0x7)) { g_order_pending = 1; break; }   // (g_order_keep)
+            int32_t bits = *(const int32_t *)a; int32_t km = (g_order_keep ? 0x7 : 0) | (g_inval_keep ? 0x70 : 0);   // (g_order_keep, g_inval_keep)
+            int keep = km && S.pass_open == 1 && !(bits & ~km);
+            if (g_x_listpasses) VKLOG("    barrier %#x%s", bits, keep ? " (kept: decided at the next draw)" : "");
+            if (keep) { g_order_pending = 1; break; }
             vk_end_pass(); vk_img_barrier_all(vk_cmd()); g_order_pending = 0; break; }
         case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: {   // bound handles were rebased when recorded (hle_nvn.c bind_handles); handles read from memory are rebased by these (mem_handle)
             const p_set_pool *sp = (const p_set_pool *)a; int base = sp->pool ? nvn_dpool_base(sp->pool, h.op == OP_SET_TEX_POOL) : 0;

@@ -1110,8 +1110,8 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         { extern uint64_t g_hf_n, g_hf_bytes, g_hf_ns, g_hf_dropped; static uint64_t hn, hb, ht, hd;   // gfx_vk_tex.c host movie frames
           if (g_hf_n + g_hf_dropped > hn + hd) VKLOG("host movie frames per frame (last 600): %.2f uploaded (%.2f MB, %.2f ms), %.2f replaced by a newer one before an upload", (g_hf_n - hn) / 600.0, (g_hf_bytes - hb) / 600.0 / 1048576, (g_hf_ns - ht) / 6e8, (g_hf_dropped - hd) / 600.0);
           hn = g_hf_n; hb = g_hf_bytes; ht = g_hf_ns; hd = g_hf_dropped; }
-        { extern uint64_t g_order_kept, g_order_ended; static uint64_t pk, pn;   // gfx_vk_exec.c g_order_keep
-          if (g_order_kept + g_order_ended > pk + pn) VKLOG("order-only barriers per frame (last 600): %.1f kept inside their pass, %.1f ended it", (g_order_kept - pk) / 600.0, (g_order_ended - pn) / 600.0);
+        { extern uint64_t g_order_kept, g_order_ended; static uint64_t pk, pn;   // gfx_vk_exec.c g_order_keep, g_inval_keep
+          if (g_order_kept + g_order_ended > pk + pn) VKLOG("order- / invalidate-only barriers per frame (last 600): %.1f kept inside their pass, %.1f ended it", (g_order_kept - pk) / 600.0, (g_order_ended - pn) / 600.0);
           pk = g_order_kept; pn = g_order_ended; }
         void vk_pass_report(void); vk_pass_report(); void vk_gpl_report(void); vk_gpl_report();
         pe = g_vkst.ns_exec; pd = g_vkst.ns_desc; pp = g_vkst.ns_pipe; ps = g_ns_submit; pb = g_ubd_bytes; pdr = g_vkst.draws; pg = g_gpu_ns; pkn = g_pkg_n; pkb = g_pkg_bytes; pkt = g_pkg_ns; psb = g_ns_set_build; psh = g_ns_set_hash; psn = g_ns_set_new; psm = g_set_memo;
