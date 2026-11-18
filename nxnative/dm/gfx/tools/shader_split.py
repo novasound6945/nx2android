@@ -1447,7 +1447,10 @@ def scan_blob(d, label, out):
     if d[:4] in PG_STAGES and len(d) >= 0x18 and d[(o := struct.unpack_from('<I', d, 0xc)[0]):o + 4] == CTL_MAGIC: out.extend(pg_shader(d, label)); return
     for m in re.finditer(b'BNSH\0\0\0\0', d):
         size = struct.unpack_from('<I', d, m.start() + 0x1c)[0]
-        if m.start() + size <= len(d) and d[m.start() + 0x60:m.start() + 0x64] == b'grsc': out.extend(bnsh_shaders(d, m.start(), label))
+        if m.start() + size <= len(d) and d[m.start() + 0x60:m.start() + 0x64] == b'grsc':
+            # the magic also turns up inside other data (Super Robot Wars T's 555 MB map CPK): offsets past the data mean it is not a BNSH
+            try: out.extend(bnsh_shaders(d, m.start(), label))
+            except struct.error: print(f'{label}: BNSH-like bytes @{m.start():#x} with offsets past the data, skipped', flush=True)   # a note, not red(): red() exits
     if MGFX in d: out.extend(mgfx_shaders(d, label))
     if b'SLCT' in d: out.extend(slct_loose(d, label))   # Monolith SLCTs outside an HCPS (Xenoblade Chronicles 3's main)
     if NMPL in d: out.extend(nmpl_shaders(d, label))   # Nippon Ichi's Nmpl shader objects (Disgaea 4 Return's main)
