@@ -211,6 +211,13 @@ def glslc_shaders(d, label, need=True):
             if not sec or len(sec) != 1: continue
             (ctl, code), = sec; st = glslc_stage(ctl, code)
             if not st or check(label, st, ctl, code): continue
+        elif st == 'cs' and code[:4] != CS_MAGIC and (sec := glslc_section(d, h, size)) and len(sec) == 1 and sec[0][1] != code:
+            # A compute shader whose control section is longer than its +0x20 says passes that rule too when it has a 0x12345679 header: the code area read right after
+            # +0x20 starts inside the control's tail, has no header, and reads as a headerless compute area (glslc_stage). The section header is what the game loads: Trails in
+            # the Sky the 1st's light_cull.nvn (+0x20 0x3760, control 0x37e0) and a 512-thread shader in main (0x1c6c8 / 0x1c848) were split 0x80 / 0x180 bytes early, under keys
+            # (ece8145773ee095d, aecb69afbb394ff9) the game never asks for; the second did not translate (its decode ran off the end), and the game's own two came only as run-time captures
+            (sctl, scode), = sec; sst = glslc_stage(sctl, scode)
+            if sst and not check(label, sst, sctl, scode): ctl, code, st = sctl, scode, sst
         out.append((f'{label}#GLSLC@{h:#x}', st, ctl, code))
     if not out and need: red(f'{label}: no GLSLC output')
     return out

@@ -1197,7 +1197,7 @@ cs_asset.bin	11	compute	50c662a368251a96	/asset/nx/shader/instance_merge.nvn#GLS
 cs_asset.bin	12	compute	63182787cd1ceef8	/asset/nx/shader/instance_modify.nvn#GLSLC@0x0
 cs_asset.bin	13	compute	fb58d9607089a015	/asset/nx/shader/instance_purge.nvn#GLSLC@0x0
 cs_asset.bin	14	compute	55985acc03d3eb17	/asset/nx/shader/instance_visible_change_group.nvn#GLSLC@0x0
-cs_asset.bin	15	compute	ece8145773ee095d	/asset/nx/shader/light_cull.nvn#GLSLC@0x0
+cs_asset.bin	15	compute	f9def5d93748a39f	/asset/nx/shader/light_cull.nvn#GLSLC@0x0
 vs_asset.bin	169	vertex	f41f30cca973d231	/asset/nx/shader/map#0023656a.nvn#GLSLC@0x0
 vs_asset.bin	170	vertex	a31a29cb47c6d249	/asset/nx/shader/map#00240d3a.nvn#GLSLC@0x0
 ps_asset.bin	1012	pixel	043c8f94a61dd214	/asset/nx/shader/map#00279c25.nvn#GLSLC@0x0
@@ -6593,7 +6593,7 @@ vs_main.bin	0	vertex	85f75699a7672362	main#GLSLC@0x539d78
 ps_main.bin	5	pixel	e9b3b58db04fa3e9	main#GLSLC@0x53ae40
 cs_main.bin	1	compute	5d49395178bdfb11	main#GLSLC@0x53d934
 cs_main.bin	2	compute	61a282201b54103a	main#GLSLC@0x53fb2c
-cs_main.bin	3	compute	aecb69afbb394ff9	main#GLSLC@0x5423b4
+cs_main.bin	3	compute	a370ad7eceb0897a	main#GLSLC@0x5423b4
 cs_main.bin	4	compute	06191ec3f631a725	main#GLSLC@0x572ddc
 cs_main.bin	5	compute	5140b014949f6850	main#GLSLC@0x575424
 cs_main.bin	6	compute	bfb69e5495526e7e	main#GLSLC@0x58baf4

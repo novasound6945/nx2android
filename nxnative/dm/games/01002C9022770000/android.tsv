@@ -5,8 +5,9 @@
 # 13.0-13.6 ms a frame) and at the game's own 1600x900 (12.0 ms).
 # The pause menu's rows: Resolution (patches.py: Low 1280x720, Auto the game's 1600x900, High 1920x1080; read when the game starts) and Detail distance (1x, 1.5x, 2x:
 # the culling shader's distances by the host's factor, at once).
-# Two compute shaders (a370ad7eceb0897a, f9def5d93748a39f) are in no game file: the host captures them on the first run and the next port translates them
-# (until then: two [RED] lines and one dispatch skipped). One shader does not translate (aecb69afbb394ff9); no draw asked for it.
+# Two compute shaders (a370ad7eceb0897a in main, f9def5d93748a39f light_cull.nvn) have control sections longer than their +0x20 says: the split read their code
+# areas from that length, under keys the game never asks for (aecb69afbb394ff9, which did not translate, and ece8145773ee095d), and they came only as run-time captures.
+# The split takes their code areas from the output's section header now (shader_split.py glslc_shaders), and both are in the package.
 # 2026-11-16, this profile from the repository: the title, the save, Rolent's street at 1920x1080: frames p50 16.7 / p95 17.9 ms, GPU p50 13.2 ms, no red line.
 # 2026-11-16, the same with the menu rows by the profile's keys (a debug build, a copy of the save): Rolent's street at the game's 1600x900, 60 fps (frame work p50 13.3 / p95
 # 14.4 ms), no red line. The Game tab shows Resolution and Detail distance, no Frame rate.
