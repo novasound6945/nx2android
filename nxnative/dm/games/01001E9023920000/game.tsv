@@ -1,0 +1,43 @@
+# Trails in the Sky the 1st, the Asian edition (Korean / Simplified / Traditional Chinese), update 1.0.3 (v131072), SDK 19, NVN; Falcom's engine. The same game as
+# 01002C9022770000 (the Western edition, 1.0.7, SDK 21): this profile started from the survey's provisional one (dm/games/profile_guess.py) for this edition's build,
+# shader groups and RomFS marker, with the keys the Western profile was brought up with. See android.tsv for what was tested.
+
+# ---- Identity ----
+title_id	01001E9023920000
+program_id	01001E9023920000
+
+# ---- App ----
+name	하늘의 궤적 the 1st
+ipa	The1st.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.0.3	main=4fc3cb13e1d3292e4314cfa37a09289e	subsdk0=ca7f78a09c547c54beac3a33ed6bf364	sdk=7bba185a35ee9b4d0af66a4df910a823
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	movie_sc/mp4/sora_1st_ed.mp4
+zip_store	.bmp:.mp4:.otf:.png:.metallib
+
+# ---- Memory ----
+# the NPDM declares 16 MB of system resource (virtual address memory) and main sets a heap. The sizes are the Western profile's, which that edition runs with (the survey alone
+# gave this edition a 5 GB block with a 4.375 GB alias region, 0x140000000 / 0x118000000, before any heap check: a 128 MB heap region): sizes, not addresses, and the same engine asks
+# for its heap the same way in both editions
+mem_reserve	0x4A8000000
+mem_alias	0x400000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/asset/=asset /voice/=voice /se/=se /vfx/=vfx /scene/=scene /script_kr/=scriptkr /script_sc/=scriptsc /script_tc/=scripttc /table_kr/=tablekr /table_sc/=tablesc /table_tc/=tabletc /layout/=layout /asset_kr/=assetkr /asset_sc/=assetsc /asset_tc/=assettc /bgm1/=bgm1 /bgm2/=bgm2 /bgm3/=bgm3 /system/=system /movie_kr/=moviekr /movie_sc/=moviesc /movie_tc/=movietc /system_nx/=systemnx
+shader_note	하늘의 궤적 the 1st shaders
+
+# ---- Android shaders ----
+# the materials discard for their dithered fades before they sample their textures: as demotions, or a tree's crown is gone during every level-of-detail cross-fade (dm/android/tools/spv_post.py;
+# the Western profile's finding)
+android_discard	demote

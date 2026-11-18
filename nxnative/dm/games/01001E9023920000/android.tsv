@@ -1,0 +1,17 @@
+# Trails in the Sky the 1st, the Asian edition, on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android")
+# Falcom's engine on SDK 19, NVN, update 1.0.3 (v131072); 6,600 shaders, one of them patched (patches.py SPIRV: the instance culling compute shader, the same key as in the
+# Western edition). Not run on a device yet: the keys below are the Western profile's (01002C9022770000/android.tsv), where each was found on the AYN Odin 3.
+# The pause menu's rows: Resolution (patches.py render_size: Low 1280x720, Auto the game's 1600x900, High 1920x1080; read when the game starts) and Detail distance (1x, 1.5x, 2x:
+# the culling shader's distances by the host's factor, at once).
+# DM_VK_UBWC=7: the auto-exposure compute shader (cd75a1890f7bada0, also in this edition) keeps its exposure in a 1x1 RG32F texture, which it reads back as r32ui to blend
+# with the new value. With the default format list (the float format alone) the uint view falls back to the float one: Turnip still hands the shader the bits, Qualcomm's
+# driver (512.800.72) does not, and the scene was almost black there (Western edition). With the uint and sint formats in the list (bit 4) the scene is right on both.
+# data_bundles / romfs_packs: the RomFS is about 70,000 files, most of them small: in packs read in place, not one file each on the device or the server.
+status	experimental
+package	org.nx2a.t01001e9023920000
+orientation	landscape
+env	DM_VK_UBWC=7
+env	DM_MENU_RES=0.5:1.0:0.9
+env	DM_DETAIL_DIST=1
+data_bundles	1048576	67108864
+romfs_packs	on
