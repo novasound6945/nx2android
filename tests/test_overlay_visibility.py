@@ -31,9 +31,9 @@ class OverlayVisibility(unittest.TestCase):
 #include <string.h>
 #include "front.h"
 #include "overlay_layout.h"
-static _Atomic int g_set_overlay, g_overlay, g_pads, g_edit;
+static _Atomic int g_set_overlay, g_overlay, g_pads, g_edit, g_menu;
 static _Atomic int g_cust[2][2][OV_N][4];
-static _Atomic int g_set_rumble, g_set_fps, g_set_labels, g_menu_tab, g_sv_st;
+static _Atomic int g_set_rumble, g_set_fps, g_set_labels, g_set_res, g_set_rate, g_set_detail, g_menu_tab, g_sv_st;
 static int layout, saves;
 int dm_overlay_layout(void) { return layout; }
 float dm_overlay_scale(void) { return 1; }
@@ -47,18 +47,23 @@ static int dm_opmode(void) { return 0; }
 static void dm_set_opmode(int mode) { (void)mode; }
 static int pad_labels(void) { return 0; }
 static void menu_tab(int tab) { (void)tab; }
+static void res_apply(int step) { (void)step; }
+static int res_step(void) { return 1; }
+static void detail_apply(int step) { (void)step; }
+static int dm_fps_target_get(void) { return 30; }
+static void dm_fps_target_set(int t) { (void)t; }
 static void ed_open(void) {}
 static void sp_open(void) {}
 static void save_export(void) {}
 static void menu_audio(void) {}
 static void menu_close(void) {}
 static void dm_overlay_redraw(void) {}
-// the frame rate limit row (OVM_RATE), as in front_android.c; rate_apply only counts
-static _Atomic int g_set_rate;
-static const int RATE_STEPS[OVM_RATES] = {0, 60, 40, 30};
-static int rate_step(int v) { for (int i = 0; i < OVM_RATES; i++) if (RATE_STEPS[i] == v) return i; return -1; }
-static int rate_applies;
-static void rate_apply(int start) { (void)start; rate_applies++; }
+// the frame rate limit row (OVM_LIMIT), as in front_android.c; limit_apply only counts
+static _Atomic int g_set_limit;
+static const int LIMIT_STEPS[OVM_LIMITS] = {0, 60, 40, 30};
+static int limit_step(int v) { for (int i = 0; i < OVM_LIMITS; i++) if (LIMIT_STEPS[i] == v) return i; return -1; }
+static int limit_applies;
+static void limit_apply(int start) { (void)start; limit_applies++; }
 ''' + visible + hidden + hit + menu + r'''
 // Synthetic Android events. The production dispatch and touch handlers below consume them.
 enum { AINPUT_SOURCE_TOUCHSCREEN = 1, AINPUT_SOURCE_GAMEPAD = 2, AINPUT_SOURCE_JOYSTICK = 4 };
@@ -81,7 +86,7 @@ static int32_t pad_sticks[4];
 static uint64_t pad_buttons;
 static int g_ptr_ctl[32];
 static struct { int id, moved; } g_drag = {-1, 0};
-static _Atomic int g_menu, g_sp_on, g_tx_on, g_pad_in, g_knob[2][2];
+static _Atomic int g_sp_on, g_tx_on, g_pad_in, g_knob[2][2];
 static _Atomic int64_t g_menu_t, g_press_t[16], g_stick_t[2];
 static struct { int sel; } g_tx;
 static int g_tx_mu;

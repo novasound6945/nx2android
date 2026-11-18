@@ -650,17 +650,23 @@ HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11De
 // SDK 4's constructor has no priority argument (Dark Souls Remastered, NintendoSDK_movie 4.5.0). Without this take-over the SDK built its own decoder and the host's Configure read it as a host one (a call through a null pointer)
 HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeE", "movie decoder (SDK 4, no priority): host implementation", void, h_movie_Decoder4,
           void **self, int type, int fmt, int mode) { h_movie_Decoder(self, type, fmt, mode, 0); }
-// SDK 1's constructor has neither a mode nor a priority (Disgaea 5, SDK 1.7.1: subsdk4+0x2d9ab8; main+0x1ec84c makes the video decoder with output 3, main+0x1ec9b4 the audio one
-// with output 1). Its output formats count differently: 1 PCM16, 2 ARGB, 3 NV12 (DecoderImpl::GetOutputBufferSize subsdk4+0x2d8044, ConvertDecoderOutputFormat +0x2d83c8: format 3
-// copies a compact NV12 frame, stride = width, the chroma right after the luma, as the host writes it), where later SDKs have 3 = RGBA and 4 = NV12. The types are the same (1 AVC,
-// 2 VP8, 3 VP9, 4 AAC, 5 Vorbis: DecoderTypeToMime +0x2d7274), and so are the methods and the vtable (symbol relocations, so the game's virtual calls reach the host). Its "no input"
-// / "no output" result is 0x1000 for both; the game tests only for non-zero (main+0x1ebc7c). The output is CPU buffers only, mode 1
-HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatE", "movie decoder (SDK 1, no mode, its own output numbering): host implementation", void, h_movie_Decoder1,
-          void **self, int type, int fmt) {
+// The earlier SDKs' constructor has neither a mode nor a priority, and its output formats count differently: 1 PCM16, 2 ARGB, 3 NV12, where later SDKs have 3 = RGBA and 4 = NV12.
+// Disgaea 5 (SDK 1.7.1: subsdk4+0x2d9ab8; main+0x1ec84c makes the video decoder with output 3, main+0x1ec9b4 the audio one with output 1; DecoderImpl::GetOutputBufferSize
+// subsdk4+0x2d8044, ConvertDecoderOutputFormat +0x2d83c8: format 3 copies a compact NV12 frame, stride = width, the chroma right after the luma, as the host writes it) and
+// Xenoblade Chronicles 2 2.1.0 (SDK 3.5.0, C1 and C2 both exported: its player gives the decoder 1,382,400-byte outputs for its 1280x720 VP9 movie, width x height x 3 / 2, and
+// reads them as NV12). The types are the same (1 AVC, 2 VP8, 3 VP9, 4 AAC, 5 Vorbis: DecoderTypeToMime +0x2d7274), and so are the methods and the vtable (symbol relocations, so
+// the game's virtual calls reach the host). Its "no input" / "no output" result is 0x1000 for both; the game tests only for non-zero (main+0x1ebc7c). The output is CPU buffers
+// only, mode 1. Without this take-over the SDK built its own decoder, the host's Configure read it as a host one and called through a null pointer (XC2 closed when its first
+// prerendered movie began, after the fight with the Ardainian soldiers in chapter 1)
+static void md_decoder_old(void **self, int type, int fmt) {
     int f = fmt == 3 ? MD_FMT_NV12 : fmt == 1 ? MD_FMT_PCM16 : 0;
-    if (!f) LOG("[RED] movie: SDK 1 decoder output format %d (2 = ARGB into the client's buffer) has no host implementation", fmt);
+    if (!f) LOG("[RED] movie: earlier SDK decoder output format %d (2 = ARGB into the client's buffer) has no host implementation", fmt);
     h_movie_Decoder(self, type, f, 1, 0);
 }
+HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatE", "movie decoder (earlier SDK, no mode or priority, its own output numbering): host implementation", void, h_movie_Decoder1,
+          void **self, int type, int fmt) { md_decoder_old(self, type, fmt); }
+HLE_FORCE("_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatE", "movie decoder (earlier SDK, base object constructor): host implementation", void, h_movie_Decoder1b,
+          void **self, int type, int fmt) { md_decoder_old(self, type, fmt); }
 static void md_free(void **self) {
     mdec_t *d = md_of(self); if (!d) return;
     md_defer_drop(d);

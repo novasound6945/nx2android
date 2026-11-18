@@ -19,8 +19,11 @@ class OverlayLayout(unittest.TestCase):
         harness = r'''
 #include <assert.h>
 #include "overlay_layout.h"
-static int custom_faces, custom_a, custom_x, hidden_ctl = -1, audio_available;
+static int custom_faces, custom_a, custom_x, hidden_ctl = -1, audio_available, rate_available, res_available, detail_available;
+int dm_menu_detail_available(void) { return detail_available; }
 int dm_menu_audio_available(void) { return audio_available; }
+int dm_menu_rate_available(void) { return rate_available; }
+int dm_menu_res_available(void) { return res_available; }
 float dm_overlay_scale(void) { return 1; }
 int dm_overlay_off(int l, int c) { return l == 1 && c == hidden_ctl; }
 int dm_overlay_custom(int layout, int ctl, float *x, float *y, float *s) {
@@ -88,19 +91,30 @@ int main(void) {
     assert(ov_drag_pos(1100, 600, 1013, 50) == 506.5f);
     assert(ov_drag_pos(1100, 505, 1013, 50) == 508);
 
-    // the Gamepad tab's rows end with the face buttons' (front_android.c pad_labels), the row under it empty; the Game tab's: the frame rate counter, the mode, the frame
-    // rate limit under it (front_android.c rate_apply), the save's export and import, and the audio output's row only where the app has outputs to choose
-    assert(ov_menu_item(0, OVM_ROWS - 3) == OVM_PAD && ov_menu_item(0, OVM_ROWS - 2) == -1 && ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
-    assert(ov_menu_item(1, 1) == OVM_FPS && ov_menu_item(1, 2) == OVM_MODE && ov_menu_item(1, 3) == OVM_RATE && ov_menu_item(1, OVM_ROWS - 3) == OVM_IMPORT);
-    assert(ov_menu_item(1, OVM_ROWS - 2) == -1);
+    // the Gamepad tab's rows end with the face buttons' (front_android.c pad_labels); the Game tab's: the frame rate counter, the mode, the frame rate limit under it
+    // (front_android.c limit_apply), the save's export and import, and the audio output's row only where the app has outputs to choose
+    assert(OVM_ROWS == 7 && ov_menu_item(0, OVM_ROWS - 2) == OVM_PAD && ov_menu_item(1, OVM_ROWS - 2) == OVM_IMPORT);   // no audio outputs: the row is left out
+    assert(ov_menu_item(1, 1) == OVM_FPS && ov_menu_item(1, 2) == OVM_MODE && ov_menu_item(1, 3) == OVM_LIMIT && ov_menu_item(1, 4) == OVM_EXPORT && ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
+    float fit = ov_menu_scale();
     audio_available = 1;
-    assert(ov_menu_item(1, OVM_ROWS - 2) == OVM_AUDIO);
+    assert(OVM_ROWS == 8 && ov_menu_item(1, OVM_ROWS - 2) == OVM_AUDIO && ov_menu_scale() <= fit);
+    rate_available = 1;   // rows follow each other: the frame rate row takes its place, and the panel has a row more
+    assert(OVM_ROWS == 9 && ov_menu_item(1, 2) == OVM_RATE && ov_menu_item(1, 3) == OVM_MODE && ov_menu_item(1, 4) == OVM_LIMIT && ov_menu_item(1, OVM_ROWS - 2) == OVM_AUDIO && ov_menu_item(0, 6) == -1);
+    res_available = 1;
+    assert(OVM_ROWS == 10 && ov_menu_item(1, 2) == OVM_RATE && ov_menu_item(1, 3) == OVM_RES && ov_menu_item(1, 4) == OVM_MODE && ov_menu_item(1, OVM_ROWS - 2) == OVM_AUDIO);
+    assert(ov_menu_scale() <= fit && ov_menu_item(0, OVM_ROWS - 1) == OVM_RESUME);
+    rate_available = 0;
+    assert(OVM_ROWS == 9 && ov_menu_item(1, 2) == OVM_RES && ov_menu_item(1, 3) == OVM_MODE);
+    detail_available = 1;   // the detail distance row follows the resolution's
+    assert(OVM_ROWS == 10 && ov_menu_item(1, 2) == OVM_RES && ov_menu_item(1, 3) == OVM_DETAIL && ov_menu_item(1, 4) == OVM_MODE && ov_menu_item(1, OVM_ROWS - 2) == OVM_AUDIO);
+    rate_available = 1;
+    assert(OVM_ROWS == 11 && OVM_ROWS == OVM_ROWS_MAX && ov_menu_item(1, 2) == OVM_RATE && ov_menu_item(1, 4) == OVM_DETAIL && ov_menu_item(1, 6) == OVM_LIMIT && ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
     {   // every item has one row in one tab, before Resume (gfx_vk_present.c ov_menu_panel sizes the letters by the items before OVM_RESUME)
         int seen[OVM_N] = {0};
         for (int t = 0; t < OVM_TABS; t++) for (int row = 1; row < OVM_ROWS - 1; row++) { int it = ov_menu_item(t, row); if (it >= 0) { assert(it < OVM_RESUME); seen[it]++; } }
         for (int it = 0; it < OVM_RESUME; it++) assert(seen[it] == 1);
     }
-    assert(OVM_RATES == 4 && ((OVM_RATES - 1) << 29) > 0 && !(((OVM_RATES - 1) << 29) & (1 << 28)));   // dm_menu_state's bits 29..30: clear of bit 28 and of the sign
+    assert(OVM_LIMITS == 4 && !(((OVM_LIMITS - 1) << 26) & (3 << 24 | 1 << 28)));   // dm_menu_state's bits 26..27: clear of the export count's and of bit 28
     const float screens[][2] = {{915, 412}, {1216, 760}, {2400, 1080}, {1080, 2400}};
     for (unsigned s = 0; s < sizeof screens / sizeof screens[0]; s++) {
         float W = screens[s][0], H = screens[s][1], step = H / OVE_GRID_ROWS, p[4];

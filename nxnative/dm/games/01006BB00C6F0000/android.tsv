@@ -21,7 +21,7 @@ env	DM_VK_BIND_ALIAS=52fcbb4ca2a78907:2=3:4=3
 # turbo's +2.2 °C on average, +3 °C at most (battery drain not measured); each movie frame is written into the game's texture and uploaded again by the replay (about 6 ms a
 # frame); the field's frame work is one game thread at 100% (p50 at the 16.7 ms period); the pipelines' first preparation (68 s) once ended in a low-memory kill (PSS 4.9 GB)
 # The rate is held at 60, not adapted: the field's frame work sits at the period (p50 16.9 ms on the Retroid Pocket 6), so the adaptive rate stepped down to 40 and back
-# all session, which the player saw as the frame rate jumping. The pause menu's Frame rate limit (settings.txt rate=) still wins: its Auto is this pin (front_android.c rate_apply)
+# all session, which the player saw as the frame rate jumping. The pause menu's Frame rate limit (settings.txt limit=) still wins: its Auto is this pin (front_android.c limit_apply)
 env	DM_FPS_PIN=60
 # The GPU at its highest clock (DM_GPU_TURBO, perf_android.c). The game waits for each frame's GPU work before it submits the next, so the GPU idles while the frame is
 # replayed and reads about 74% busy, and its governor keeps it at 401 of 680 MHz: 8.1 ms of GPU work, and frames of 33 ms whenever game + replay + GPU passed the period.
