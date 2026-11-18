@@ -873,7 +873,10 @@ void mtl_pool_add(const void *mem, uint64_t size) {
     vk_init();
     if (!size) return;
     uint64_t a = (uint64_t)(uintptr_t)mem; int whole = ((a | size) & 0xfff) || zc_over(size);   // copied in one piece
-    uint64_t c = whole ? size : ZC_CHUNK; int m = zc_lazy_mode();
+    // DM_VK_ZC_CHUNK_MB=<n>: the chunk size on a device whose allocator takes bigger buffers (the Retroid Pocket Nova / 6, Adreno 740), so that no binding lies
+    // across a chunk's end (Trails in the Sky the 1st: a 4 MB storage buffer across the 256 MB mark of its 1.5 GB pool, every frame)
+    static uint64_t zc_chunk; if (!zc_chunk) { const char *e = getenv("DM_VK_ZC_CHUNK_MB"); zc_chunk = e && atoi(e) > 0 ? (uint64_t)atoi(e) << 20 : ZC_CHUNK; }
+    uint64_t c = whole ? size : zc_chunk; int m = zc_lazy_mode();
     static uint64_t pg; if (!pg) pg = (uint64_t)getpagesize();   // (a 16 KB-page kernel: a pool only 4 KB-aligned is not swapped in place, it is copied as before)
     // (zero copy off: no lazy pools, and no uncached-read check either)
     int lazy = !whole && !zc_off() && !((a | size) & (pg - 1)) && m && (m >= 2 || (size > c ? m == 1 : zc_uncached())) && nvn_dirty_tracked(mem, size);

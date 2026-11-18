@@ -14,6 +14,11 @@ orientation	landscape
 # GPU to finish the work before it (queue submit 17.7 ms a frame, about GPU busy + 5 ms; this game submits twice a frame), and the game ran at 30 fps in the
 # device's Normal mode with the GPU at 12 ms. With this: queue submit 0.1 ms, frame work p50 12.7 / p95 14.0 ms, 60 fps held, the picture right (2026-11-18).
 env	DM_VK_X_FENCES=1
+# The G-buffer pass is cut every 256 draws (its depth too): drawn as one pass of several hundred draws, 16x16-texel blocks of its colour target kept other
+# content (grey squares on the 16-texel grid, 7 to 12 a frame at one spot on the Retroid Pocket Nova with Turnip, the depth under them right; they came and went
+# with the camera). Cut at 256, 128, 64 or 40 draws: 0 blocks in every frame dumped, and the frame time is the same (frame work p50 16.6 ms either way, 2026-11-18)
+env	DM_VK_PASS_SPLIT=256
+env	DM_VK_PASS_SPLIT_DEPTH=1
 # DM_VK_UBWC=7 (the overseas profile's, for Qualcomm's own driver on an Adreno 830) is left out: on the Nova with Turnip it cost about 10% (frame 22.2 -> 20.3 ms without it)
 env	DM_MENU_RES=0.5:1.0:0.9
 env	DM_DETAIL_DIST=1
