@@ -159,7 +159,14 @@ static int rm_tree(const char *p);
 static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
     for (int i = 0; i < g_nmnt; i++)
-        if (!strcmp(g_mnt[i].name, name)) { pthread_mutex_unlock(&g_lock); return RES_OK; }
+        if (!strcmp(g_mnt[i].name, name)) {
+            // Unmount is a no-op, so a name mounted again on another read-only folder must move there: SUPER ROBOT WARS T mounts each add-on content in turn
+            // as "Addcont" (301, 302, ... 800) and, left on the first, did not find its Expansion Pack ("required: buy it in the eShop")
+            int moved = ro && !txn && g_mnt[i].ro && !g_mnt[i].commit[0] && strcmp(g_mnt[i].dir, dir);
+            if (moved) strlcpy(g_mnt[i].dir, dir, sizeof g_mnt[0].dir);
+            pthread_mutex_unlock(&g_lock);
+            if (moved) LOG("fs mount %s: → %s (read-only, mounted again)", name, dir);
+            return RES_OK; }
     if (g_nmnt >= MAX_MOUNT) die("mount table full");
     strlcpy(g_mnt[g_nmnt].name, name, sizeof g_mnt[0].name);
     g_mnt[g_nmnt].ro = ro; g_mnt[g_nmnt].overlay[0] = 0; g_mnt[g_nmnt].commit[0] = 0;
