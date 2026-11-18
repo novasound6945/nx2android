@@ -43,6 +43,7 @@ class Options:
     fps60: bool = False                # 60 fps: the profile's own frame-rate cap, else the build's FPSLocker-Warehouse config (porter/fpslocker.py)
     vulkan_driver: Path = None         # an arm64 Vulkan driver (Mesa's Turnip) packed in the APK and used instead of the system's (DM_VK_DRIVER, dm/android/gfx_vk_core.c)
     shared_font: Path = None           # a TrueType font packed as the system's shared fonts, instead of the device's Roboto (DM_SHARED_FONT, dm/host/hle_sdk16.c)
+    romfs_overlay: Path = None         # a folder of files read before the RomFS (a mod), packed as overlay/ (DM_ROMFS_OVERLAY, dm/host/hle_fs.c)
     firmware: Path = None              # the player's system content files (.nca), for the profile's sysdata titles (extract_sysdata; DM_SYSDATA, dm/host/hle_fs.c)
     mt_replay: bool = False            # multithread replay: DM_VK_MT_REPLAY=1 in env.txt (dm/android/gfx_vk_dq.c), after the profile's env rows
     touch: bool = False                # a game played by touch: the on-screen gamepad starts hidden (TOUCH_SETTINGS), so it takes none of the game's touches
@@ -232,6 +233,9 @@ class Port:
         if o.vulkan_driver:
             o.vulkan_driver = Path(o.vulkan_driver).expanduser().resolve()
             if not o.vulkan_driver.is_file() or o.vulkan_driver.suffix != '.so': raise BuildError(f'--vulkan-driver: not a .so library: {o.vulkan_driver}')
+        if o.romfs_overlay:
+            o.romfs_overlay = Path(o.romfs_overlay).expanduser().resolve()
+            if not o.romfs_overlay.is_dir() or not any(f.is_file() for f in o.romfs_overlay.rglob('*')): raise BuildError(f'--romfs-overlay: not a folder with files: {o.romfs_overlay}')
         if o.shared_font:
             o.shared_font = Path(o.shared_font).expanduser().resolve()
             if not o.shared_font.is_file() or o.shared_font.suffix.lower() != '.ttf': raise BuildError(f'--shared-font: not a .ttf font: {o.shared_font}')
@@ -892,6 +896,9 @@ class Port:
         font_env, font_files = self.button_font()
         if self.o.shared_font:   # the host serves it for every shared-font type but the button icons (hle_sdk16.c font_get)
             font_env, font_files = font_env + [f'DM_SHARED_FONT={datapack.files_folder(self.package)}/standard.ttf'], {**font_files, 'standard.ttf': self.o.shared_font}
+        if self.o.romfs_overlay:   # the host looks in it before the RomFS (hle_fs.c rom_overlay_path); the RomFS itself stays as dumped
+            font_env = font_env + [f'DM_ROMFS_OVERLAY={datapack.files_folder(self.package)}/overlay']
+            font_files = {**font_files, **{'overlay/' + f.relative_to(self.o.romfs_overlay).as_posix(): f for f in sorted(self.o.romfs_overlay.rglob('*')) if f.is_file()}}
         dst = self.o.out / f'{app_stem(self.g, self.app_name)}-data'
         romfs, zenv = self.game / 'RomFS', []
         datapack.check_romfs_packs(self.ap)   # (romfs_packs with romfs zstd: refused before the RomFS is compressed)

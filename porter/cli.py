@@ -36,6 +36,9 @@ def _parser():
                     help='an arm64 Vulkan driver library (.so, such as Mesa\'s Turnip for Adreno) to pack in the APK and use instead of the device\'s own driver '
                          '(DM_VK_DRIVER in env.txt); the app falls back to the device\'s driver when the library does not load. A library not named lib*.so '
                          '(vulkan.purple.so) is packed as lib<name>, the only names Android extracts')
+    po.add_argument('--romfs-overlay', default=None, metavar='FOLDER',
+                    help='a folder of files the game reads before its own RomFS (a mod laid out as the RomFS is: data/sound/..., replacing files or adding them): packed as '
+                         'overlay/ beside the RomFS, which stays as dumped (DM_ROMFS_OVERLAY in env.txt); never shipped with the tool')
     po.add_argument('--shared-font', default=None, metavar='FILE',
                     help='a TrueType font (.ttf, one font, not a collection) to pack as the system font the game asks for, instead of the device\'s Roboto: one with CJK '
                          'characters shows the Chinese and Korean text of a game that draws it with the system font (DM_SHARED_FONT in env.txt); never shipped with the tool')
@@ -200,7 +203,7 @@ def cmd_port(a):
     try: install.romfs_target(a.romfs_at)   # a folder the app cannot read fails now, not after the shaders
     except BuildError as e: print(e, file=sys.stderr); return 2
     opts = pipeline.Options(folder=Path(a.folder), keys=Path(a.keys) if a.keys else None, firmware=Path(a.firmware) if a.firmware else None, out=Path(a.out) if a.out else None, version=a.version, language=a.language,
-                            app_name=a.app_name, install=a.install, device=a.device, replace_signer=a.replace_signer, debug=a.debug, experimental=a.experimental, package=a.package, fps60=a.fps60, touch=a.touch, mt_replay=a.mt_replay, vulkan_driver=a.vulkan_driver, shared_font=a.shared_font,
+                            app_name=a.app_name, install=a.install, device=a.device, replace_signer=a.replace_signer, debug=a.debug, experimental=a.experimental, package=a.package, romfs_overlay=a.romfs_overlay, fps60=a.fps60, touch=a.touch, mt_replay=a.mt_replay, vulkan_driver=a.vulkan_driver, shared_font=a.shared_font,
                             vercode_offset=offset, alias_headroom=a.alias_headroom, romfs_at=a.romfs_at, romfs_push=a.romfs_push, external_display=a.external_display, native_keyboard=a.native_keyboard,
                             data_url=a.data_url, data_cred=a.data_cred, data_root=a.data_root, data_pointer=a.data_pointer, data_pointer_key=a.data_pointer_key, jobs=a.jobs)
     return _with_progress(a.progress, lambda: pipeline.emit_result(pipeline.Port(opts).run()))

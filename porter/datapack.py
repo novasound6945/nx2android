@@ -288,7 +288,7 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
         check_packs(tmp, {r[len(ROMFS) + 1:]: p for r, p, _, _ in rsmall}, progress)
         packs = dict(count=len(groups), files=len(rsmall), bytes=sum(f[2] for f in rsmall), tar_bytes=sum(sizes))
     if shaders: link_or_copy(shaders, tmp / 'shaders.dmsv'); n += 1; b += shaders.stat().st_size   # none for an OpenGL ES game
-    for name, src in (files or {}).items(): shutil.copyfile(src, tmp / name); n += 1; b += Path(src).stat().st_size
+    for name, src in (files or {}).items(): (tmp / name).parent.mkdir(parents=True, exist_ok=True); link_or_copy(Path(src), tmp / name); n += 1; b += Path(src).stat().st_size   # (overlay/...: a subfolder)
     rows = [f'# Written by nx2android\'s porter for {profile.name} ({profile.id}); KEY=VALUE per line, read by the app at launch',
             f'DM_LANG={language}']
     if aoc: rows.append(f'DM_AOC_DIR={files_folder(package)}/aoc')
