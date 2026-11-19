@@ -32,6 +32,18 @@ def render_size(ctx):
 
 FRAME_STEP = {'4fc3cb13e1d3292e4314cfa37a09289e': render_size}
 
+# The 'Loading' thread's stack, 256 KB → 1 MB. A crash on the Retroid Pocket 6 after 18 minutes of battles (2026-11-20, 1.0.3-8, not seen again at the same spot): the guest thread
+# 'Loading' ran off its stack's end through about 1,150 nested calls of main+0x324ff0 (a script context's Update) → main+0x26b7cc (the Loading dispatcher's Post: on its own thread it
+# runs the work at once) → main+0x326180 (the work: while flags&1, Update again). Update hands work to the Loading thread when +0x418 is set and clears +0x418 only after Post
+# returns (main+0x325188): on the Switch Loading and the main thread share core 0 at the same priority, so the clear comes first; here Loading takes the work on another core
+# and can see +0x418 still set, and every yield of the script nests once more. The thread parameters' default stack size (main+0x26b544, mov x8,#0x40000) is used by 'Loading'
+# (created at main+0x3f3388, which allocates the stack from the game's heap): 1 MB holds about 4,600 levels. The race itself is left as it is.
+CUTS = {
+  '4fc3cb13e1d3292e4314cfa37a09289e': [
+    (0x26b544, '8800a0d2', '0802a0d2', "thread parameters' default stack size: mov x8,#0x40000 → mov x8,#0x100000 (the Loading thread's stack, nested script updates)"),
+  ],
+}
+
 # ---- The instance culling compute shader, 43c2b838b11bc19c (SPIRV: a patch of the translated shader's spirv-dis text, dm/android/tools/shader_vk.py spirv_patches) ----
 # The same shader key as in the Western edition: the parts below are that profile's, unchanged.
 # Each invocation tests one instance of the instanced scenery (furniture, grass, trees, the cliff walls) against the view and the depth pyramid and writes the indirect
