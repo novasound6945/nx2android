@@ -20,6 +20,9 @@ env	DM_VK_X_FENCES=1
 env	DM_VK_PASS_SPLIT=256
 env	DM_VK_PASS_SPLIT_DEPTH=1
 # DM_VK_UBWC=7 (the overseas profile's, for Qualcomm's own driver on an Adreno 830) is left out: on the Nova with Turnip it cost about 10% (frame 22.2 -> 20.3 ms without it)
+# Memory pool chunks of 512 MB, not 256 (gfx_vk_core.c mtl_pool_add): a 4 MB storage buffer lay across the 256 MB mark of the 1.5 GB pool, bound cut at the chunk's end
+# (vk_cross: 65,536 ranges in about 34,000 frames on the Retroid Pocket Nova, Adreno 740 with Turnip, 2026-11-20). The Adreno 740 takes buffers that big.
+env	DM_VK_ZC_CHUNK_MB=512
 env	DM_MENU_RES=0.5:1.0:0.9
 env	DM_DETAIL_DIST=1
 data_bundles	1048576	67108864
