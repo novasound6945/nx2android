@@ -7,6 +7,7 @@ program_id	01008BF025F34000
 
 # ---- App ----
 name	ONE PIECE: Grand Gourmet
+name_ko	원피스 그랜드 레스토랑
 ipa	OnePieceGrandGourmet.ipa
 app_category	public.app-category.games
 

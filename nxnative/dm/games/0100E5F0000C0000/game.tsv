@@ -7,6 +7,7 @@ program_id	0100E5F0000C0000
 
 # ---- App ----
 name	Disgaea 5: Alliance of Vengeance
+name_ko	마계전기 디스가이아 5
 ipa	Disgaea5AllianceOfVengeance.ipa
 app_category	public.app-category.games
 

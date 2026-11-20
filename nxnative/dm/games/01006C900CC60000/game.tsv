@@ -7,6 +7,7 @@ program_id	01006C900CC60000
 
 # ---- App ----
 name	SUPER ROBOT WARS T
+name_ko	슈퍼로봇대전 T
 ipa	SuperRobotWarsT.ipa
 app_category	public.app-category.games
 

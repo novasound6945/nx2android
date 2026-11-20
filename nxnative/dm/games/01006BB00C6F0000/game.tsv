@@ -11,6 +11,7 @@ program_id	01006BB00C6F0000
 # ---- App ----
 # Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
 name	The Legend of Zelda: Link's Awakening
+name_ko	젤다의 전설 꿈꾸는 섬
 ipa	ZeldaLinksAwakening.ipa
 app_category	public.app-category.adventure-games
 
