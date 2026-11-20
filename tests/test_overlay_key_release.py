@@ -43,7 +43,7 @@ typedef struct { int source, type, key, action, device; } AInputEvent;
 #define AKeyEvent_getAction(e) ((e)->action)
 #define AKeyEvent_getRepeatCount(e) (0)
 #define LOG(...) ((void)0)
-static _Atomic int g_set_overlay = 1, g_overlay = 1, g_pad_in = -1, g_tx_on, g_menu;
+static _Atomic int g_set_overlay = 1, g_overlay = 1, g_pad_in = -1, g_tx_on, g_menu, g_set_touch, g_edit;
 static int g_pad_used, vibration = -1, publications;
 static uint64_t g_btn[1];   // per player (PR #238); the device here is player 1's
 static pthread_mutex_t g_slot_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -77,7 +77,7 @@ int main(int argc, char **argv) {
         assert(takes == 0);  // and it takes no player
     } else {
         assert(handle_event(&key) == 1);
-        assert(dm_overlay_visible() == 2 && g_pad_used && g_btn[0] == 1);
+        assert(dm_overlay_visible() == 0 && g_pad_used && g_btn[0] == 1);
         assert(g_pad_in == 17 && vibration == 17 && publications == 1 && takes == 1);
         if (test == 2) {
             // The state after touch_event restores the overlay while A is held.
@@ -87,11 +87,11 @@ int main(int argc, char **argv) {
         key.action = AKEY_EVENT_ACTION_UP;
         assert(handle_event(&key) == 1);
         assert(g_btn[0] == 0 && publications == 2 && takes == 0);  // A still reaches the guest as released.
-        assert(dm_overlay_visible() == (test == 2 ? 1 : 2));
+        assert(dm_overlay_visible() == (test == 2 ? 1 : 0));
         assert(g_pad_in == 17 && vibration == 17);
         key.action = AKEY_EVENT_ACTION_DOWN;
         assert(handle_event(&key) == 1);
-        assert(dm_overlay_visible() == 2 && g_btn[0] == 1 && publications == 3);
+        assert(dm_overlay_visible() == 0 && g_btn[0] == 1 && publications == 3);
     }
     return 0;
 }

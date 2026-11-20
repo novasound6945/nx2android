@@ -3,7 +3,28 @@
 // or the right edge: a thumb reaches as far from the edge on any width) and y of the window's height down; its size is in window heights (round controls stay round)
 #pragma once
 #include <math.h>
+#include <stdlib.h>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 #include "dm_input.h"
+// The overlay's words follow the device's language (Chinese when the system locale says zh, English otherwise), and DM_UI_LANG=zh / en (an env.txt row) overrides
+// it — the pause menu, the layout editor and the save picker all read this one switch, and each of their strings sits beside its use as an English/Chinese table or
+// a TR() pair.
+static inline int dm_ui_zh(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("DM_UI_LANG");
+        if (e && *e) v = e[0] == 'z' || e[0] == 'Z' || e[0] == 'c' || e[0] == 'C' || e[0] == '1';
+#ifdef __ANDROID__
+        else { char loc[PROP_VALUE_MAX] = ""; if (!__system_property_get("persist.sys.locale", loc) || !loc[0]) __system_property_get("ro.product.locale", loc); v = loc[0] == 'z' && loc[1] == 'h'; }
+#else
+        else v = 0;   // (the computer's harnesses: English)
+#endif
+    }
+    return v;
+}
+#define TR(en, zh) (dm_ui_zh() ? (zh) : (en))
 enum { OV_STICK_L, OV_STICK_R, OV_BUTTON, OV_DPAD, OV_MENU };   // OV_MENU: the menu button (shown with the gamepad on or off, 70%; env.txt DM_MENU_BUTTON=0 leaves it out): pauses the game and opens the settings
 typedef struct { int kind; float ax, x, y, w, h; uint64_t btn; const char *label, *name; } ov_ctl;   // ax: the anchor, as a fraction of the window's width; name: the table's
 // The layouts: dm/android/overlay_default.tsv with the game profile's moves (android.tsv overlay rows), compiled by build.py into android_profile.h. Both list the
@@ -28,8 +49,8 @@ int dm_overlay_layout(void);   // front_android.c: 0 the tablet's, 1 the phone's
 #define OV_KNOB 0.42f        // a stick's knob radius, of the stick's (the theme-less drawing)
 #define OV_MENU_ALPHA 0.70f
 #define OV_FLASH_NS 180000000ll   // a pressed button's flash fades to its held glow in this time
-// front_android.c → gfx_vk_present.c: what to draw (0 nothing: a controller is in use; 1 the gamepad; 2 only the menu button). Show gamepad decides between 1 and 2 even with a
-// controller attached. Where a stick's knob is (its offset from the stick's centre
+// front_android.c → gfx_vk_present.c: what to draw (0 nothing: a controller is in use; 1 the gamepad; 2 only the menu button; 3 only the menu button, the rest of
+// the screen the game's, which is touch passthrough). Show gamepad decides between 1 and 2 even with a controller attached. Where a stick's knob is (its offset from the stick's centre
 // in stick radii, -1..1), and when each control was pressed (0 = not held; for the d-pad, its four directions by DM_BTN_* bit; a stick: while a finger holds it)
 int dm_overlay_visible(void);
 void dm_overlay_knob(int stick, float *dx, float *dy);
@@ -162,21 +183,24 @@ void dm_overlay_theme_done(const ov_theme *t);   // the pixels are on the GPU: t
 
 // ---- the pause menu: a panel in the middle of the window: a row of tabs, the open tab's rows, and Resume. Everything is placed in a panel rectangle p
 // (x, y, width, height: the window's for touches, the raster's for drawing), so the touches and the drawing agree ----
-enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_PAD, OVM_AUDIO, OVM_RATE, OVM_RES, OVM_DETAIL, OVM_LIMIT, OVM_CLOUD, OVM_CLOUD_UP, OVM_RESUME, OVM_TAB, OVM_N };   // OVM_TAB: the tabs' row;
+enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_PAD, OVM_AUDIO, OVM_RATE, OVM_RES, OVM_DETAIL, OVM_LIMIT, OVM_CLOUD, OVM_CLOUD_UP, OVM_TOUCH, OVM_RESUME, OVM_TAB, OVM_N };   // OVM_TAB: the tabs' row;
             // OVM_EDIT: the layout editor; OVM_MODE: handheld (performance) or docked (resolution); OVM_EXPORT, OVM_IMPORT: the save manager (saves_android.c);
             // OVM_PAD: a controller's face buttons by their position or by their label (front_android.c pad_labels); OVM_RATE: the frame step's target, 30 or 60 fps,
             // for a game whose rewriter stubs step by the host's target; OVM_RES: the render scale of a game with a render-scale stub, in three steps. Both only
             // for a profile that asks for them (front_android.c dm_menu_rate_available, dm_menu_res_available); OVM_LIMIT: the frame rate limit, every game's
             // (front_android.c limit_apply: Auto, 60, 40, 30, held through DM_FPS_PIN); OVM_AUDIO: the audio output, a row only where the app has outputs to choose
             // (dm_menu_audio_available: an external-screen port); OVM_CLOUD: the save's cloud sync for this game, a switch with its status in place of ON / OFF;
-            // OVM_CLOUD_UP: Upload now while an upload is owed, else how the last one went. Both only with the files folder's sync.txt (savecloud_android.c dm_cloud_available)
+            // OVM_CLOUD_UP: Upload now while an upload is owed, else how the last one went. Both only with the files folder's sync.txt (savecloud_android.c dm_cloud_available);
+            // OVM_TOUCH: every touch is the game's own touch screen and the gamepad is not drawn (front_android.c g_set_touch, settings.txt touch=)
 #define OVM_TABS 2
 #define OVM_PER_TAB 11
-static const int OVM_TAB_ITEMS[OVM_TABS][OVM_PER_TAB] = {{OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_PAD, -1, -1, -1, -1, -1, -1},
+static const int OVM_TAB_ITEMS[OVM_TABS][OVM_PER_TAB] = {{OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_TOUCH, OVM_PAD, -1, -1, -1, -1, -1},
                                                         {OVM_FPS, OVM_RATE, OVM_RES, OVM_DETAIL, OVM_MODE, OVM_LIMIT, OVM_EXPORT, OVM_IMPORT, OVM_CLOUD, OVM_CLOUD_UP, OVM_AUDIO}};
 // OVM_DETAIL: the detail distance of a game whose culling shader takes the host's factor (front_android.c dm_menu_detail_available): 1x the game's own, 1.5x, 2x
 #define OVM_LIMITS 4   // the frame rate limit's values, as the menu steps through them (front_android.c LIMIT_STEPS): Auto, 60, 40, 30 fps
-static const char *const OVM_TAB_NAMES[OVM_TABS] = {"Gamepad", "Game"};
+static const char *const OVM_TAB_NAMES_EN[OVM_TABS] = {"Gamepad", "Game"};
+static const char *const OVM_TAB_NAMES_ZH[OVM_TABS] = {"手柄", "游戏"};
+#define OVM_TAB_NAMES (dm_ui_zh() ? OVM_TAB_NAMES_ZH : OVM_TAB_NAMES_EN)
 int dm_menu_audio_available(void); int dm_menu_rate_available(void); int dm_menu_res_available(void); int dm_menu_detail_available(void); int dm_menu_detail_step(void);
 int dm_cloud_available(void);   // savecloud_android.c
 static inline int ov_menu_shown(int it) { return it >= 0 && !(it == OVM_AUDIO && !dm_menu_audio_available()) && !(it == OVM_RATE && !dm_menu_rate_available()) && !(it == OVM_RES && !dm_menu_res_available()) && !(it == OVM_DETAIL && !dm_menu_detail_available()) && !((it == OVM_CLOUD || it == OVM_CLOUD_UP) && !dm_cloud_available()); }

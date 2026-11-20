@@ -235,7 +235,7 @@ static void barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImage
 enum { SP_DISC = OV_N, SP_BLACK, SP_WHITE, SP_ACCENT, SP_N };   // (black, white, accent: solid blocks, the dimming and the layout editor's frames)
 #define OV_FPS_CHARS "0123456789 FPS-CBATO"   // (the temperature rows: "SOC 52C", "BAT 38C")
 static struct { VkImage img; VkDeviceMemory mem; VkImageView view; VkSampler samp; VkDescriptorSetLayout dsl; VkPipelineLayout layout; VkDescriptorPool pool; VkDescriptorSet set;
-                VkPipeline pipe; VkFormat pfmt; uint32_t w, h, sh, pw, ph, gh, gs; VkBuffer up; VkDeviceMemory upm; uint8_t *px; int uploaded, panel, lay, cver; float sp[SP_N][4];
+                VkPipeline pipe; VkFormat pfmt; uint32_t w, h, sh, pw, ph, gh, gs; VkBuffer up; VkDeviceMemory upm; uint8_t *px; void *map; int uploaded, panel, lay, cver; float sp[SP_N][4];
                 unsigned cmv;   // the cloud rows' version the panel was drawn at
                 VkRenderPass rp; VkFramebuffer fb[8]; VkImageView fbview[8]; VkExtent2D fbext[8]; } g_ov;
 static struct { const ov_theme *t; VkImage img; VkDeviceMemory mem; VkImageView view; VkDescriptorSet set; VkBuffer up; VkDeviceMemory upm; uint32_t upk; int ready; } g_tt[2];   // per layout
@@ -391,14 +391,23 @@ static void cv_button(const ov_canvas *cv, const float b[4], const char *l, int 
 }
 // The pause menu (overlay_layout.h: the rows, the tabs, the slider's track), in the raster's panel rectangle. Its letters are as large as a row allows (0.30 of
 // its height, about 2.7 mm on a 6.7" phone and 3.6 mm on the 8.8" tablet) and smaller only when the widest row would not fit beside its control
-static const char *const OVM_LABELS[OVM_N] = {"Show gamepad", "Opacity", "Edit layout", "Rumble", "Show FPS", "Mode", "Export save", "Import save", "Face buttons", "Audio output", "Frame rate", "Resolution",
-                                               "Detail distance", "Frame rate limit", "Cloud save", "Upload save", "Resume", ""};
-static const char *const OVM_BUTTONS[OVM_N] = {[OVM_EDIT] = "Edit", [OVM_EXPORT] = "Export", [OVM_IMPORT] = "Import", [OVM_AUDIO] = "Select"};   // the rows that are a button: its word
-static const char *const OVM_MODES[2] = {"Handheld", "Docked"};
+static const char *const OVM_LABELS_EN[OVM_N] = {"Show gamepad", "Opacity", "Edit layout", "Rumble", "Show FPS", "Mode", "Export save", "Import save", "Face buttons", "Audio output", "Frame rate", "Resolution",
+                                                  "Detail distance", "Frame rate limit", "Cloud save", "Upload save", "Touch input", "Resume", ""};
+static const char *const OVM_LABELS_ZH[OVM_N] = {"显示手柄", "透明度", "编辑布局", "震动", "显示帧率", "模式", "导出存档", "导入存档", "按键布局", "音频输出", "帧率", "分辨率",
+                                                  "细节距离", "帧率上限", "云存档", "上传存档", "触屏操作", "继续游戏", ""};
+#define OVM_LABELS (dm_ui_zh() ? OVM_LABELS_ZH : OVM_LABELS_EN)
+static const char *const OVM_BUTTONS_EN[OVM_N] = {[OVM_EDIT] = "Edit", [OVM_EXPORT] = "Export", [OVM_IMPORT] = "Import", [OVM_AUDIO] = "Select"};   // the rows that are a button: its word
+static const char *const OVM_BUTTONS_ZH[OVM_N] = {[OVM_EDIT] = "编辑", [OVM_EXPORT] = "导出", [OVM_IMPORT] = "导入", [OVM_AUDIO] = "选择"};
+#define OVM_BUTTONS (dm_ui_zh() ? OVM_BUTTONS_ZH : OVM_BUTTONS_EN)
+static const char *const OVM_MODES_EN[2] = {"Handheld", "Docked"};
+static const char *const OVM_MODES_ZH[2] = {"掌机", "底座"};
+#define OVM_MODES (dm_ui_zh() ? OVM_MODES_ZH : OVM_MODES_EN)
+static const char *const OVM_PADS_EN[2] = {"Position", "Label"};
+static const char *const OVM_PADS_ZH[2] = {"位置", "标签"};
+#define OVM_PADS (dm_ui_zh() ? OVM_PADS_ZH : OVM_PADS_EN)   // a controller's face buttons (front_android.c pad_labels)
 static const char *const OVM_DETS[3] = {"1x", "1.5x", "2x"};   // the detail distance factor (front_android.c OVM_DETAIL)
 static const char *const OVM_RESS[3] = {"Low", "Auto", "High"};   // the render scale's steps (front_android.c OVM_RES)
 static const char *const OVM_RATES[2] = {"30 fps", "60 fps"};   // the frame step's target (front_android.c OVM_RATE)
-static const char *const OVM_PADS[2] = {"Position", "Label"};   // a controller's face buttons (front_android.c pad_labels)
 // the frame rate limit (front_android.c limit_apply): only its value, in a pill as wide as the widest (its row steps through them, so the other values are not shown
 // as segments to tap; with four segments beside its label the row would not fit at 1280x960 and every row's letters would halve)
 static const char *const OVM_LIMIT_WORDS[OVM_LIMITS] = {"Auto", "60 fps", "40 fps", "30 fps"};
@@ -430,7 +439,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             cv_rrect(cv, r[0], r[1] + rh - 1, r[0] + rw, r[1] + rh, 0.5f, C_LINE);
             continue;
         }
-        if (it == OVM_RESUME) { cv_rrect(cv, r[0], r[1], r[0] + rw, r[1] + 1, 0.5f, C_LINE); cv_text(cv, r[0] + (rw - cv_text_w("Resume", is)) / 2, cy, "Resume", is, C_ACCENT); continue; }
+        if (it == OVM_RESUME) { const char *w = TR("Resume", "继续游戏"); cv_rrect(cv, r[0], r[1], r[0] + rw, r[1] + 1, 0.5f, C_LINE); cv_text(cv, r[0] + (rw - cv_text_w(w, is)) / 2, cy, w, is, C_ACCENT); continue; }
         cv_text(cv, r[0] + rh * 0.15f, cy, OVM_LABELS[it], is, row == sel ? C_WHITE : C_DIM);
         if (it == OVM_OPACITY) {   // the slider: its track, filled to the value, the knob and the percent
             float t[3]; ov_menu_track(p, row, t); float f = (float)(op - OV_OPACITY_MIN) / (OV_OPACITY_MAX - OV_OPACITY_MIN), th = fmaxf(2, rh * 0.08f), kr = rh * 0.20f;
@@ -441,7 +450,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             char v[8]; snprintf(v, sizeof v, "%d%%", op); cv_text(cv, x1 - cv_text_w(v, is), cy, v, is, C_WHITE);
         } else if (it == OVM_EXPORT && (st >> 20 & 15) != OVX_IDLE) {   // the export's outcome in place of its button: its name, or why there is none
             char nm[64], v[80]; int x = dm_save_note(nm, sizeof nm), vs = is;
-            snprintf(v, sizeof v, "%s", x == OVX_BUSY ? "Exporting..." : x == OVX_DONE ? nm : x == OVX_NOSAVE ? "No save yet" : "Failed");
+            snprintf(v, sizeof v, "%s", x == OVX_BUSY ? TR("Exporting…", "导出中…") : x == OVX_DONE ? nm : x == OVX_NOSAVE ? TR("No save yet", "还没有存档") : TR("Failed", "失败"));
             while (vs > 1 && cv_text_w(v, vs) > rw - cv_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;
             cv_text(cv, x1 - cv_text_w(v, vs), cy, v, vs, x == OVX_FAILED ? C_ACCENT : C_WHITE);
         } else if (it == OVM_CLOUD) {   // the sync's switch: on unless this game's sync is off (or a trial build), its status beside it in place of ON / OFF
@@ -478,10 +487,10 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             cv_rrect(cv, x0, cy - hh / 2, x1, cy + hh / 2, hh / 2, k ? C_ACCENT : C_OFF);
             cv_text(cv, x0 + (pw - cv_text_w(v, is)) / 2, cy, v, is, k ? C_WHITE : C_DIM);
         } else {   // a switch
-            int on = st >> (it == OVM_OVERLAY ? 0 : it == OVM_RUMBLE ? 1 : 3) & 1; float sx0 = x1 - sw;
+            int on = st >> (it == OVM_OVERLAY ? 0 : it == OVM_RUMBLE ? 1 : it == OVM_TOUCH ? 25 : 3) & 1; float sx0 = x1 - sw;
             cv_rrect(cv, sx0, cy - sh / 2, x1, cy + sh / 2, sh / 2, on ? C_ACCENT : C_OFF);
             cv_disc(cv, on ? x1 - sh / 2 : sx0 + sh / 2, cy, sh / 2 - fmaxf(2, sh * 0.1f), on ? C_WHITE : C_KNOB_OFF);
-            const char *word = on ? "ON" : "OFF"; cv_text(cv, sx0 - gap - cv_text_w(word, is), cy, word, is, on ? C_WHITE : C_DIM);
+            const char *word = on ? TR("ON", "开") : TR("OFF", "关"); cv_text(cv, sx0 - gap - cv_text_w(word, is), cy, word, is, on ? C_WHITE : C_DIM);
         }
     }
 }
@@ -494,27 +503,29 @@ static void ov_ed_rects_for(float W, float H, float pw, float ph, float tb[4], f
 }
 static void ov_ed_rects(float tb[4], float pr[4]) { ov_ed_rects_for((float)g_sext.width, (float)g_sext.height, (float)g_ov.pw, (float)g_ov.ph, tb, pr); }
 static const char *ov_ctl_name(const ov_ctl *c) {
-    return c->kind == OV_STICK_L ? "Left stick" : c->kind == OV_STICK_R ? "Right stick" : c->kind == OV_DPAD ? "D-pad" : c->kind == OV_MENU ? "Menu button"
-         : !strcmp(c->label, "-") ? "Minus" : !strcmp(c->label, "+") ? "Plus" : c->label;
+    return c->kind == OV_STICK_L ? TR("L stick", "左摇杆") : c->kind == OV_STICK_R ? TR("R stick", "右摇杆") : c->kind == OV_DPAD ? TR("D-pad", "十字键")
+         : c->kind == OV_MENU ? TR("Menu", "菜单键") : !strcmp(c->label, "-") ? TR("Minus", "减号键") : !strcmp(c->label, "+") ? TR("Plus", "加号键") : c->label;
 }
 static void ov_edit_panel(const ov_canvas *cv, int st, float W, float H) {
     float tb[4], pr[4]; ov_ed_rects_for(W, H, (float)cv->w, (float)cv->h, tb, pr);
     int held = (st >> 4 & 15) - 1, sel = (st >> 8 & 255) - 1;
-    static const char *const words[OVE_ALL] = {"-", "+", "Reset", "Cancel", "Save", "Snap to grid: Off", "Hide", "Discard", "Keep editing"};
+    static const char *const words_en[OVE_ALL] = {"-", "+", "Reset", "Cancel", "Save", "Snap grid: off", "Hide", "Discard", "Keep editing"};
+    static const char *const words_zh[OVE_ALL] = {"-", "+", "重置", "取消", "保存", "吸附网格：关", "隐藏", "放弃", "继续编辑"};
+    const char *const *words = dm_ui_zh() ? words_zh : words_en;
     cv_rrect(cv, tb[0], tb[1], tb[0] + tb[2], tb[1] + tb[3], tb[3] * 0.14f, C_BG);
     char hint[96]; int hid = (st & OVE_SEL_HIDDEN) != 0, can_hide = sel >= 0 && sel < OV_N && OV_CTLS[sel].kind != OV_MENU;
-    if (sel >= 0 && sel < OV_N && hid) snprintf(hint, sizeof hint, "%s: hidden, Show", ov_ctl_name(&OV_CTLS[sel]));
-    else if (sel >= 0 && sel < OV_N) snprintf(hint, sizeof hint, "%s: drag, pinch, - +", ov_ctl_name(&OV_CTLS[sel]));   // (short: 2x-scale letters on a phone)
-    else snprintf(hint, sizeof hint, "Drag to move, pinch to resize");
+    if (sel >= 0 && sel < OV_N && hid) snprintf(hint, sizeof hint, TR("%s: hidden, tap to show", "%s：已隐藏，点显示"), ov_ctl_name(&OV_CTLS[sel]));
+    else if (sel >= 0 && sel < OV_N) snprintf(hint, sizeof hint, TR("%s: drag / pinch / - +", "%s：拖动/缩放/- +"), ov_ctl_name(&OV_CTLS[sel]));   // (short: 2x-scale letters on a phone)
+    else snprintf(hint, sizeof hint, TR("Drag to move, pinch to resize", "拖动移动，双指缩放"));
     int hs = (int)fmaxf(1, roundf(tb[3] * 0.11f / PF_CAP)); while (hs > 1 && cv_text_w(hint, hs) > tb[2] * 0.94f) hs--;
     cv_text(cv, tb[0] + (tb[2] - cv_text_w(hint, hs)) / 2, tb[1] + tb[3] * 0.14f, hint, hs, sel >= 0 ? C_WHITE : C_DIM);
     for (int i = 0; i < OVE_N; i++) { float b[4]; ov_ed_button(i, tb, b); int grid = i == OVE_GRID && (st & OVE_GRID_ON);
         if (i == OVE_HIDE && !can_hide) { cv_rrect(cv, b[0], b[1], b[0] + b[2], b[1] + b[3], b[3] * 0.3f, C_OFF); int ws = (int)fmaxf(1, roundf(b[3] * 0.45f / 7));
             while (ws > 1 && cv_text_w(words[i], ws) > b[2] * 0.9f) ws--; cv_text(cv, b[0] + (b[2] - cv_text_w(words[i], ws)) / 2, b[1] + b[3] / 2, words[i], ws, C_DIM); continue; }   // nothing to hide
-        cv_button(cv, b, i == OVE_HIDE && hid ? "Show" : grid ? "Snap to grid: On" : words[i], i == OVE_SAVE || grid || (i == OVE_HIDE && hid), i == held); }
+        cv_button(cv, b, i == OVE_HIDE && hid ? TR("Show", "显示") : grid ? TR("Snap grid: on", "吸附网格：开") : words[i], i == OVE_SAVE || grid || (i == OVE_HIDE && hid), i == held); }
     if (!(st & 1)) return;
     cv_rrect(cv, pr[0], pr[1], pr[0] + pr[2], pr[1] + pr[3], pr[3] * 0.10f, C_BG);
-    const char *q = "Discard your changes?"; int qs = (int)fmaxf(1, roundf(pr[3] * 0.13f / PF_CAP)); while (qs > 1 && cv_text_w(q, qs) > pr[2] * 0.9f) qs--;
+    const char *q = TR("Discard the changes?", "放弃修改？"); int qs = (int)fmaxf(1, roundf(pr[3] * 0.13f / PF_CAP)); while (qs > 1 && cv_text_w(q, qs) > pr[2] * 0.9f) qs--;
     cv_text(cv, pr[0] + (pr[2] - cv_text_w(q, qs)) / 2, pr[1] + pr[3] * 0.27f, q, qs, C_WHITE);
     for (int i = OVE_DISCARD; i <= OVE_KEEP; i++) { float b[4]; ov_ed_button(i, pr, b); cv_button(cv, b, words[i], i == OVE_DISCARD, i == held); }
 }
@@ -739,7 +750,7 @@ static void ov_mark(VkCommandBuffer cb, int mark, int64_t age) {
     float g = (float)g_ov.gh, u0 = cell * g, v0 = (float)(g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh), r = sz * k / 2;
     ov_rect(cb, cx - r, cy - r, cx + r, cy + r, u0, v0, u0 + g, v0 + g, a);
 }
-static void ov_render(VkCommandBuffer cb, int mode, int menu, int fps) {
+static void ov_render(VkCommandBuffer cb, int mode, int menu, int fps) {   // mode (dm_overlay_visible): 0 nothing, 1 the gamepad, 2 and 3 the menu button alone
     float W = (float)g_sext.width, H = (float)g_sext.height, op = dm_overlay_opacity();
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); int64_t now = (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
     int edit = menu >= 0 && !(menu & OVT_ST) && (menu & OVE_ST);   // the layout editor: the gamepad over the held frame, every control (shown or not)
@@ -881,6 +892,8 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
         g_ov.cver = dm_overlay_custom_ver();   // (and, without a theme, the player's own layout: the outlines are in the static layer)
         vkDeviceWaitIdle(V.dev);
         if (g_ov.view) { vkDestroyImageView(V.dev, g_ov.view, NULL); vkDestroyImage(V.dev, g_ov.img, NULL); vkFreeMemory(V.dev, g_ov.mem, NULL); vkDestroyBuffer(V.dev, g_ov.up, NULL); vkFreeMemory(V.dev, g_ov.upm, NULL); }
+        if (g_ov.px && g_ov.px != (uint8_t *)g_ov.map) free(g_ov.px);
+        g_ov.px = NULL; g_ov.map = NULL;
         g_ov.lay = lay; uint32_t sh = ov_layout_sprites(w, h); float mr[4]; ov_menu_rect((float)g_sext.width, (float)g_sext.height, mr);
         g_ov.pw = (uint32_t)(mr[2] / 2) + 1; g_ov.ph = (uint32_t)(mr[3] / 2) + 1; if (g_ov.pw > w) g_ov.pw = w;
         g_ov.gs = (uint32_t)fmaxf(2, roundf(h * 0.022f / PF_CAP)); g_ov.gh = PF_CAP * g_ov.gs + 4;   // the counter's characters: 2.2% of the window's height
@@ -896,7 +909,10 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
         VKCHK(vkCreateBuffer(V.dev, &bc, NULL, &g_ov.up)); VkMemoryRequirements bq; vkGetBufferMemoryRequirements(V.dev, g_ov.up, &bq);
         VkMemoryAllocateInfo bi = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, bq.size, vk_mem_type(bq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0)};
         VKCHK(vkAllocateMemory(V.dev, &bi, NULL, &g_ov.upm)); VKCHK(vkBindBufferMemory(V.dev, g_ov.up, g_ov.upm, 0));
-        void *px; VKCHK(vkMapMemory(V.dev, g_ov.upm, 0, VK_WHOLE_SIZE, 0, &px)); g_ov.px = px;
+        void *px; VKCHK(vkMapMemory(V.dev, g_ov.upm, 0, VK_WHOLE_SIZE, 0, &px)); g_ov.map = px;
+        // Rasterize into ordinary (cacheable) memory and copy the rows over: writing the pixels straight into the mapped buffer is uncached write-combined, ~550 ms
+        // for the menu panel on an Adreno 650 (OPPO Pad), and the raster is what a dragged slider pays for every frame
+        g_ov.px = malloc((size_t)w * th * 4); if (!g_ov.px) g_ov.px = px;
         g_ov.w = w; g_ov.h = h; g_ov.sh = sh; ov_raster(g_ov.px, w, h, sh); memset(g_ov.px + (size_t)w * (h + sh) * 4, 0, (size_t)w * (g_ov.ph + 2 * g_ov.gh) * 4); ov_fps_glyphs(); ov_mark_glyphs();
         VkDescriptorImageInfo ii = {g_ov.samp, g_ov.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkWriteDescriptorSet wr = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_ov.set, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ii};
@@ -906,12 +922,17 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
     uint32_t y0 = 0, rows = g_ov.h + g_ov.sh + g_ov.ph + 2 * g_ov.gh;   // the rows to upload
     unsigned cmv = dm_cloud_menu_ver();
     int want_panel = menu >= 0 && (menu != g_ov.panel || cmv != g_ov.cmv);   // (the cloud rows change without the menu's state)
+    // (a fence that this device's kgsl holds for ~half a second would freeze the whole menu: wait one frame's worth, and if the copy out of the buffer has not run
+    // yet keep the panel as it is this frame — the next redraw, 16 ms later, tries again and the change lands then)
+    int panel_ok = 1;
     if (g_ov.uploaded && want_panel) {   // only the panel, after the last copy out of the buffer has run
         VkFence f[8]; uint32_t n = 0; for (uint32_t i = 0; i < 8; i++) if (i != k) f[n++] = g_pfence[i];
-        vkWaitForFences(V.dev, n, f, 1, 1000000000ull);
-        y0 = g_ov.h + g_ov.sh; rows = g_ov.ph; g_ov.uploaded = 0;
+        if (vkWaitForFences(V.dev, n, f, 1, 20000000ull) == VK_TIMEOUT) panel_ok = 0;
+        else { y0 = g_ov.h + g_ov.sh; rows = g_ov.ph; g_ov.uploaded = 0; }
     }
-    if (want_panel) { ov_panel(menu); g_ov.panel = menu; g_ov.cmv = cmv; }
+    if (panel_ok && want_panel) { ov_panel(menu); g_ov.panel = menu; g_ov.cmv = cmv; }
+    // the rows the copy reads go back into the mapped buffer here, in one linear pass (write-combined: the raster above ran in cacheable memory)
+    if (g_ov.map && g_ov.px && g_ov.px != (uint8_t *)g_ov.map) memcpy((uint8_t *)g_ov.map + (size_t)y0 * g_ov.w * 4, g_ov.px + (size_t)y0 * g_ov.w * 4, (size_t)rows * g_ov.w * 4);
     if (!g_ov.uploaded) {
         VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, y0 ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, g_ov.img, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
@@ -974,10 +995,14 @@ static uint64_t pace_desired(double period) {   // the frame's desired present t
 }
 static void present_window(vkimg_t *im, const int crop[4], double period, uint64_t ticket) {   // period: the game's frame period (s); < 0 for a redraw (ticket 0)
     uint32_t k = g_pi++ % 8;
-    vkWaitForFences(V.dev, 1, &g_pfence[k], 1, UINT64_MAX);
+    // A redraw is not worth a freeze: this device's kgsl/compositor can hold a fence or a buffer for half a second, and the pass that waits it out stalls the whole menu.
+    // Wait 30 ms at most and give the frame up — the next redraw, 16 ms on, tries again with the newest state. Game frames still wait without a bound.
+    uint64_t wt = period < 0 ? 30000000ull : UINT64_MAX;
+    if (vkWaitForFences(V.dev, 1, &g_pfence[k], 1, wt) == VK_TIMEOUT) return;
     VkFormat want = im->fmt == VK_FORMAT_R8G8B8A8_SRGB || im->fmt == VK_FORMAT_B8G8R8A8_SRGB || im->fmt == VK_FORMAT_A8B8G8R8_SRGB_PACK32 ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
     if (want != g_want) { g_want = want; swap_destroy(); if (!swap_make()) return; }   // once, at the first present of the other kind
-    uint32_t idx; VkResult r = vkAcquireNextImageKHR(V.dev, g_swap, UINT64_MAX, g_acq[k], VK_NULL_HANDLE, &idx);
+    uint32_t idx; VkResult r = vkAcquireNextImageKHR(V.dev, g_swap, wt, g_acq[k], VK_NULL_HANDLE, &idx);
+    if (r == VK_TIMEOUT) return;   // (a redraw that could not get an image in time)
     if (r == VK_ERROR_OUT_OF_DATE_KHR) { swap_destroy(); if (!swap_make()) return; r = vkAcquireNextImageKHR(V.dev, g_swap, UINT64_MAX, g_acq[k], VK_NULL_HANDLE, &idx); }
     if (r < 0) { VKRED_ONCE(90, "vkAcquireNextImageKHR: %d", r); return; }
     vkResetFences(V.dev, 1, &g_pfence[k]);
@@ -1130,7 +1155,15 @@ static void *present_thread(void *arg) {
     typeof(g_pq[0]) last = {0};
     for (;;) {
         pthread_mutex_lock(&g_pq_mu);
-        while (g_pq_tail == g_pq_head && !atomic_load(&g_redraw)) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+        while (g_pq_tail == g_pq_head && !atomic_load(&g_redraw)) {
+            // With the pause menu open the game sends no frame, so nothing would be presented between two touches and a dragged slider only moves when the finger's own
+            // event arrives (and not at all while it rests): present the last frame again every vsync instead, which is what makes the menu follow the finger.
+            if (dm_menu_state() >= 0) {
+                struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);   // (the condvar's clock: pthread_cond_timedwait takes an absolute time on it)
+                ts.tv_nsec += 33333333; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+                if (pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts)) break;   // (timed out: a redraw; a state change that came in lands here too)
+            } else pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+        }
         atomic_store(&g_redraw, 0);
         if (g_pq_tail == g_pq_head) {   // a redraw, no new frame
             pthread_mutex_unlock(&g_pq_mu);

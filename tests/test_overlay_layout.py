@@ -94,13 +94,13 @@ int main(void) {
 
     // the Gamepad tab's rows end with the face buttons' (front_android.c pad_labels); the Game tab's: the frame rate counter, the mode, the frame rate limit under it
     // (front_android.c limit_apply), the save's export and import, and the audio output's row only where the app has outputs to choose
-    assert(OVM_ROWS == 7 && ov_menu_item(0, OVM_ROWS - 2) == OVM_PAD && ov_menu_item(1, OVM_ROWS - 2) == OVM_IMPORT);   // no audio outputs: the row is left out
+    assert(OVM_ROWS == 8 && ov_menu_item(0, OVM_ROWS - 2) == OVM_PAD && ov_menu_item(0, OVM_ROWS - 3) == OVM_TOUCH && ov_menu_item(1, 5) == OVM_IMPORT && ov_menu_item(1, OVM_ROWS - 2) == -1);   // no audio outputs: the row is left out (the Gamepad tab has six with Touch input)
     assert(ov_menu_item(1, 1) == OVM_FPS && ov_menu_item(1, 2) == OVM_MODE && ov_menu_item(1, 3) == OVM_LIMIT && ov_menu_item(1, 4) == OVM_EXPORT && ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
     float fit = ov_menu_scale();
     audio_available = 1;
     assert(OVM_ROWS == 8 && ov_menu_item(1, OVM_ROWS - 2) == OVM_AUDIO && ov_menu_scale() <= fit);
     rate_available = 1;   // rows follow each other: the frame rate row takes its place, and the panel has a row more
-    assert(OVM_ROWS == 9 && ov_menu_item(1, 2) == OVM_RATE && ov_menu_item(1, 3) == OVM_MODE && ov_menu_item(1, 4) == OVM_LIMIT && ov_menu_item(1, OVM_ROWS - 2) == OVM_AUDIO && ov_menu_item(0, 6) == -1);
+    assert(OVM_ROWS == 9 && ov_menu_item(1, 2) == OVM_RATE && ov_menu_item(1, 3) == OVM_MODE && ov_menu_item(1, 4) == OVM_LIMIT && ov_menu_item(1, OVM_ROWS - 2) == OVM_AUDIO && ov_menu_item(0, 7) == -1);
     res_available = 1;
     assert(OVM_ROWS == 10 && ov_menu_item(1, 2) == OVM_RATE && ov_menu_item(1, 3) == OVM_RES && ov_menu_item(1, 4) == OVM_MODE && ov_menu_item(1, OVM_ROWS - 2) == OVM_AUDIO);
     assert(ov_menu_scale() <= fit && ov_menu_item(0, OVM_ROWS - 1) == OVM_RESUME);
@@ -117,7 +117,7 @@ int main(void) {
         for (int t = 0; t < OVM_TABS; t++) for (int row = 1; row < OVM_ROWS - 1; row++) { int it = ov_menu_item(t, row); if (it >= 0) { assert(it < OVM_RESUME); seen[it]++; } }
         for (int it = 0; it < OVM_RESUME; it++) assert(seen[it] == 1);
     }
-    assert(OVM_LIMITS == 4 && !(((OVM_LIMITS - 1) << 26) & (3 << 24 | 1 << 28)));   // dm_menu_state's bits 26..27: clear of the export count's and of bit 28
+    assert(OVM_LIMITS == 4 && !(((OVM_LIMITS - 1) << 26) & (1 << 24 | 1 << 25 | 1 << 28)));   // dm_menu_state's bits 26..27: clear of the export count's (24), touch passthrough's (25) and bit 28
     const float screens[][2] = {{915, 412}, {1216, 760}, {2400, 1080}, {1080, 2400}};
     for (unsigned s = 0; s < sizeof screens / sizeof screens[0]; s++) {
         float W = screens[s][0], H = screens[s][1], step = H / OVE_GRID_ROWS, p[4];

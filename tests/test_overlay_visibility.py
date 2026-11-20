@@ -37,7 +37,7 @@ class OverlayVisibility(unittest.TestCase):
 #include "overlay_layout.h"
 #include "pad_slots.h"
 #include "stick_axis.h"
-static _Atomic int g_set_overlay, g_overlay, g_pads, g_edit, g_menu, g_menu_btn = 1;
+static _Atomic int g_set_overlay, g_overlay, g_pads, g_edit, g_menu, g_set_touch, g_menu_btn = 1;
 static _Atomic int g_cust[2][2][OV_N][4];
 static _Atomic int g_set_rumble, g_set_fps, g_set_labels, g_set_res, g_set_rate, g_set_detail, g_menu_tab, g_sv_st;
 static int layout, saves;
@@ -154,6 +154,7 @@ void dm_input_set(uint64_t b, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     touch_buttons = b; touch_sticks[0] = lx; touch_sticks[1] = ly; touch_sticks[2] = rx; touch_sticks[3] = ry;
 }
 void dm_touch_set(const dm_touch *points, int n) { (void)points; touches = n; }
+static void touch_log(const dm_touch *t, int n) { (void)t; (void)n; }   // (front_android.c: DM_TOUCH_LOG lines)
 static void (*dm_picture_rect)(float r[4]);
 ''' + pad + events + r'''
 static void controls(int shown);   // 1: the gamepad, 0: the menu button only, -1: nothing (a controller in use)
