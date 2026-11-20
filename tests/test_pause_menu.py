@@ -80,10 +80,11 @@ int main(int argc, char **argv) {
     const float screens[][2] = {{1920, 1080}, {2400, 1080}, {1280, 960}, {1216, 760}};   // the Retroid Pocket 6, a 20:9 phone, the Retroid Pocket Nova, a 16:10 tablet
     for (unsigned q = 0; q < sizeof screens / sizeof screens[0]; q++) {
         float W = screens[q][0], H = screens[q][1], m[4]; ov_menu_rect(W, H, m);
-        uint32_t pw = (uint32_t)(m[2] / 2) + 1, ph = (uint32_t)(m[3] / 2) + 1;   // the panel's raster: half the window's (gfx_vk_present.c g_ov.pw, ph)
+        uint32_t pw = (uint32_t)m[2] + 1, ph = (uint32_t)m[3] + 1;   // the panel's raster: a texel a window pixel (gfx_vk_present.c g_ov.pw, ph)
         uint8_t *px = calloc((size_t)pw * ph, 4); assert(px); ov_canvas cv = {px, pw, 0, 0, pw, ph};
         float p[4] = {0, 0, (float)pw, (float)ph}, r[4]; ov_menu_rowrect(p, 0, r);
-        int full = (int)fmaxf(1, roundf(r[3] * 0.30f / PF_CAP));   // the letters' size while every row fits beside its control
+        int full = 3 * ovm_ref_scale(r[3]);   // half as large again as the half-resolution raster's letters (each of its texels was two pixels)
+        assert(ovm_letters(r[3], r[2]) == full && full >= 3);   // the panel (ov_menu_rect) is wide enough for them: no row made them smaller
         for (int tab = 0; tab < OVM_TABS; tab++) for (int k = 0; k < OVM_LIMITS; k++) {
             g_ndrawn = 0; ov_menu_panel(&cv, tab << 8 | 60 << 9 | k << 26);
             const drawn *res = find("Resume"); assert(res && res->scale == full);   // no row made the menu's letters smaller
@@ -92,6 +93,8 @@ int main(int argc, char **argv) {
             const drawn *l = find("Frame rate limit"), *v = find(words[k]), *mode = find("Mode");
             assert(l && v && mode && l->scale == full && v->scale == full && mode->cy < l->cy && fabsf(l->cy - (r[1] + r[3] / 2)) < 0.01f && fabsf(v->cy - l->cy) < 0.01f);
             assert(v->x > l->x + cv_text_w(l->s, l->scale) + r[3] * 0.3f && v->x + cv_text_w(v->s, v->scale) <= r[0] + r[2]);   // after its label, inside the row
+            for (int i = 0; i < g_ndrawn; i++) { const drawn *d = &g_drawn[i]; float w = cv_text_w(d->s, d->scale);   // every word inside the panel's rows
+                ov_menu_rowrect(p, 0, r); assert(d->x >= r[0] - 0.5f && d->x + w <= r[0] + r[2] + 0.5f && PF_CAP * d->scale * 4 <= r[3] * 0.85f * 3); }
             for (int j = 0; j < OVM_LIMITS; j++) assert(j == k || !find(words[j]));   // the current value only: the row steps through them
         }
         free(px);

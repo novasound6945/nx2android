@@ -239,8 +239,12 @@ int dm_menu_state(void);
 enum { OVX_IDLE, OVX_BUSY, OVX_DONE, OVX_NOSAVE, OVX_FAILED };   // Export save: the button; copying; the export's name; the game has not saved yet; failed
 int dm_save_note(char *out, int cap);   // front_android.c: the outcome (OVX_*) and the last export's name, or why it failed
 static inline float ov_menu_scale(void) { float s = dm_overlay_scale(), fit = 0.92f / (OVM_ROWS * OV_MENU_ROW + 2 * OV_MENU_PAD); return s < fit ? s : fit; }
+float dm_menu_row_need(float rh);   // gfx_vk_present.c: the width (window pixels) the menu's rows need at its letters' size, rows rh high (0: none known)
+// the panel: OV_MENU_W window heights wide, or as wide as its rows need (larger letters on a screen that has the room: gfx_vk_present.c ovm_letters), never more than
+// 0.96 of the window's width; the touches (front_android.c) and the drawing both place it here
 static inline void ov_menu_rect(float W, float H, float r[4]) {   // x, y, width, height in window pixels
-    float s = ov_menu_scale(), pw = OV_MENU_W * H * s, ph = (OVM_ROWS * OV_MENU_ROW + 2 * OV_MENU_PAD) * H * s;
+    float s = ov_menu_scale(), pw = OV_MENU_W * H * s, ph = (OVM_ROWS * OV_MENU_ROW + 2 * OV_MENU_PAD) * H * s, need = dm_menu_row_need(OV_MENU_ROW * H * s);
+    if (need > 0 && need * 1.01f + 2 * OV_MENU_PAD * H * s > pw) pw = need * 1.01f + 2 * OV_MENU_PAD * H * s;   // (1 %: the raster's rounding)
     if (pw > W * 0.96f) pw = W * 0.96f;
     r[0] = (W - pw) / 2; r[1] = (H - ph) / 2; r[2] = pw; r[3] = ph;
 }

@@ -25,6 +25,8 @@ int dm_menu_audio_available(void) { return audio_available; }
 int dm_menu_rate_available(void) { return rate_available; }
 int dm_menu_res_available(void) { return res_available; }
 int dm_cloud_available(void) { return cloud_available; }   // the Cloud save rows (savecloud_android.c: sync.txt in the files folder)
+static float row_need;   // gfx_vk_present.c dm_menu_row_need: the width the menu's rows need at its letters' size (0: the panel's own)
+float dm_menu_row_need(float rh) { (void)rh; return row_need; }
 float dm_overlay_scale(void) { return 1; }
 int dm_overlay_off(int l, int c) { return l == 1 && c == hidden_ctl; }
 int dm_overlay_custom(int layout, int ctl, float *x, float *y, float *s) {
@@ -118,6 +120,15 @@ int main(void) {
         for (int it = 0; it < OVM_RESUME; it++) assert(seen[it] == (it != OVM_TOUCH));   // (Touch input has no row: front_android.c g_set_touch stays, from env.txt and settings.txt)
     }
     assert(OVM_LIMITS == 4 && !(((OVM_LIMITS - 1) << 26) & (1 << 24 | 1 << 25 | 1 << 28)));   // dm_menu_state's bits 26..27: clear of the export count's (24), touch passthrough's (25) and bit 28
+    {   // the panel widens for rows that need it (larger letters), as far as 0.96 of the window, and the rows' touches follow it
+        float W = 1920, H = 1080, p[4], q[4], u = ov_menu_scale() * H; ov_menu_rect(W, H, p);
+        assert(fabsf(p[2] - OV_MENU_W * u) < 0.01f);
+        row_need = 1000; ov_menu_rect(W, H, q);
+        assert(fabsf(q[2] - (1000 * 1.01f + 2 * OV_MENU_PAD * u)) < 0.01f && fabsf(q[0] - (W - q[2]) / 2) < 0.01f && q[3] == p[3]);
+        float r[4]; ov_menu_rowrect(q, 2, r); assert(r[2] >= 1000 && ov_menu_row_at(q[0] + 2, r[1] + r[3] / 2, W, H) == 2 && ov_menu_row_at(q[0] + q[2] - 2, r[1] + r[3] / 2, W, H) == 2);
+        row_need = 5000; ov_menu_rect(W, H, q); assert(fabsf(q[2] - W * 0.96f) < 0.01f);
+        row_need = 0;
+    }
     const float screens[][2] = {{915, 412}, {1216, 760}, {2400, 1080}, {1080, 2400}};
     for (unsigned s = 0; s < sizeof screens / sizeof screens[0]; s++) {
         float W = screens[s][0], H = screens[s][1], step = H / OVE_GRID_ROWS, p[4];
