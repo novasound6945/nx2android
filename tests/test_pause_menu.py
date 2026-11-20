@@ -177,6 +177,9 @@ float dm_overlay_scale(void) { return 1; }
 int dm_save_note(char *out, int cap) { snprintf(out, (size_t)cap, "-"); return OVX_IDLE; }
 int dm_menu_audio_available(void) { return 0; }   // no outputs to choose: the Game tab has no audio row (overlay_layout.h ov_menu_item)
 int dm_menu_rate_available(void) { return 0; } int dm_menu_res_available(void) { return 0; } int dm_menu_detail_available(void) { return 0; } int dm_menu_detail_step(void) { return 0; }   // a game without the profile's rows
+#include "savecloud.h"   // the Cloud save row (savecloud_android.c): an app without sync.txt
+int dm_cloud_available(void) { return 0; }
+int dm_cloud_status(char *note, int cap) { if (cap > 0) note[0] = 0; return DM_CLOUD_OFF; }
 ''' + canvas + colours + r'''
 typedef struct { char s[64]; float x, cy; int scale; } drawn;   // each text the panel draws
 static drawn g_drawn[64]; static int g_ndrawn;
