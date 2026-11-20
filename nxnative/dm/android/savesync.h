@@ -270,9 +270,11 @@ static void ss_state_load(const char *path, ss_state *s) {   // no file: a first
 }
 static int ss_state_save(const char *path, const ss_state *s) { char b[1024]; int n = ss_state_format(s, b, sizeof b); return n > 0 && (size_t)n < sizeof b ? ds_write(path, b, (size_t)n) : -1; }
 
-// ---- the server's meta: {seq, sha256, size, time, device, gameVersion, build, session: {device, state, updated}} ----
+// ---- the server's meta: {seq, sha256, size, time, device, gameVersion, build, session: {device, state, updated, dirty}} ----
+// session.state: "open" (the start), "alive" (a heartbeat each minute while the game is on screen) or "closed" (onPause); dirty: that device has a save not yet uploaded
+// (an older server sends no dirty: 0). updated: when the server took it
 // time and updated: Unix seconds (milliseconds when the number is that large), or an ISO 8601 text ("2026-11-20T12:34:56Z", "...+09:00", fractions ignored)
-typedef struct { uint64_t seq, size; char sha[65], device[64], game_version[32], build[64]; int64_t time; int session, s_open; char s_device[64]; int64_t s_updated; } ss_meta;
+typedef struct { uint64_t seq, size; char sha[65], device[64], game_version[32], build[64]; int64_t time; int session, s_open, s_dirty; char s_device[64]; int64_t s_updated; } ss_meta;   // s_open: open or alive
 static int64_t ss_days(int y, int m, int d) { y -= m <= 2; int64_t era = (y >= 0 ? y : y - 399) / 400; int yoe = y - (int)era * 400, doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1, doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; return era * 146097 + doe - 719468; }
 static int ss_iso_time(const char *s, int64_t *out) {
     int Y, M, D, h = 0, mi = 0, se = 0, n = 0;
@@ -306,7 +308,8 @@ static int ss_session_obj(ds_js *j, ss_meta *m) {
         if (ds_str(j, key, sizeof key)) return -1;
         ds_ws(j); if (j->p >= j->e || *j->p++ != ':') return -1;
         if (!strcmp(key, "device")) { if (ds_str(j, m->s_device, sizeof m->s_device)) return -1; }
-        else if (!strcmp(key, "state")) { if (ds_str(j, v, sizeof v)) return -1; m->s_open = !strcmp(v, "open"); }
+        else if (!strcmp(key, "state")) { if (ds_str(j, v, sizeof v)) return -1; m->s_open = !strcmp(v, "open") || !strcmp(v, "alive"); }
+        else if (!strcmp(key, "dirty")) { ds_ws(j); m->s_dirty = (j->e - j->p >= 4 && !memcmp(j->p, "true", 4)) || (j->p < j->e && *j->p == '1'); if (ds_skip(j, 1)) return -1; }
         else if (!strcmp(key, "updated")) { if (ss_js_time(j, &m->s_updated)) return -1; }
         else if (ds_skip(j, 1)) return -1;
         ds_ws(j); if (j->p >= j->e) return -1;
@@ -390,10 +393,21 @@ enum { SS_RUN_NONE, SS_RUN_SUPPRESSED, SS_RUN_SYNC };
 static int ss_run_mode(int cfg_on, int trial, int switched_off) { return !cfg_on ? SS_RUN_NONE : trial || switched_off ? SS_RUN_SUPPRESSED : SS_RUN_SYNC; }
 // a run without the sync: marked so the next start with it asks before this device's save goes up (op_*: the last sync's seq and hash, kept as they were)
 static void ss_mark_offline_play(ss_state *s) { if (!s->offline_play) { s->offline_play = 1; s->op_seq = s->seq; snprintf(s->op_sha, sizeof s->op_sha, "%s", s->sha); } s->have = 1; }
-#define SS_SESSION_DAYS 7
-// another device started the game and has not closed it (its last progress may not be on the server): the warning before the decision
-static int ss_other_running(const ss_meta *m, const char *me, int64_t now) {
-    return m->session && m->s_open && m->s_device[0] && strcmp(m->s_device, me) && m->s_updated > 0 && now - m->s_updated < SS_SESSION_DAYS * 86400 && m->s_updated - now < 86400;
+// Another device and the game, from the session's last signal (now: this device's clock, Unix seconds). The apps upload each save within seconds, so whether the cloud
+// has the latest progress is whether that device's last save went up (dirty), not whether it closed the game: an app killed before its close leaves an open session
+// that warns nobody once its heartbeats stop.
+#define SS_DIRTY_DAYS 30      // a dirty signal older than this: that device is taken as gone
+#define SS_ALIVE_SECS 180     // three heartbeats missed: not running any more
+enum { SS_OTHER_NONE,         // no session, this device's, closed and clean, or open but silent (killed)
+       SS_OTHER_RUNNING,      // running there now, its saves up: a note only, the start goes on
+       SS_OTHER_UNSYNCED };   // that device has a save the cloud has not got: the warning before the decision (Start anyway / Cancel)
+static int ss_other_device(const ss_meta *m, const char *me, int64_t now) {
+    if (!m->session || !m->s_device[0] || !strcmp(m->s_device, me) || m->s_updated <= 0) return SS_OTHER_NONE;
+    int64_t age = now - m->s_updated;
+    if (age <= -86400) return SS_OTHER_NONE;   // (a clock a day or more off: nothing to go by)
+    if (m->s_dirty && age < SS_DIRTY_DAYS * 86400) return SS_OTHER_UNSYNCED;
+    if (m->s_open && age < SS_ALIVE_SECS) return SS_OTHER_RUNNING;
+    return SS_OTHER_NONE;
 }
 
 // ---- times as the screens say them: "11월 20일 오후 9:12" / "Nov 20, 9:12 PM", and how long ago: "방금", "3분 전", "2시간 전", "어제", "3일 전" ----

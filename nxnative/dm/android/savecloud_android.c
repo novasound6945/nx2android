@@ -14,13 +14,17 @@
 // the server's save is newer and this device's did not change since the last sync, it is downloaded (a progress bar, 60 s at most), checked against its SHA-256 and swapped
 // in through the save manager's import (saves_android.c dm_saves_import_now: the current save is exported first, <stamp>-before-import). When both changed, the player
 // chooses between two cards (nothing is overwritten by itself; the side not chosen stays: this device's in the import's backup folder, the server's previous save in the
-// server's history). Another device that opened the game in the last 7 days and did not close it is warned about first. Then the session is marked open on the server.
+// server's history). Another device first (savesync.h ss_other_device, from the session): one with a save the cloud has not got (dirty, in the last 30 days) is warned
+// about, Start anyway or Cancel; one running the game now (a heartbeat in the last 3 min) is a note on the screen for 1.5 s; one whose heartbeats stopped (killed) is
+// nothing. Then the session is marked open on the server (dirty 0: the start just synced).
 //
 // Uploads (the "savesync" thread): the commit count (hle_fs.c dm_fs_commit_count) is polled every 500 ms; 2 s after the last commit of a burst the committed tree is
 // archived (never <DM_SAVE>.work; a commit while it is read reads it again) and, when its hash is not the last synced one, PUT with base = the last synced seq. 409: the
 // server moved (another device): a conflict, kept for the next start, not retried. No network: retried after 1, 2, 5, 10 min, and at once when the app is back in front.
-// onPause (sleep, HOME, the app's end) uploads what is owed at once under a 15 s partial wake lock, then closes the session; an upload that could not go up leaves the
-// session open, so another device warns. onResume opens it again. Every network failure is a log line: the game never waits for the network once it runs.
+// onPause (sleep, HOME, the app's end) uploads what is owed at once under a 15 s partial wake lock, then closes the session with dirty = whether a save is still owed
+// (pending or a conflict). While the game is on screen the upload thread sends a heartbeat every 60 s (alive, dirty the same), and one at once after an upload went up;
+// onResume opens it again. A heartbeat that does not go through is dropped (offline). Every network failure is a log line: the game never waits for the network once it
+// runs.
 #include "dm.h"
 #include "savesync.h"
 #include "savecloud.h"
@@ -49,7 +53,7 @@ static struct {
     ss_cfg cfg; char pkg[256], build[64], gver[64], state_path[700], base[900];   // base: <url>/api/saves/g/<package>
     ss_state st;
     int skipped;                         // this run plays without the sync (B at the start)
-    int uploading, offline, fails, kick, pause_ev, resume_ev, up_started, sess_open;
+    int uploading, offline, fails, kick, pause_ev, resume_ev, up_started;
     int64_t next_try;                    // when an owed upload is tried again (monotonic ms)
     unsigned ver;                        // the menu row's version
     char toast[96]; int64_t toast_until; unsigned toast_id;
@@ -187,14 +191,21 @@ static int snap(ss_buf *t, char sha[65], int64_t *newest, char *err, size_t ecap
     return r;
 }
 static void url_of(char *o, size_t n, const char *what) { snprintf(o, n, "%s/%s", C.base, what); }
-static int session_post(JNIEnv *E, int open, int64_t deadline) {   // 0 when the server took it
+enum { SESS_OPEN, SESS_ALIVE, SESS_CLOSED };
+static int owed_now(void) { pthread_mutex_lock(&C.mu); int d = C.st.pending || C.st.conflict; pthread_mutex_unlock(&C.mu); return d; }   // a save the cloud has not got
+// The session: state and dirty (a save still owed), 0 when the server took it. A heartbeat (alive) logs only when its outcome or its dirty changed
+static int session_post(JNIEnv *E, int state, int dirty, int64_t deadline) {
+    static const char *const NAME[] = {"open", "alive", "closed"};
+    static int last_alive = -1;   // the last heartbeat's outcome (0 ok, 1 not), dirty in bit 1 (the upload thread's only)
     char u[1400], dev[200]; ss_qenc(dev, sizeof dev, C.cfg.device);
-    snprintf(u, sizeof u, "%s/session?state=%s&device=%s", C.base, open ? "open" : "closed", dev);
+    snprintf(u, sizeof u, "%s/session?state=%s&dirty=%d&device=%s", C.base, NAME[state], dirty ? 1 : 0, dev);
     hres r; int got = http_do(E, "POST", u, NULL, 0, NULL, 3000, deadline, 64 << 10, &r, NULL); int ok = !got && r.code == 200;
-    if (got) LOG("cloud: session %s: no answer (%s)", open ? "open" : "closed", r.why);
-    else LOG("cloud: session %s: %s (HTTP %d)", open ? "open" : "closed", ok ? "ok" : "refused", r.code);
+    int quiet = 0;
+    if (state == SESS_ALIVE) { int o = (ok ? 0 : 1) | (dirty ? 2 : 0); quiet = o == last_alive; last_alive = o; }
+    else last_alive = -1;
+    if (!quiet) { if (got) LOG("cloud: session %s (dirty %d): no answer (%s)", NAME[state], dirty ? 1 : 0, r.why);
+                  else LOG("cloud: session %s (dirty %d): %s (HTTP %d)", NAME[state], dirty ? 1 : 0, ok ? "ok" : "refused", r.code); }
     ss_buf_free(&r.body);
-    if (ok) { pthread_mutex_lock(&C.mu); C.sess_open = open; pthread_mutex_unlock(&C.mu); }
     return ok ? 0 : -1;
 }
 
@@ -334,15 +345,27 @@ static void *start_thread(void *a) {
             break;
         }
         pthread_mutex_lock(&C.mu); C.st.auth = 0; C.offline = 0; pthread_mutex_unlock(&C.mu);
-        if ((net == SS_NET_OK || net == SS_NET_NOTFOUND) && ss_other_running(&m, C.cfg.device, (int64_t)time(NULL))) {
+        int other = net == SS_NET_OK || net == SS_NET_NOTFOUND ? ss_other_device(&m, C.cfg.device, (int64_t)time(NULL)) : SS_OTHER_NONE;
+        if (other == SS_OTHER_UNSYNCED) {   // that device saved and the save did not go up: what the cloud has may be behind it
             char l0[200], when[64]; ss_fmt_date(when, sizeof when, m.s_updated, ko);
-            snprintf(l0, sizeof l0, ko ? "%s에서 %s에 시작한 게임이 아직 끝나지 않았어요." : "The game started on %s at %s has not ended yet.", m.s_device, when);
-            LOG("cloud: the game is open on %s since %s: the player is warned", m.s_device, when);
-            view(WV_ASK, 1, ko ? "다른 기기에서 실행 중이에요" : "Running on another device", l0, ko ? "그 기기의 마지막 진행이 클라우드에 없을 수 있어요." : "That device's latest progress may not be in the cloud.",
-                 ko ? "그 기기에서 게임을 끝내면 클라우드에 올라가요." : "Ending the game on that device uploads it.", 2, ko ? "그래도 시작" : "Start anyway", ko ? "취소 (앱 종료)" : "Cancel (close the app)", 0);
+            snprintf(l0, sizeof l0, ko ? "%s에서 %s에 저장한 진행이 아직 클라우드에 없어요." : "The progress saved on %s at %s is not in the cloud yet.", m.s_device, when);
+            LOG("cloud: %s has a save not yet uploaded (its last signal %s): the player is warned", m.s_device, when);
+            view(WV_ASK, 1, ko ? "다른 기기에 아직 안 올라온 진행이 있어요" : "Another device has progress not uploaded yet", l0,
+                 ko ? "그 기기를 인터넷에 연결해 켜면 올라가요." : "It goes up once that device is on and connected.", NULL,
+                 2, ko ? "그래도 시작" : "Start anyway", ko ? "취소 (앱 종료)" : "Cancel (close the app)", 0);
             int c = ask(0, NULL, NULL);
             if (c < 0) break;
-            if (c == 1) { LOG("cloud: the player cancelled the start (the game is open on %s)", m.s_device); finish(1, 0); break; }
+            if (c == 1) { LOG("cloud: the player cancelled the start (%s has a save not yet uploaded)", m.s_device); finish(1, 0); break; }
+        } else if (other == SS_OTHER_RUNNING) {   // running there now, its saves up: a note, no choice
+            char t0[96]; snprintf(t0, sizeof t0, ko ? "%s에서 지금 실행 중이에요" : "Running on %s right now", m.s_device);
+            LOG("cloud: the game runs on %s now (a heartbeat %lld s ago): a note only", m.s_device, (long long)((int64_t)time(NULL) - m.s_updated));
+            view(WV_WAIT, 0, t0, ko ? "그 기기의 진행은 저장할 때마다 클라우드에 올라가요." : "That device's progress goes up each time it saves.", NULL, NULL, 0, NULL, NULL, 0);
+            int64_t until = now_ms() + 1500;
+            pthread_mutex_lock(&C.mu);
+            while (!W.done && now_ms() < until) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 100 * 1000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+                pthread_cond_timedwait(&C.cv, &C.mu, &ts); }
+            pthread_mutex_unlock(&C.mu);
+            if (ended()) break;
         }
         pthread_mutex_lock(&C.mu); int pend = 0, go = ss_decide(net, &m, &C.st, loc, &pend); pthread_mutex_unlock(&C.mu);
         static const char *const GO[] = {"up to date", "this device's save goes up", "no save on either", "the server's save is newer: download", "conflict", "offline", "token refused", "played without the sync: ask"};
@@ -378,7 +401,7 @@ static void *start_thread(void *a) {
         }
         if (retry) continue;
         if (ended()) break;
-        session_post(E, 1, now_ms() + 3000);   // (a failure changes nothing: the next resume opens it again)
+        session_post(E, SESS_OPEN, 0, now_ms() + 3000);   // (just synced: clean. A failure changes nothing: the heartbeats follow)
         finish(0, 0);
         break;
     }
@@ -517,29 +540,30 @@ static int upload(JNIEnv *E, int64_t deadline) {
 static void *up_thread(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "savesync");
     JNIEnv *E = jattach(); if (!E) { LOG("[RED] cloud: no Java for the uploads: the save does not go up this run"); return NULL; }
-    uint64_t lastc = dm_fs_commit_count(); int dirty = 0; int64_t changed_t = 0;
-    LOG("cloud: uploads on (2 s after the game commits its save, and when the app leaves the screen)");
+    uint64_t lastc = dm_fs_commit_count(); int dirty = 0, paused = 0; int64_t changed_t = 0, last_hb = now_ms();   // (the start just opened the session)
+    LOG("cloud: uploads on (2 s after the game commits its save, and when the app leaves the screen); a heartbeat every 60 s while on screen");
     for (;;) {
         pthread_mutex_lock(&C.mu);
         if (!C.kick && !C.pause_ev && !C.resume_ev) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 500 * 1000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
             pthread_cond_timedwait(&C.cv, &C.mu, &ts); }
         int kick = C.kick, pause = C.pause_ev, resume = C.resume_ev; C.kick = C.pause_ev = C.resume_ev = 0;
-        int pending = C.st.pending, due = pending && now_ms() >= C.next_try, sess = C.sess_open;
+        int pending = C.st.pending, due = pending && now_ms() >= C.next_try, beats = !C.st.off && !C.st.auth && !C.st.offline_play;
         pthread_mutex_unlock(&C.mu);
         uint64_t c = dm_fs_commit_count(); int64_t t = now_ms();
         if (c != lastc) { lastc = c; dirty = 1; changed_t = t; }
         int want = kick || due || (dirty && t - changed_t >= 2000) || ((pause || resume) && (dirty || pending));
         if (want) dirty = 0;
-        if (pause) {   // the app leaves the screen (sleep, HOME, its end): what is owed goes up now, then the session closes; under a 15 s wake lock
-            int64_t dl = now_ms() + 15000; wake_lock(E, 1, 15000);
-            int r = want ? upload(E, dl - 1000) : UP_NOTHING;
-            pthread_mutex_lock(&C.mu); int owed = C.st.pending; pthread_mutex_unlock(&C.mu);
-            if ((r == UP_OK || r == UP_NOTHING) && !owed) session_post(E, 0, dl);
-            else LOG("cloud: the session stays open (the save could not go up): another device warns before it starts");
+        if (pause) {   // the app leaves the screen (sleep, HOME, its end): what is owed goes up now, then the session closes with what is still owed; under a 15 s wake lock
+            int64_t dl = now_ms() + 15000; wake_lock(E, 1, 15000); paused = 1;
+            if (want) upload(E, dl - 1000);
+            int owed = owed_now();
+            if (owed) LOG("cloud: a save is still owed (it could not go up): the session closes dirty, another device warns before it starts");
+            session_post(E, SESS_CLOSED, owed, dl);   // (no answer: the session's last signal stands, and stops being "running" within 3 min)
             wake_lock(E, 0, 0); continue;
         }
-        if (want) upload(E, now_ms() + 60000);
-        if (resume && !sess) session_post(E, 1, now_ms() + 3000);
+        int up = want ? upload(E, now_ms() + 60000) : UP_NOTHING;
+        if (resume) { paused = 0; if (beats) session_post(E, SESS_OPEN, owed_now(), now_ms() + 5000); last_hb = now_ms(); }
+        else if (!paused && beats && (up == UP_OK || now_ms() - last_hb >= 60000)) { session_post(E, SESS_ALIVE, owed_now(), now_ms() + 5000); last_hb = now_ms(); }
     }
     return NULL;
 }

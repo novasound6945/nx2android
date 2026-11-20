@@ -2,7 +2,7 @@
 // it reads back to the same tree, an archive with a path that leaves its folder (.., an absolute path, a link) is refused before anything is written, sync.txt and the
 // state read back, the server's meta is read, and the start's decision (ss_decide) for each case: offline, a token refused, nothing on the server, the same save, the server
 // newer with this device's save unchanged, a conflict, a first setup with a save on both, the player's choice of this device's save, a run played without the sync, another
-// device still running the game, and a trial build. No game profile: make -C dm/host/tests build/t_savesync && build/t_savesync
+// device's session (a save not yet up, running now, killed), and a trial build. No game profile: make -C dm/host/tests build/t_savesync && build/t_savesync
 #include "../../android/savesync.h"
 #include <sys/time.h>
 
@@ -159,13 +159,28 @@ static void t_decide(void) {
     CHECK(ss_decide(SS_NET_OK, &m, &s, A, &p) == SS_GO_UPTODATE && !p, "played without the sync, nothing changed: no question");
     m = meta_of(6, B); CHECK(ss_decide(SS_NET_OK, &m, &s, C, &p) == SS_GO_CONFLICT, "played without the sync, the server moved too: conflict");
     CHECK(ss_decide(SS_NET_FAIL, NULL, &s, C, &p) == SS_GO_OFFLINE && !p, "played without the sync, then offline: nothing goes up by itself");
-    // another device still running the game
-    int64_t now = 1795176000; m = meta_of(5, A); m.session = 1; m.s_open = 1; snprintf(m.s_device, sizeof m.s_device, "deck"); m.s_updated = now - 3600;
-    CHECK(ss_other_running(&m, "nova", now), "open on another device an hour ago: the warning");
-    CHECK(!ss_other_running(&m, "deck", now), "open on this device: none");
-    m.s_updated = now - 8 * 86400; CHECK(!ss_other_running(&m, "nova", now), "open but older than a week: none");
-    m.s_updated = now - 60; m.s_open = 0; CHECK(!ss_other_running(&m, "nova", now), "closed: none");
-    m.session = 0; m.s_open = 1; CHECK(!ss_other_running(&m, "nova", now), "no session: none");
+    // another device: dirty (a save not yet up) warns, a recent heartbeat is a note, anything else nothing
+    int64_t now = 1795176000; m = meta_of(5, A); m.session = 1; m.s_open = 1; m.s_dirty = 1; snprintf(m.s_device, sizeof m.s_device, "deck"); m.s_updated = now - 3600;
+    CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_UNSYNCED, "dirty on another device an hour ago: the warning");
+    m.s_updated = now - 29 * 86400; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_UNSYNCED, "dirty 29 days ago: the warning");
+    m.s_updated = now - 31 * 86400; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_NONE, "dirty but older than 30 days: none");
+    m.s_updated = now - 3600; m.s_open = 0; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_UNSYNCED, "closed but dirty: the warning");
+    m.s_open = 1; m.s_updated = now - 30; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_UNSYNCED, "alive and dirty: the warning, not the note");
+    CHECK(ss_other_device(&m, "deck", now) == SS_OTHER_NONE, "dirty on this device: none");
+    m.s_dirty = 0; m.s_updated = now - 60; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_RUNNING, "alive a minute ago, clean: a note");
+    m.s_updated = now - 179; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_RUNNING, "alive 179 s ago: a note");
+    m.s_updated = now - 180; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_NONE, "open 3 min ago (killed, its heartbeats stopped): none");
+    m.s_updated = now - 3600; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_NONE, "open an hour ago, clean (killed): none");
+    CHECK(ss_other_device(&m, "deck", now) == SS_OTHER_NONE, "open on this device: none");
+    m.s_updated = now - 10; m.s_open = 0; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_NONE, "closed and clean a moment ago: none");
+    m.session = 0; m.s_open = 1; m.s_dirty = 1; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_NONE, "no session: none");
+    // the session as the server says it: alive and dirty read; no dirty (an older server) is clean
+    const char *j3 = "{\"seq\":0,\"session\":{\"device\":\"deck\",\"state\":\"alive\",\"updated\":\"2026-11-20T12:00:00.000Z\",\"dirty\":true}}";
+    CHECK(ss_meta_parse(j3, strlen(j3), &m) == 0 && m.session && m.s_open && m.s_dirty && m.s_updated == 1795176000, "alive, dirty");
+    const char *j4 = "{\"seq\":0,\"session\":{\"device\":\"deck\",\"state\":\"closed\",\"dirty\":false,\"updated\":\"2026-11-20T12:00:00Z\"}}";
+    CHECK(ss_meta_parse(j4, strlen(j4), &m) == 0 && m.session && !m.s_open && !m.s_dirty, "closed, clean");
+    const char *j5 = "{\"seq\":0,\"session\":{\"device\":\"deck\",\"state\":\"open\",\"updated\":\"2026-11-20T12:00:00Z\"}}";
+    CHECK(ss_meta_parse(j5, strlen(j5), &m) == 0 && m.s_open && !m.s_dirty && ss_other_device(&m, "nova", 1795176000 + 600) == SS_OTHER_NONE, "no dirty field: clean");
     // a trial build, the game's switch, no sync.txt
     CHECK(ss_run_mode(0, 0, 0) == SS_RUN_NONE && ss_run_mode(0, 1, 1) == SS_RUN_NONE, "no sync.txt: nothing");
     CHECK(ss_run_mode(1, 1, 0) == SS_RUN_SUPPRESSED, "a trial build: suppressed");
