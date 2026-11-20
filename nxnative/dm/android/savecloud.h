@@ -53,6 +53,7 @@ int dm_cloud_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(int quit
 int dm_cloud_input(const AInputEvent *e);   // an input event before the game (the start screen's): 1 when it was the screen's
 void dm_cloud_pause(void);    // onPause: the pending upload at once (under a wake lock), then the session closed
 void dm_cloud_resume(void);   // onResume: a pending upload tried again now, the session open again
+int dm_cloud_flush(int ms);   // the menu's Exit game: what onPause starts (the owed upload, the session closed), done now and waited for at most ms; 1: not done in time
 #endif
 
 // the pause menu's Cloud save row (front_android.c, gfx_vk_present.c)

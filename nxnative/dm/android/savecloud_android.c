@@ -57,7 +57,7 @@ static struct {
     ss_cfg cfg; char pkg[256], build[64], gver[64], state_path[700], base[900];   // base: <url>/api/saves/g/<package>
     ss_state st;
     int skipped;                         // this run plays without the sync (B at the start)
-    int uploading, offline, fails, kick, pause_ev, resume_ev, up_started;
+    int uploading, offline, fails, kick, pause_ev, resume_ev, up_started; unsigned pause_done;   // pause_done: the leaves (pause_flush) done
     int sess_open;                       // the server took this run's session open (or a heartbeat): a run that started offline opens it once the network is back
     ss_notes notes;                      // the corner marks (savesync.h ss_up_begin, ss_up_end, ss_mark_now)
     int64_t next_try;                    // when an owed upload is tried again (monotonic ms)
@@ -580,6 +580,18 @@ static int upload(JNIEnv *E, int64_t deadline) {
     ss_buf_free(&t); menu_redraw();
     return rc;
 }
+// The app leaves the screen: what is owed goes up now, then the session closes with what is still owed; under a 15 s wake lock
+static void pause_flush(JNIEnv *E, int *dirty, int syncs, const ss_tick_in *ti) {
+    int64_t dl = now_ms() + 15000;
+    if ((!syncs && !ti->sess_open) || dm_net_state(E, C.act) == 0) { if (syncs) LOG("cloud: the app leaves the screen without a network: what is owed goes up once it is back"); return; }
+    wake_lock(E, 1, 15000);
+    if (*dirty || ti->owed) { *dirty = 0; upload(E, dl - 1000); }
+    int owed = owed_now();
+    if (owed) LOG("cloud: a save is still owed (it could not go up): the session closes dirty, another device warns before it starts");
+    session_post(E, SESS_CLOSED, owed, dl);   // (no answer: the session's last signal stands, and stops being "running" within 3 min)
+    pthread_mutex_lock(&C.mu); C.sess_open = 0; pthread_mutex_unlock(&C.mu);
+    wake_lock(E, 0, 0);
+}
 // The upload thread: the commit count polled every 1.5 s; a burst of commits goes up once a poll saw none (about 3 s after the game saved). Each tick asks savesync.h
 // ss_tick what to do: with no network on the device nothing is tried; when it comes back an owed save goes up at once (its backoff forgotten) and a session that never
 // opened (an offline start) opens, then the heartbeats every 60 s
@@ -598,16 +610,10 @@ static void *up_thread(void *a) {
         pthread_mutex_unlock(&C.mu);
         uint64_t c = dm_fs_commit_count(); int64_t t = now_ms();
         if (c != lastc) { lastc = c; dirty = 1; changed_t = t; }
-        if (pause) {   // the app leaves the screen (sleep, HOME, its end): what is owed goes up now, then the session closes with what is still owed; under a 15 s wake lock
-            int64_t dl = now_ms() + 15000; paused = 1;
-            if ((!syncs && !ti.sess_open) || dm_net_state(E, C.act) == 0) { if (syncs) LOG("cloud: the app leaves the screen without a network: what is owed goes up once it is back"); continue; }
-            wake_lock(E, 1, 15000);
-            if (dirty || ti.owed) { dirty = 0; upload(E, dl - 1000); }
-            int owed = owed_now();
-            if (owed) LOG("cloud: a save is still owed (it could not go up): the session closes dirty, another device warns before it starts");
-            session_post(E, SESS_CLOSED, owed, dl);   // (no answer: the session's last signal stands, and stops being "running" within 3 min)
-            pthread_mutex_lock(&C.mu); C.sess_open = 0; pthread_mutex_unlock(&C.mu);
-            wake_lock(E, 0, 0); continue;
+        if (pause) {   // the app leaves the screen (sleep, HOME, its end, the menu's Exit game): what is owed goes up now, then the session closes (pause_flush)
+            paused = 1; pause_flush(E, &dirty, syncs, &ti);
+            pthread_mutex_lock(&C.mu); C.pause_done++; pthread_cond_broadcast(&C.cv); pthread_mutex_unlock(&C.mu);   // (dm_cloud_flush waits for it)
+            continue;
         }
         if (resume) paused = 0;
         if (paused) continue;
@@ -634,6 +640,18 @@ static void up_start(void) {
     pthread_t t; if (pthread_create(&t, NULL, up_thread, NULL)) LOG("[RED] cloud: cannot start the upload thread"); else pthread_detach(t);
 }
 void dm_cloud_pause(void) { pthread_mutex_lock(&C.mu); if (C.up_started) { C.pause_ev = 1; pthread_cond_broadcast(&C.cv); } pthread_mutex_unlock(&C.mu); }
+// The menu's Exit game (front_android.c menu_exit_now): what onPause starts, done now and waited for, at most ms (onDestroy's _exit would cut it off). 0: done (or
+// no sync this run), 1: still going when ms ran out
+int dm_cloud_flush(int ms) {
+    pthread_mutex_lock(&C.mu);
+    if (!C.up_started) { pthread_mutex_unlock(&C.mu); return 0; }
+    unsigned gen = C.pause_done; C.pause_ev = 1; pthread_cond_broadcast(&C.cv);
+    struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += ms / 1000; dl.tv_nsec += (long)(ms % 1000) * 1000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
+    int r = 0; while (C.pause_done == gen) if (pthread_cond_timedwait(&C.cv, &C.mu, &dl) == ETIMEDOUT) { r = 1; break; }
+    pthread_mutex_unlock(&C.mu);
+    LOG("cloud: the save before the app ends: %s", r ? "not done within the time (what is owed goes up at the next start)" : "done");
+    return r;
+}
 void dm_cloud_resume(void) { pthread_mutex_lock(&C.mu); if (C.up_started) { C.resume_ev = 1; C.next_try = 0; pthread_cond_broadcast(&C.cv); } pthread_mutex_unlock(&C.mu); }
 
 // ---- the pause menu's row and the corner note ----

@@ -62,12 +62,12 @@ static void ed_open(void) {}
 static void sp_open(void) {}
 static void save_export(void) {}
 static void menu_audio(void) {}
-static void *g_act; static int g_quit; static void act_finish(void *a) { (void)a; }   // (Exit game: menu_do)
 #define LOG(...) ((void)0)   // (until the harness's own, below)
 static void menu_close(void) {}
 static void dm_overlay_redraw(void) {}
 static void dm_cloud_menu_toggle(void) {}   // the Cloud save row (savecloud_android.c)
 static void dm_cloud_menu_press(void) {}
+int dm_menu_audio_available(void) { return 0; } int dm_menu_rate_available(void) { return 0; } int dm_menu_res_available(void) { return 0; } int dm_menu_detail_available(void) { return 0; } int dm_cloud_available(void) { return 0; }   // the menu's rows (a controller opens it on its button row: OVM_ROWS)
 // the frame rate limit row (OVM_LIMIT), as in front_android.c; limit_apply only counts
 static _Atomic int g_set_limit;
 static const int LIMIT_STEPS[OVM_LIMITS] = {0, 60, 40, 30};
@@ -140,6 +140,7 @@ static int64_t mono_ns(void) { return 1; }
 static void dm_haptics_android_device(int id) { vibration = id; }
 static void menu_open(int tab) { (void)tab; menu_opens++; }
 static void menu_key(uint64_t bit) { (void)bit; }
+static void menu_key_up(uint64_t bit) { (void)bit; }
 static uint64_t key_bit(int code) { return code == TEST_PAD_KEY ? DM_BTN_A : 0; }
 static int tx_key(AInputEvent *e) { (void)e; return 1; }
 static void tx_changed(void) {}

@@ -97,7 +97,47 @@ int main(int argc, char **argv) {
                 ov_menu_rowrect(p, 0, r); assert(d->x >= r[0] - 0.5f && d->x + w <= r[0] + r[2] + 0.5f && PF_CAP * d->scale * 4 <= r[3] * 0.85f * 3); }
             for (int j = 0; j < OVM_LIMITS; j++) assert(j == k || !find(words[j]));   // the current value only: the row steps through them
         }
+        // Exit game's half: its word while held (overlay_layout.h ov_exit_hold), red filling it from the left
+        exit_state = OV_EXIT_HOLDING; exit_f = 0.5f; g_ndrawn = 0; ov_menu_panel(&cv, 0); assert(find("Hold to exit") && !find("Exit game") && find("Resume"));
+        ov_menu_rowrect(p, OVM_ROWS - 1, r); { const uint8_t *q = px + 4 * ((size_t)(r[1] + r[3] * 0.2f) * pw + (size_t)(r[0] + r[3] * 0.3f));   // near the left end, over the fill
+            assert(q[0] > 200 && q[1] < 120 && q[2] < 120); }
+        exit_state = OV_EXIT_GOING; g_ndrawn = 0; ov_menu_panel(&cv, 0); assert(find("Exiting…"));
+        exit_state = OV_EXIT_IDLE; exit_f = 0; g_ndrawn = 0; ov_menu_panel(&cv, 0); assert(find("Exit game"));
         free(px);
+    }
+    return 0;
+}
+'''
+
+HOLD_MAIN = r'''
+#define S 1000000000ll
+static int tick(ov_exit_hold *h, int64_t t, float *f) { return ov_exit_tick(h, t, f); }
+int main(void) {
+    ov_exit_hold h = {0}; float f;
+    // a tap: never the end; "Hold to exit" for 1.5 s, then as it was
+    ov_exit_press(&h, 10 * S); assert(tick(&h, 10 * S + S / 10, &f) == OV_EXIT_HOLDING);
+    ov_exit_release(&h, 10 * S + S / 5);
+    for (int64_t t = 10 * S + S / 5; t < 14 * S; t += S / 30) { int k = tick(&h, t, &f); assert(k != OV_EXIT_GOING && k != OV_EXIT_HOLDING); assert((k == OV_EXIT_HINT) == (t < 10 * S + S / 5 + OV_EXIT_HINT_NS)); }
+    // held 1.5 s: the half fills, then the end, once
+    ov_exit_press(&h, 20 * S); assert(tick(&h, 20 * S, &f) == OV_EXIT_HOLDING && f == 0);
+    assert(tick(&h, 21 * S, &f) == OV_EXIT_HOLDING && fabsf(f - 2.0f / 3) < 0.001f);
+    assert(tick(&h, 20 * S + OV_EXIT_HOLD_NS - 1, &f) == OV_EXIT_HOLDING);
+    assert(tick(&h, 20 * S + OV_EXIT_HOLD_NS, &f) == OV_EXIT_GOING && f == 1);
+    ov_exit_release(&h, 22 * S); ov_exit_leave(&h); assert(tick(&h, 23 * S, &f) == OV_EXIT_GOING);   // (going: nothing takes it back)
+    // held, then the finger off the half: as it was, no end however long after
+    ov_exit_hold g = {0}; ov_exit_press(&g, 30 * S); assert(tick(&g, 30 * S + 8 * S / 10, &f) == OV_EXIT_HOLDING);
+    ov_exit_leave(&g); for (int64_t t = 30 * S + 8 * S / 10; t < 35 * S; t += S / 30) assert(tick(&g, t, &f) == OV_EXIT_IDLE);
+    // let go after a second (not a tap): as it was, no hint
+    ov_exit_press(&g, 40 * S); ov_exit_release(&g, 41 * S); assert(tick(&g, 41 * S, &f) == OV_EXIT_IDLE && tick(&g, 44 * S, &f) == OV_EXIT_IDLE);
+    // the halves of the button row (front_android.c menu_touch): Exit game on the left, Resume on the right, no other row
+    const float screens[][2] = {{1280, 960}, {1920, 1080}};
+    for (int q = 0; q < 2; q++) {
+        float W = screens[q][0], H = screens[q][1], p[4], r[4]; ov_menu_rect(W, H, p); ov_menu_rowrect(p, OVM_ROWS - 1, r);
+        float cy = r[1] + r[3] / 2;
+        assert(ov_menu_exit_at(r[0] + 4, cy, W, H) && ov_menu_exit_at(p[0] + p[2] / 2 - 1, cy, W, H));
+        assert(!ov_menu_exit_at(p[0] + p[2] / 2 + 1, cy, W, H) && !ov_menu_exit_at(r[0] + r[2] - 4, cy, W, H));
+        ov_menu_rowrect(p, OVM_ROWS - 2, r); assert(!ov_menu_exit_at(r[0] + 4, r[1] + r[3] / 2, W, H));
+        assert(!ov_menu_exit_at(p[0] - 5, cy, W, H));
     }
     return 0;
 }
@@ -186,6 +226,8 @@ int dm_menu_rate_available(void) { return 0; } int dm_menu_res_available(void) {
 #include "savecloud.h"   // the Cloud save row (savecloud_android.c): an app without sync.txt
 int dm_cloud_available(void) { return 0; }
 int dm_cloud_status(char *note, int cap) { if (cap > 0) note[0] = 0; return DM_CLOUD_OFF; }
+static int exit_state; static float exit_f;   // front_android.c: Exit game's hold (overlay_layout.h OV_EXIT_*)
+int dm_menu_exit(float *f, int *chosen) { *f = exit_f; *chosen = 0; return exit_state; }
 ''' + canvas + colours + r'''
 typedef struct { char s[64]; float x, cy; int scale; } drawn;   // each text the panel draws
 static drawn g_drawn[64]; static int g_ndrawn;
@@ -197,6 +239,22 @@ static void rec_text(const ov_canvas *cv, float x, float cy, const char *s, int 
 ''' + panel + PANEL_MAIN
         self._run(source, FONT)
 
+    def test_exit_held(self):
+        # Exit game ends the game only when held 1.5 s (overlay_layout.h ov_exit_hold, which front_android.c's touch and A run): a tap shows the hint, a finger
+        # off the half lets go
+        source = r'''
+#include <assert.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "overlay_layout.h"
+float dm_overlay_scale(void) { return 1; }
+float dm_menu_row_need(float rh) { (void)rh; return 0; }
+int dm_menu_audio_available(void) { return 0; } int dm_menu_rate_available(void) { return 0; } int dm_menu_res_available(void) { return 0; } int dm_menu_detail_available(void) { return 0; }
+int dm_cloud_available(void) { return 1; }
+''' + HOLD_MAIN
+        self._run(source, None)
 
 if __name__ == '__main__':
     unittest.main()

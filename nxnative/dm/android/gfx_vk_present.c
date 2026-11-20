@@ -82,6 +82,8 @@ __attribute__((weak)) int dm_menu_res_available(void) { return 0; }
 __attribute__((weak)) int dm_menu_detail_available(void) { return 0; }
 __attribute__((weak)) int dm_menu_detail_step(void) { return 0; }
 __attribute__((weak)) int dm_overlay_fps(void) { return 0; }   // front_android.c: the pause menu's Show FPS
+__attribute__((weak)) int dm_menu_exit(float *f, int *chosen) { *f = 0; *chosen = 0; return OV_EXIT_IDLE; }   // front_android.c: Exit game's hold
+__attribute__((weak)) unsigned dm_menu_exit_ver(void) { return 0; }
 __attribute__((weak)) int dm_save_note(char *out, int cap) { if (cap > 0) out[0] = 0; return OVX_IDLE; }   // front_android.c: the save manager's rows
 __attribute__((weak)) int dm_save_rows(ov_srow rows[OVM_ROWS_MAX]) { (void)rows; return 0; }
 // savecloud_android.c: the Cloud save rows and the corner note (savecloud.h)
@@ -239,7 +241,7 @@ enum { SP_DISC = OV_N, SP_BLACK, SP_WHITE, SP_ACCENT, SP_N };   // (black, white
 #define OV_FPS_CHARS "0123456789 FPS-CBATO"   // (the temperature rows: "SOC 52C", "BAT 38C")
 static struct { VkImage img; VkDeviceMemory mem; VkImageView view; VkSampler samp; VkDescriptorSetLayout dsl; VkPipelineLayout layout; VkDescriptorPool pool; VkDescriptorSet set;
                 VkPipeline pipe; VkFormat pfmt; uint32_t w, h, sh, pw, ph, prow, gh, gs, mg, mcols, mrows; uint8_t *pbuf; VkBuffer up; VkDeviceMemory upm; uint8_t *px; void *map; int uploaded, panel, lay, cver; float sp[SP_N][4];
-                unsigned cmv;   // the cloud rows' version the panel was drawn at
+                unsigned cmv, exv;   // the cloud rows' and Exit game's hold's versions the panel was drawn at
                 VkRenderPass rp; VkFramebuffer fb[8]; VkImageView fbview[8]; VkExtent2D fbext[8]; } g_ov;
 static struct { const ov_theme *t; VkImage img; VkDeviceMemory mem; VkImageView view; VkDescriptorSet set; VkBuffer up; VkDeviceMemory upm; uint32_t upk; int ready; } g_tt[2];   // per layout
 // Without dynamic rendering (a Vulkan 1.1 / 1.2 device, V.has_dynrender) the overlay draws in a render pass object over the swapchain image: one pass for the swapchain's
@@ -488,7 +490,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
     for (int row = 0; row < OVM_ROWS; row++) {
         int it = ov_menu_item(tab, row); ov_menu_rowrect(p, row, r); float cy = r[1] + rh / 2, x1 = r[0] + rw - rh * 0.15f;
         if (it < 0) continue;
-        if (row == sel) cv_rrect(cv, r[0], r[1] + rh * 0.08f, r[0] + rw, r[1] + rh * 0.92f, rh * 0.14f, C_HI);
+        if (row == sel && it != OVM_RESUME) cv_rrect(cv, r[0], r[1] + rh * 0.08f, r[0] + rw, r[1] + rh * 0.92f, rh * 0.14f, C_HI);
         if (it == OVM_TAB) {   // the tabs: a segmented bar, the open one filled
             float th = g.th, tw = rw / OVM_TABS;
             cv_rrect(cv, r[0], cy - th / 2, r[0] + rw, cy + th / 2, th / 2, C_OFF);
@@ -499,9 +501,19 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
         }
         if (it == OVM_RESUME) {   // the button row: Exit game (left) beside Resume (right), each centred in its half (menu_touch splits the row at the same midline); the row's line stays
             cv_rrect(cv, r[0], r[1], r[0] + rw, r[1] + 1, 0.5f, C_LINE);
-            const char *const w[2] = {OVM_LABELS[OVM_EXIT], OVM_LABELS[OVM_RESUME]};   // (by the items' ids: the words of OVM_EXIT and OVM_RESUME)
+            // Exit game (overlay_layout.h ov_exit_hold): grey, a quieter word than Resume; held, its half fills red from the left and reads Hold to exit (a tap shows
+            // that for a moment), then Exiting... while the cloud save goes up. The highlight: the half a controller has chosen (Resume when the menu opens)
+            float f; int chosen, ex = dm_menu_exit(&f, &chosen), half = row == sel ? (chosen ? 0 : 1) : -1;
+            if (half >= 0) cv_rrect(cv, r[0] + half * (rw / 2), r[1] + rh * 0.08f, r[0] + (half + 1) * (rw / 2), r[1] + rh * 0.92f, rh * 0.14f, C_HI);
+            if (ex == OV_EXIT_HOLDING || ex == OV_EXIT_GOING) {
+                static const uint8_t track[4] = {255, 59, 48, 60}, red[4] = {255, 59, 48, 255};
+                float y0 = r[1] + rh * 0.12f, y1 = r[1] + rh * 0.88f, rad = rh * 0.14f, w = rw / 2 - rh * 0.1f, fx = fmaxf(2 * rad, w * f);
+                cv_rrect(cv, r[0] + rh * 0.05f, y0, r[0] + rh * 0.05f + w, y1, rad, track);
+                cv_rrect(cv, r[0] + rh * 0.05f, y0, r[0] + rh * 0.05f + fx, y1, rad, red);
+            }
+            const char *const w[2] = {ex == OV_EXIT_GOING ? TR("Exiting…", "正在退出…") : ex != OV_EXIT_IDLE ? TR("Hold to exit", "长按退出") : OVM_LABELS[OVM_EXIT], OVM_LABELS[OVM_RESUME]};
             for (int k = 0; k < 2; k++) { int s = is; while (s > 1 && cv_text_w(w[k], s) > rw / 2 - rh * 0.3f) s--;   // the letters shrink only if the half would not hold them
-                cv_text(cv, r[0] + k * (rw / 2) + (rw / 2 - cv_text_w(w[k], s)) / 2, cy, w[k], s, k ? C_ACCENT : C_WHITE); }
+                cv_text(cv, r[0] + k * (rw / 2) + (rw / 2 - cv_text_w(w[k], s)) / 2, cy, w[k], s, k ? C_ACCENT : ex == OV_EXIT_IDLE ? C_DIM : C_WHITE); }
             continue;
         }
         cv_text(cv, r[0] + rh * 0.15f, cy, OVM_LABELS[it], is, row == sel ? C_WHITE : C_DIM);
@@ -1008,7 +1020,8 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
     }
     uint32_t y0 = 0, rows = ov_tex_rows();   // the rows to upload
     unsigned cmv = dm_cloud_menu_ver();
-    int want_panel = menu >= 0 && (menu != g_ov.panel || cmv != g_ov.cmv);   // (the cloud rows change without the menu's state)
+    unsigned exv = dm_menu_exit_ver();
+    int want_panel = menu >= 0 && (menu != g_ov.panel || cmv != g_ov.cmv || exv != g_ov.exv);   // (the cloud rows and Exit game's hold change without the menu's state)
     // (a fence that this device's kgsl holds for ~half a second would freeze the whole menu: wait one frame's worth, and if the copy out of the buffer has not run
     // yet keep the panel as it is this frame — the next redraw, 16 ms later, tries again and the change lands then)
     int panel_ok = 1;
@@ -1017,7 +1030,7 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
         if (vkWaitForFences(V.dev, n, f, 1, 20000000ull) == VK_TIMEOUT) panel_ok = 0;
         else { y0 = g_ov.h + g_ov.sh; rows = g_ov.prow; g_ov.uploaded = 0; }
     }
-    if (panel_ok && want_panel) { ov_panel(menu); g_ov.panel = menu; g_ov.cmv = cmv; }
+    if (panel_ok && want_panel) { ov_panel(menu); g_ov.panel = menu; g_ov.cmv = cmv; g_ov.exv = exv; }
     // the rows the copy reads go back into the mapped buffer here, in one linear pass (write-combined: the raster above ran in cacheable memory)
     if (g_ov.map && g_ov.px && g_ov.px != (uint8_t *)g_ov.map) memcpy((uint8_t *)g_ov.map + (size_t)y0 * g_ov.w * 4, g_ov.px + (size_t)y0 * g_ov.w * 4, (size_t)rows * g_ov.w * 4);
     if (!g_ov.uploaded) {

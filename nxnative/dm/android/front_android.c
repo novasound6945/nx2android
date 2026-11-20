@@ -682,7 +682,7 @@ static void *temp_watch(void *a) {
 // and importing the save);
 // Resume under them ----
 static _Atomic int g_menu_hi = -1, g_menu_tab;   // the highlighted row (a controller's selection, or the row a finger is on), -1 none; the open tab
-static int g_menu_ptr = -1, g_menu_row = -2;   // the pointer pressing in the menu, and the row it went down on (-3 the menu button)
+static int g_menu_ptr = -1, g_menu_row = -2, g_menu_ex;   // the pointer pressing in the menu, and the row it went down on (-3 the menu button)
 static _Atomic int g_tx_ver;   // the text entry's edit count: the panel is drawn again when it changes
 static _Atomic int g_ed_st;    // the layout editor's state for dm_menu_state (overlay_layout.h OVE_ST)
 static _Atomic int g_sp_on, g_sp_hi = -1, g_sp_ver;   // the save picker (below): open, its highlighted row, its edit count
@@ -698,9 +698,46 @@ int dm_menu_state(void) {
 }
 int dm_touch_passthrough(void) { return atomic_load(&g_set_touch) != 0; }   // hle_touch.c: docked play gets the game's touch screen too (no DM_TOUCH_DOCKED needed)
 int dm_overlay_fps(void) { return atomic_load(&g_set_fps) && !atomic_load(&g_menu); }   // gfx_vk_present.c draws the counter (not while the menu holds the game)
+// Exit game held (overlay_layout.h ov_exit_hold): a press on its half starts the hold, a thread of its own redraws the filling half and ends the game when it completes:
+// the cloud save's owed upload first (savecloud_android.c dm_cloud_flush, as onPause would start it: onDestroy's _exit comes too soon for it), then Activity.finish()
+static pthread_mutex_t g_ex_mu = PTHREAD_MUTEX_INITIALIZER;
+static ov_exit_hold g_ex; static int g_ex_src, g_ex_thread, g_ex_pick; static unsigned g_ex_ver;   // who holds (1 a finger, 2 A), the timing thread runs, a controller chose Exit game
+static void menu_exit_now(void);   // (below)
+static void *exit_run(void *a) {
+    (void)a; int last = -1, lq = -1;
+    for (;;) {
+        float f; pthread_mutex_lock(&g_ex_mu); int k = ov_exit_tick(&g_ex, mono_ns(), &f), q = (int)(f * 30);
+        if (k != last || q != lq) { g_ex_ver++; last = k; lq = q; }
+        if (k == OV_EXIT_IDLE || k == OV_EXIT_GOING) g_ex_thread = 0;
+        pthread_mutex_unlock(&g_ex_mu); dm_overlay_redraw();
+        if (k == OV_EXIT_GOING) { menu_exit_now(); return NULL; }
+        if (k == OV_EXIT_IDLE) return NULL;
+        usleep(33000);
+    }
+}
+static void exit_kick(void) {   // (g_ex_mu held) the timing thread, if it is not running
+    g_ex_ver++;
+    if (g_ex_thread) return;
+    pthread_t t; g_ex_thread = !pthread_create(&t, NULL, exit_run, NULL); if (g_ex_thread) pthread_detach(t);
+}
+static void exit_press(int src) { pthread_mutex_lock(&g_ex_mu); if (!g_ex.going) { ov_exit_press(&g_ex, mono_ns()); g_ex_src = src; exit_kick(); } pthread_mutex_unlock(&g_ex_mu); }
+static void exit_release(int src) { pthread_mutex_lock(&g_ex_mu); if (g_ex.t0 && g_ex_src == src) { ov_exit_release(&g_ex, mono_ns()); exit_kick(); } pthread_mutex_unlock(&g_ex_mu); }
+static void exit_leave(void) { pthread_mutex_lock(&g_ex_mu); if (g_ex.t0 || g_ex.hint) { ov_exit_leave(&g_ex); exit_kick(); } pthread_mutex_unlock(&g_ex_mu); }
+static void exit_pick(int on) { pthread_mutex_lock(&g_ex_mu); if (g_ex_pick != on) { g_ex_pick = on; g_ex_ver++; } pthread_mutex_unlock(&g_ex_mu); }
+static int exit_chosen(void) { pthread_mutex_lock(&g_ex_mu); int c = g_ex_pick; pthread_mutex_unlock(&g_ex_mu); return c; }
+int dm_menu_exit(float *f, int *chosen) { pthread_mutex_lock(&g_ex_mu); ov_exit_hold h = g_ex; int k = ov_exit_tick(&h, mono_ns(), f); *chosen = g_ex_pick; pthread_mutex_unlock(&g_ex_mu); return k; }
+unsigned dm_menu_exit_ver(void) { pthread_mutex_lock(&g_ex_mu); unsigned v = g_ex_ver; pthread_mutex_unlock(&g_ex_mu); return v; }
+// Exit game held to its end: the cloud save's owed upload goes up first (at most 8 s), then the app ends itself the way Android does (Activity.finish(), g_quit keeps it
+// finished if it is resumed once more); without an activity (the adb shell dmhost) nothing ends
+static void menu_exit_now(void) {
+    if (!g_act) { LOG("[menu] exit game: no activity (the adb shell's dmhost): nothing ends"); pthread_mutex_lock(&g_ex_mu); g_ex.going = 0; g_ex_ver++; pthread_mutex_unlock(&g_ex_mu); return; }
+    dm_haptics_android_tap(); LOG("[menu] exit game (held): the cloud save first, then Activity.finish()");
+    if (dm_cloud_flush(8000) > 0) LOG("[menu] exit game: the cloud upload did not end within 8 s; the app ends anyway (what is owed goes up at the next start)");
+    g_quit = 1; act_finish(g_act);
+}
 static void menu_open(int hi) {
     if (!atomic_load(&g_running) || atomic_exchange(&g_menu, 1)) return;
-    atomic_store(&g_menu_hi, hi); g_menu_ptr = -1;
+    atomic_store(&g_menu_hi, hi); g_menu_ptr = -1; exit_leave(); exit_pick(0);   // (a controller's open: Resume chosen)
     if (atomic_load(&g_sv_st) != OVX_BUSY) atomic_store(&g_sv_st, OVX_IDLE);   // the last export's note goes (one still copying stays)
     dm_input_set(0, 0, 0, 0, 0); dm_touch_set(NULL, 0); atomic_store(&g_touch_btn, 0);   // nothing stays pressed in the game
     for (int i = 0; i < 16; i++) atomic_store(&g_press_t[i], 0);
@@ -715,8 +752,10 @@ static void ed_cancel(void); static void sp_back(void);
 static void menu_close(void) {
     if (atomic_load(&g_edit)) { ed_cancel(); return; }   // the editor first: its changes are kept or thrown away before the game goes on
     if (atomic_load(&g_sp_on)) { sp_back(); return; }    // the save picker: back a step
+    pthread_mutex_lock(&g_ex_mu); int going = g_ex.going; pthread_mutex_unlock(&g_ex_mu);
+    if (going) return;   // (the game is ending: the menu stays)
     if (!atomic_exchange(&g_menu, 0)) return;
-    g_menu_ptr = -1; atomic_store(&g_menu_t, 0);
+    g_menu_ptr = -1; atomic_store(&g_menu_t, 0); exit_leave();
     hold_sync(); dm_haptics_suspend(4, 0); dm_overlay_redraw();
     char lim[16]; int rate = atomic_load(&g_set_limit); if (rate) snprintf(lim, sizeof lim, "%d fps", rate); else snprintf(lim, sizeof lim, "auto");
     LOG("[menu] closed: the game goes on (gamepad %s, opacity %d%%, rumble %s, face buttons by %s, frame rate %s, limit %s, %s, %s)", atomic_load(&g_set_overlay) ? "on" : "off", atomic_load(&g_set_opacity),
@@ -758,9 +797,7 @@ static void menu_do(int item) {
     else if (item == OVM_EXPORT) { if (atomic_load(&g_sv_st) == OVX_BUSY) return; save_export(); }
     else if (item == OVM_IMPORT) { dm_haptics_android_tap(); sp_open(); return; }
     else if (item == OVM_AUDIO) { menu_audio(); }
-    else if (item == OVM_EXIT) {   // Exit game: the app ends itself the way Android does (Activity.finish(), g_quit keeps it finished if it is resumed once more); without an activity (the adb shell dmhost) the row does nothing
-        if (g_act) { dm_haptics_android_tap(); LOG("[menu] exit game: Activity.finish()"); g_quit = 1; act_finish(g_act); return; }
-    }
+    else if (item == OVM_EXIT) return;   // (only held: exit_press, menu_exit_now)
     else if (item == OVM_CLOUD) dm_cloud_menu_toggle();     // (savecloud_android.c: this game's sync on or off, kept in its state)
     else if (item == OVM_CLOUD_UP) dm_cloud_menu_press();    // Upload now, when one is owed
     if (item >= 0 && item < OVM_N) dm_haptics_android_tap();
@@ -775,6 +812,8 @@ static void menu_touch(AInputEvent *e, float W, float H) {   // a press on a row
     if (act == AMOTION_EVENT_ACTION_DOWN || act == AMOTION_EVENT_ACTION_POINTER_DOWN) {
         if (g_menu_ptr >= 0) return;
         g_menu_ptr = id; g_menu_row = row;
+        g_menu_ex = item == OVM_RESUME && ov_menu_exit_at(x, y, W, H);
+        if (item == OVM_RESUME) { exit_pick(g_menu_ex); if (g_menu_ex) exit_press(1); }   // Exit game's half: held, not tapped
         if (item == OVM_TAB) menu_tab(ov_menu_tab_at(x, p));   // a tab opens as the finger touches it
         else if (item == OVM_OPACITY) menu_opacity(ov_menu_track_value(x, p, row));
         if (row >= 0) { atomic_store(&g_menu_hi, item >= 0 ? row : -1); dm_overlay_redraw(); }
@@ -782,31 +821,37 @@ static void menu_touch(AInputEvent *e, float W, float H) {   // a press on a row
         for (size_t k = 0; k < AMotionEvent_getPointerCount(e); k++) if ((AMotionEvent_getPointerId(e, k) & 31) == g_menu_ptr) {
             float kx = AMotionEvent_getX(e, k), ky = AMotionEvent_getY(e, k);
             if (ov_menu_item(tab, g_menu_row) == OVM_OPACITY) { menu_opacity(ov_menu_track_value(kx, p, g_menu_row)); continue; }
+            if (ov_menu_item(tab, g_menu_row) == OVM_RESUME && !ov_menu_exit_at(kx, ky, W, H)) exit_leave();   // off Exit game's half: the hold is let go
             int r = ov_menu_row_at(kx, ky, W, H), hi = r == g_menu_row && ov_menu_item(tab, r) >= 0 ? r : -1;
             if (atomic_exchange(&g_menu_hi, hi) != hi) dm_overlay_redraw();
         }
     } else if ((act == AMOTION_EVENT_ACTION_UP || act == AMOTION_EVENT_ACTION_POINTER_UP) && id == g_menu_ptr) {
         int down = g_menu_row; g_menu_ptr = -1; atomic_store(&g_menu_hi, -1);
         if (down >= 0 && ov_menu_item(tab, down) == OVM_OPACITY) { settings_save(); dm_overlay_redraw(); }
-        else if (row == down && item >= 0 && item != OVM_TAB) menu_do(item == OVM_RESUME && x < p[0] + p[2] / 2 ? OVM_EXIT : item);   // the button row: its left half is Exit game (gfx_vk_present.c draws the two at the same midline; the PR's x * 2 < p[0] + p[2] put it left of the middle)
+        else if (g_menu_ex) { exit_release(1); exit_pick(0); dm_overlay_redraw(); }   // a press that began on Exit game: let go before its hold ended (a tap: the hint), never Resume
+        else if (row == down && item >= 0 && item != OVM_TAB) menu_do(item);   // (the right half: Resume)
         else if (row == down && (row == -2 || row == -3)) { dm_haptics_android_tap(); menu_close(); }
         else dm_overlay_redraw();
-    } else if (act == AMOTION_EVENT_ACTION_CANCEL) { g_menu_ptr = -1; atomic_store(&g_menu_hi, -1); dm_overlay_redraw(); }
+    } else if (act == AMOTION_EVENT_ACTION_CANCEL) { g_menu_ptr = -1; atomic_store(&g_menu_hi, -1); exit_leave(); dm_overlay_redraw(); }
 }
 static void ed_key(uint64_t bit); static void sp_key(uint64_t bit);
+static void menu_key_up(uint64_t bit) { if (bit == DM_BTN_A) exit_release(2); }   // a controller key let go while the menu is open: a held A on Exit game
 static void menu_key(uint64_t bit) {   // a controller key pressed while the menu is open: up and down go through the rows, left and right change the tab or the
     if (atomic_load(&g_edit)) { ed_key(bit); return; }   // opacity on their rows, L and R change the tab anywhere, A does the row, B and + close
     if (atomic_load(&g_sp_on)) { sp_key(bit); return; }
     int hi = atomic_load(&g_menu_hi), tab = atomic_load(&g_menu_tab), item = hi >= 0 ? ov_menu_item(tab, hi) : -1;
+    if (bit != DM_BTN_A) exit_leave();   // another key lets a held A go
     if (bit == DM_BTN_UP || bit == DM_BTN_DOWN) {
         for (int k = 0; k < OVM_ROWS; k++) { hi = hi < 0 ? (bit == DM_BTN_UP ? OVM_ROWS - 1 : 1) : (hi + (bit == DM_BTN_UP ? OVM_ROWS - 1 : 1)) % OVM_ROWS; if (ov_menu_item(tab, hi) >= 0) break; }
         atomic_store(&g_menu_hi, hi); dm_overlay_redraw();
     } else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_OPACITY) { menu_opacity(atomic_load(&g_set_opacity) + (bit == DM_BTN_LEFT ? -5 : 5)); settings_save(); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_TAB) menu_tab(tab + (bit == DM_BTN_LEFT ? -1 : 1));
+    else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_RESUME) { exit_pick(bit == DM_BTN_LEFT); dm_overlay_redraw(); }   // the button row: Exit game (left) or Resume
     else if (bit == DM_BTN_L || bit == DM_BTN_ZL || bit == DM_BTN_R || bit == DM_BTN_ZR) {
         menu_tab(tab + (bit == DM_BTN_L || bit == DM_BTN_ZL ? -1 : 1));
         if (hi > 0 && ov_menu_item(atomic_load(&g_menu_tab), hi) < 0) atomic_store(&g_menu_hi, OVM_ROWS - 1);   // (a tab with fewer rows: OVM_TAB_ITEMS' -1)
     }
+    else if (bit == DM_BTN_A && item == OVM_RESUME && exit_chosen()) exit_press(2);   // Exit game: held, its end when A has been down 1.5 s
     else if (bit == DM_BTN_A) menu_do(hi < 0 ? OVM_RESUME : item);
     else if (bit == DM_BTN_B || bit == DM_BTN_PLUS) menu_close();
 }
@@ -1236,7 +1281,7 @@ static int handle_event(AInputEvent *e) {
         if (atomic_load(&g_tx_on)) return tx_key(e);   // the text entry takes every key while it is open
         int32_t k = AKeyEvent_getKeyCode(e), down = AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_DOWN;
         if (k == AKEYCODE_BACK || k == AKEYCODE_BUTTON_MODE || k == AKEYCODE_MENU) {   // the menu, both ways (Back would otherwise finish the activity, and the game with it)
-            if (down && AKeyEvent_getRepeatCount(e) == 0) { if (atomic_load(&g_menu)) menu_close(); else menu_open(k == AKEYCODE_BACK ? -1 : 0); }
+            if (down && AKeyEvent_getRepeatCount(e) == 0) { if (atomic_load(&g_menu)) menu_close(); else menu_open(k == AKEYCODE_BACK ? -1 : OVM_ROWS - 1); }   // (a controller: Resume chosen)
             return 1;
         }
         uint64_t bit = key_bit(k);
@@ -1249,7 +1294,7 @@ static int handle_event(AInputEvent *e) {
         int id = AInputEvent_getDeviceId(e);
         pthread_mutex_lock(&g_slot_mu); int p = pad_player(id, src, down); pthread_mutex_unlock(&g_slot_mu);   // (a release takes no player either)
         if (down) pad_mark_used(id, p);   // a release after a touch must not hide the controls again
-        if (atomic_load(&g_menu)) { if (down && AKeyEvent_getRepeatCount(e) == 0) menu_key(bit); return 1; }
+        if (atomic_load(&g_menu)) { if (down && AKeyEvent_getRepeatCount(e) == 0) menu_key(bit); else if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_UP) menu_key_up(bit); return 1; }
         if (p < 0) return 1;
         pthread_mutex_lock(&g_slot_mu);
         if (down) g_btn[p] |= bit; else if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_UP) g_btn[p] &= ~bit;
@@ -1432,9 +1477,9 @@ static void *input_thread(void *a) {
         if (!dm_external_active()) { prev = latched = 0; atomic_store(&g_ext_presses, 0); atomic_store(&g_ext_touch_enabled, 0); continue; }
         if (atomic_load(&g_ext_touch_enabled)) continue;
         int toggle = atomic_exchange(&g_ext_menu, 0);
-        if (toggle & 1) { if (atomic_load(&g_menu)) menu_close(); else menu_open(0); }
+        if (toggle & 1) { if (atomic_load(&g_menu)) menu_close(); else menu_open(OVM_ROWS - 1); }
         uint64_t b = atomic_load(&g_ext_buttons), presses = atomic_exchange(&g_ext_presses, 0);
-        if (atomic_load(&g_menu)) { uint64_t down = (b & ~prev) | presses; latched = 0; for (int i = 0; i < 16; i++) if (down & (1ull << i)) menu_key(1ull << i); dm_input_set(0, 0, 0, 0, 0); }
+        if (atomic_load(&g_menu)) { uint64_t down = (b & ~prev) | presses, up = prev & ~b; latched = 0; for (int i = 0; i < 16; i++) { if (down & (1ull << i)) menu_key(1ull << i); if (up & (1ull << i)) menu_key_up(1ull << i); } dm_input_set(0, 0, 0, 0, 0); }
         else {
             int64_t elapsed = mono_ns() - since;
             if (latched && ((elapsed >= 20000000 && dm_input_samples() != sample) || elapsed >= 100000000)) latched = 0;
