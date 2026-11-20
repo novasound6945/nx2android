@@ -53,6 +53,8 @@ static void t_tar(void) {
     CHECK(!strcmp(ha, hb), "the same tree gives the same archive (%s / %s)", ha, hb);
     CHECK(tar_of("a/save", "a/dev", hc, NULL) == 0 && !strcmp(ha, hc), "again the same");
     CHECK(ta.n % 512 == 0 && ta.n >= 1024, "whole blocks");
+    CHECK(ss_tar_files(ta.p, ta.n) == 4, "the start screen's file count: 4 files, the folders not counted (%lld)", (long long)ss_tar_files(ta.p, ta.n));
+    CHECK(ss_tar_files(ta.p, 100) == -1, "a cut archive has no count");
     put("b/save/zeta.bin", "zzZ"); tar_of("b/save", "b/dev", hb, NULL); CHECK(strcmp(ha, hb), "a changed byte changes the hash");
     put("b/save/zeta.bin", "zzz"); tar_of("b/save", "b/dev", hb, NULL); CHECK(!strcmp(ha, hb), "and back");
     CHECK(tar_of("a/save", "nodev", hc, NULL) == 0 && strcmp(ha, hc), "without the device save: another archive");
@@ -106,6 +108,11 @@ static void t_files(void) {
                     "\"gameVersion\": \"v196608\", \"build\": \"1.2\", \"extra\": [1, {\"a\": null}], \"session\": {\"device\": \"deck\", \"state\": \"open\", \"updated\": \"2026-11-20T12:00:00Z\"}}";
     CHECK(ss_meta_parse(j, strlen(j), &m) == 0 && m.seq == 12 && m.size == 4096 && m.time == 1763640000 && !strcmp(m.device, "deck") && !strncmp(m.sha, "abcdef", 6), "meta");
     CHECK(m.session && m.s_open && !strcmp(m.s_device, "deck") && m.s_updated == 1795176000, "meta's session (%lld)", (long long)m.s_updated);
+    CHECK(m.files == -1, "no fileCount: not known");
+    const char *jf = "{\"seq\":4,\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"size\":7234567,\"fileCount\":37}";
+    CHECK(ss_meta_parse(jf, strlen(jf), &m) == 0 && m.files == 37, "fileCount");
+    char sz[32]; ss_fmt_size(sz, sizeof sz, m.size); CHECK(!strcmp(sz, "6.9 MB"), "size %s", sz);
+    ss_fmt_size(sz, sizeof sz, 1258291); CHECK(!strcmp(sz, "1.2 MB"), "size %s", sz); ss_fmt_size(sz, sizeof sz, 655360); CHECK(!strcmp(sz, "640 KB"), "size %s", sz);
     const char *j2 = "{\"seq\":3,\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"time\":1763640000123,\"session\":null}";
     CHECK(ss_meta_parse(j2, strlen(j2), &m) == 0 && m.time == 1763640000 && !m.session, "milliseconds, no session");
     const char *c1 = "{\"current\": null}", *c2 = "{\"error\":\"conflict\",\"current\":{\"seq\":5,\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}}";
@@ -192,9 +199,40 @@ static void t_decide(void) {
     CHECK(ss_decide(SS_NET_OK, &m, &s, A, &p) == SS_GO_ASK_OFFLINE, "a trial build changed the synced save: the release asks");
 }
 
+// while the game runs: a start without the network, the network back, the upload going up or meeting another device's newer save
+static void t_ingame(void) {
+    ss_state s = st_of(1, 4, B), s2; ss_meta m = meta_of(4, B); int p;
+    CHECK(ss_decide(SS_NET_FAIL, &m, &s, A, &p) == SS_GO_OFFLINE && p, "an offline start with a changed save: owed");
+    s.pending = 1; s2 = s;
+    ss_tick_in t = {.syncs = 1, .net = 0, .was_net = 1, .sess_open = 0, .owed = 1, .now = 10000, .next_try = 70000};
+    CHECK(ss_tick(&t) == 0, "known offline: nothing is tried, not even the open");
+    t.was_net = 0; t.net = 1; int a = ss_tick(&t);
+    CHECK(a == (SS_DO_RETRY_NOW | SS_DO_UPLOAD | SS_DO_OPEN), "the network back: the owed save goes up at once (backoff forgotten) and the session opens (%d)", a);
+    t.was_net = 1; t.now = 20000; CHECK(ss_tick(&t) == SS_DO_OPEN, "the next tick, still within the backoff, an open that did not go through: tried again");
+    t.sess_open = 1; t.last_hb = 20000; t.now = 50000; CHECK(ss_tick(&t) == 0, "open, no save owed due: nothing");
+    t.now = 81000; CHECK(ss_tick(&t) == (SS_DO_UPLOAD | SS_DO_ALIVE), "past the backoff and a minute on: the upload and a heartbeat");
+    t.last_hb = 81000; t.committed = 1; t.owed = 0; t.now = 82000; CHECK(ss_tick(&t) == SS_DO_UPLOAD, "a fresh commit goes up");
+    ss_tick_in off = t; off.syncs = 0; off.was_net = 0; CHECK(ss_tick(&off) == 0, "a run without the sync (B, a trial build, switched off) sends nothing when the network comes back");
+    ss_notes n = {0};
+    // the upload goes up
+    CHECK(ss_after_put(&s, 200, 5, A, NULL, 1795176000) == SS_NOTE_SAVED && !s.pending && s.seq == 5 && !strcmp(s.sha, A) && s.last_up == 1795176000, "200: saved, nothing owed");
+    CHECK(ss_note_ok(&n, SS_NOTE_SAVED, 100000), "the first saved note shows");
+    CHECK(!ss_note_ok(&n, SS_NOTE_SAVED, 160000), "the next save's note does not (the same state)");
+    CHECK(ss_note_ok(&n, SS_NOTE_WAITING, 170000), "the network lost: waiting shows");
+    CHECK(!ss_note_ok(&n, SS_NOTE_SAVED, 180000) && !ss_note_ok(&n, SS_NOTE_WAITING, 190000), "a network that comes and goes: no note within 5 min of its kind");
+    CHECK(ss_note_ok(&n, SS_NOTE_SAVED, 100000 + SS_NOTE_GAP_MS), "saved again after 5 min");
+    // or another device's newer save is there: kept for the next start, no retry, one note
+    ss_meta cur = meta_of(6, C); snprintf(cur.device, sizeof cur.device, "nova"); cur.time = 1795170000;
+    CHECK(ss_after_put(&s2, 409, 0, A, &cur, 0) == SS_NOTE_CONFLICT && s2.conflict && s2.pending && s2.cseq == 6 && !strcmp(s2.cdevice, "nova"), "409: a conflict, kept");
+    ss_notes n2 = {0}; CHECK(ss_note_ok(&n2, SS_NOTE_CONFLICT, 1000) && !ss_note_ok(&n2, SS_NOTE_CONFLICT, 400000), "the conflict's note once");
+    t.conflict = 1; t.owed = 1; t.committed = 1; t.now = 900000; CHECK(!(ss_tick(&t) & SS_DO_UPLOAD), "with a conflict nothing goes up by itself");
+    m = meta_of(6, C); CHECK(ss_decide(SS_NET_OK, &m, &s2, A, &p) == SS_GO_CONFLICT, "the next start: the cards");
+    CHECK(ss_after_put(&s2, 0, 0, A, NULL, 0) == SS_NOTE_WAITING && s2.pending, "no answer: waiting, owed");
+}
+
 int main(void) {
     snprintf(g_tmp, sizeof g_tmp, "%s/t_savesync.%d", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid()); ss_rm_tree(g_tmp); mkdir(g_tmp, 0755);
-    t_tar(); t_files(); t_decide();
+    t_tar(); t_files(); t_decide(); t_ingame();
     ss_rm_tree(g_tmp);
     printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
     return fails != 0;

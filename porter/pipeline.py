@@ -17,9 +17,21 @@ PY = sys.executable
 UI_FONT = DM / 'third_party/fusion-pixel-font/fusion-pixel-12px-proportional-zh_tw.nxpf'
 
 
-def ui_font_assets():   # {name under assets/: file}: the overlay's font and its license files (Port.ui_font; porter host puts them in an APK ported before them)
+# The start screen's font (dm/android/startscreen.c): Noto Sans KR cut to what the screen draws (dm/tools/make_start_font.py), Regular and Bold, and its license
+START_FONT = DM / 'third_party/noto-sans-kr'
+
+
+def ui_font_assets():   # {name under assets/: file}: the overlay's and the start screen's fonts and their license files (Port.ui_font; porter host puts them in an APK ported before them)
     d = UI_FONT.parent
-    return {'font/ui.bin': UI_FONT, **{f'font/{f.relative_to(d).as_posix()}': f for f in sorted(p for p in d.rglob('*.txt'))}}
+    return {'font/ui.bin': UI_FONT, **{f'font/{f.relative_to(d).as_posix()}': f for f in sorted(p for p in d.rglob('*.txt'))},
+            'font/start-regular.ttf': START_FONT / 'NotoSansKR-Regular.subset.ttf', 'font/start-bold.ttf': START_FONT / 'NotoSansKR-Bold.subset.ttf',
+            'font/LICENSES/noto-sans-kr/OFL.txt': START_FONT / 'OFL.txt'}
+
+
+def start_icon(art, out):   # the start screen's copy of the game's icon (dm/android/datasync_android.c res_load): "NXIC", u16 width, u16 height, RGBA, 160 px
+    im = art.convert('RGBA').resize((160, 160), 1)   # (Image.LANCZOS)
+    out.write_bytes(b'NXIC' + (160).to_bytes(2, 'little') * 2 + im.tobytes())
+    return out
 # The letters of the button-icon font (make_ext_font.py knocks them out of the icons): a bold system font of the machine that ports, never shipped in the repository
 LETTER_FONTS = [f'{os.environ.get("WINDIR", "C:/Windows")}/Fonts/{f}' for f in ('ARLRDBD.TTF', 'arialbd.ttf')] + [
     '/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', '/usr/share/fonts/TTF/DejaVuSans-Bold.ttf',
@@ -878,7 +890,7 @@ class Port:
     def icon(self):
         """mkapk's icon arguments: the game's icon (nx_extract saves the control data's English one as icon.jpg) as a 256 px PNG, and an adaptive icon's layers
         (Android 8+ launchers draw a plain icon small on a white disc): the icon fills the 72 dp the launcher's mask shows, over a blurred copy that fills
-        the 108 dp layer. [] without Pillow or an icon"""
+        the 108 dp layer; and the start screen's copy (assets/start/icon.bin). [] without Pillow or an icon"""
         src = next((d / 'icon.jpg' for d in (self.game, self.base) if (d / 'icon.jpg').exists()), None)
         if not src: say('[RED] no game icon in the extraction: the app gets the system\'s default icon'); return []
         try: from PIL import Image, ImageFilter
@@ -888,7 +900,8 @@ class Port:
         layer, shown = 432, 288   # 108 dp and 72 dp at 4 px per dp
         art.resize((layer, layer), Image.LANCZOS).filter(ImageFilter.GaussianBlur(24)).save(bg)
         top = Image.new('RGBA', (layer, layer)); top.paste(art.resize((shown, shown), Image.LANCZOS), ((layer - shown) // 2,) * 2); top.save(fg)
-        return ['--icon', plain, '--icon-fg', fg, '--icon-bg', bg]
+        start = start_icon(art, self.aw / 'start_icon.bin')   # the start screen shows it beside the game's name
+        return ['--icon', plain, '--icon-fg', fg, '--icon-bg', bg, '--asset', f'start/icon.bin={start}']
 
     # ---- data: the files the app reads from its files folder ----
     def data(self):
