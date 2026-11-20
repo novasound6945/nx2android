@@ -12,6 +12,7 @@
 #include "overlay_layout.h"
 #include "pixel_font.h"
 #include "saves_android.h"
+#include "savecloud.h"
 #include <math.h>
 #include <time.h>
 #include <android/asset_manager.h>
@@ -207,7 +208,7 @@ static void go_background(void) { if (!atomic_load(&g_running) || atomic_exchang
 static void go_foreground(void) { if (!atomic_load(&g_running) || !atomic_exchange(&g_bg, 0)) return; dm_gfx_suspend(0); hold_sync(); dm_focus_set(2); shake_sensor(1); }
 void dm_perf_gpu_release(void);   // perf_android.c: the GPU's clock control back to its governor (DM_GPU_TURBO)
 // The clock control goes back after go_background: its dm_gfx_suspend waits for the presents in progress, and one of them could otherwise set the GPU's power control again
-static void on_pause(ANativeActivity *a) { (void)a; go_background(); dm_perf_gpu_release(); }
+static void on_pause(ANativeActivity *a) { (void)a; go_background(); dm_perf_gpu_release(); dm_cloud_pause(); }   // (savecloud_android.c: the owed upload on a thread of its own)
 // Back in front, the game is out of focus until the window has the input focus again (Android sends it after onResume): without this it stayed OutOfFocus for good,
 // and Blasphemous 2's Unity, which asks for focus notifications, kept its title paused and ignored every press after a trip to another app. A window losing focus while in
 // front (a system dialog, the notification shade) is OutOfFocus as on the Switch's HOME overlay
@@ -243,7 +244,7 @@ static void activity_game_mode(ANativeActivity *a) {
     }
     dm_perf_game_mode(mode);   // absent service / older Android keeps the standard policy
 }
-static void on_resume(ANativeActivity *a) { if (g_quit) { act_finish(a); return; } activity_game_mode(a); go_foreground(); }
+static void on_resume(ANativeActivity *a) { if (g_quit) { act_finish(a); return; } activity_game_mode(a); go_foreground(); dm_cloud_resume(); }
 static void on_destroy(ANativeActivity *a) { (void)a; dm_perf_gpu_release(); _exit(0); }   // one game per process
 
 // ---- input ----
@@ -626,6 +627,8 @@ static void menu_do(int item) {
     else if (item == OVM_EXPORT) { if (atomic_load(&g_sv_st) == OVX_BUSY) return; save_export(); }
     else if (item == OVM_IMPORT) { dm_haptics_android_tap(); sp_open(); return; }
     else if (item == OVM_AUDIO) { menu_audio(); }
+    else if (item == OVM_CLOUD) dm_cloud_menu_toggle();     // (savecloud_android.c: this game's sync on or off, kept in its state)
+    else if (item == OVM_CLOUD_UP) dm_cloud_menu_press();    // Upload now, when one is owed
     if (item >= 0 && item < OVM_N) dm_haptics_android_tap();
     if (item == OVM_RESUME) menu_close(); else dm_overlay_redraw();
 }
@@ -1267,9 +1270,9 @@ static void *input_thread(void *a) {
     return NULL;
 }
 static _Atomic int g_syncing;   // the data download runs (dm_sync_begin): the game, its input thread with it, starts when it ends (game_start)
-static int on_input_early(int fd, int events, void *data) {   // the main thread's looper: events before the game, none of them handled
+static int on_input_early(int fd, int events, void *data) {   // the main thread's looper: events before the game, none of them handled but the cloud sync's start screen's
     (void)fd; (void)events; (void)data; AInputEvent *e;
-    while (g_queue && AInputQueue_getEvent(g_queue, &e) >= 0) { if (AInputQueue_preDispatchEvent(g_queue, e)) continue; AInputQueue_finishEvent(g_queue, e, 0); }
+    while (g_queue && AInputQueue_getEvent(g_queue, &e) >= 0) { if (AInputQueue_preDispatchEvent(g_queue, e)) continue; AInputQueue_finishEvent(g_queue, e, dm_cloud_input(e)); }
     return 1;
 }
 static void on_queue_created(ANativeActivity *a, AInputQueue *q) {
@@ -1375,6 +1378,7 @@ static int romfs_readable(ANativeActivity *act, int sdk) {   // 0: the game cann
 }
 static int g_sdk;
 static void game_start(ANativeActivity *act, int late); static void game_start_late(void); static int prep_start(void); static void prep_late(void);
+static void game_run(ANativeActivity *act); static void cloud_done(int quit);
 __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActivity *act, void *saved, size_t saved_size) {
     (void)saved; (void)saved_size;
     g_act = act;
@@ -1415,6 +1419,7 @@ static void game_start_late(void) {   // the main thread, once the data download
     if (g_queue) AInputQueue_detachLooper(g_queue);
     atomic_store(&g_syncing, 0);
     game_start(g_act, 1);
+    if (atomic_load(&g_syncing)) { if (g_queue) AInputQueue_attachLooper(g_queue, ALooper_forThread(), 2, on_input_early, NULL); return; }   // the cloud sync's start screen: still before the game
     if (g_queue && !g_quit) { while (!g_ilooper) usleep(1000); AInputQueue_attachLooper(g_queue, g_ilooper, 1, on_input, NULL); }   // (no input thread when the game was not started)
 }
 static void game_start(ANativeActivity *act, int late) {   // late: after onCreate returned (the data download), so an end asked for here finishes the activity at once
@@ -1426,6 +1431,21 @@ static void game_start(ANativeActivity *act, int late) {   // late: after onCrea
     // the save manager's requests (saves_android.c), before the host mounts the save: an import chosen in the menu or pushed by porter, an export porter asks for
     if (dm_saves_start(g_root)) { LOG("[saves] the request asked the app to end: the game is not started"); g_quit = 1; if (late) act_finish(act); return; }
     if (!romfs_readable(act, sdk)) { g_quit = 1; if (late) act_finish(act); return; }   // after the save manager's requests, which need no RomFS
+    // the save's cloud sync (savecloud_android.c, sync.txt), still before the host mounts the save: its start screen runs on threads of its own and the game starts from
+    // cloud_done on this thread; without sync.txt (or in a trial build) the game starts at once, as before
+    atomic_store(&g_syncing, 1);
+    if (dm_cloud_begin(act, phone_window(), cloud_done)) return;
+    atomic_store(&g_syncing, 0);
+    game_run(act);
+}
+static void cloud_done(int quit) {   // the main thread, once the cloud sync's start ended: the game starts (its input queue to the input thread), or the player chose to end the app
+    if (g_queue) AInputQueue_detachLooper(g_queue);
+    atomic_store(&g_syncing, 0);
+    if (quit) { LOG("cloud: the player cancelled the start: the app ends"); g_quit = 1; act_finish(g_act); return; }
+    game_run(g_act);
+    if (g_queue) { while (!g_ilooper) usleep(1000); AInputQueue_attachLooper(g_queue, g_ilooper, 1, on_input, NULL); }
+}
+static void game_run(ANativeActivity *act) {   // the game itself: settings, the input and host threads
     settings_load(); aspect_variant(act); limit_apply(1);   // (after the variant's env-4x3.txt, which comes after env.txt: Auto gives back what both set)
     dm_haptics_android_start(act, atomic_load(&g_set_rumble)); dm_lan_android_start(act);
     { pthread_t w; if (!pthread_create(&w, NULL, pad_watch, act->vm)) pthread_detach(w); }

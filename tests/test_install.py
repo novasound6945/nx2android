@@ -328,7 +328,9 @@ class RomfsAt(unittest.TestCase):
         self.assertEqual(perms, {'android.permission.VIBRATE': None, install.ACCESS: None, 'android.permission.READ_EXTERNAL_STORAGE': 29,
                                  # local play over the LAN (DM_LAN): sockets, the Wi-Fi address, the multicast lock
                                  'android.permission.INTERNET': None, 'android.permission.ACCESS_NETWORK_STATE': None,
-                                 'android.permission.ACCESS_WIFI_STATE': None, 'android.permission.CHANGE_WIFI_MULTICAST_STATE': None})
+                                 'android.permission.ACCESS_WIFI_STATE': None, 'android.permission.CHANGE_WIFI_MULTICAST_STATE': None,
+                                 # the save's cloud sync (savecloud_android.c): the wake lock its upload holds as the app leaves the screen
+                                 'android.permission.WAKE_LOCK': None})
         app = next(a for tag, a in els if tag == 'application')
         self.assertIs(app['requestLegacyExternalStorage'], True); self.assertIs(app['debuggable'], False)
 

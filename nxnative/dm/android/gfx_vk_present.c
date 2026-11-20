@@ -9,6 +9,7 @@
 #include <math.h>
 #include <time.h>
 #include "overlay_layout.h"
+#include "savecloud.h"
 #include "pixel_font.h"
 #include "overlay_vert.spv.h"
 #include "overlay_frag.spv.h"
@@ -82,6 +83,11 @@ __attribute__((weak)) int dm_menu_detail_step(void) { return 0; }
 __attribute__((weak)) int dm_overlay_fps(void) { return 0; }   // front_android.c: the pause menu's Show FPS
 __attribute__((weak)) int dm_save_note(char *out, int cap) { if (cap > 0) out[0] = 0; return OVX_IDLE; }   // front_android.c: the save manager's rows
 __attribute__((weak)) int dm_save_rows(ov_srow rows[OVM_ROWS_MAX]) { (void)rows; return 0; }
+// savecloud_android.c: the Cloud save rows and the corner note (savecloud.h)
+__attribute__((weak)) int dm_cloud_available(void) { return 0; }
+__attribute__((weak)) int dm_cloud_status(char *note, int cap) { if (cap > 0) note[0] = 0; return DM_CLOUD_OFF; }
+__attribute__((weak)) unsigned dm_cloud_menu_ver(void) { return 0; }
+__attribute__((weak)) int dm_cloud_toast(char *text, int cap, unsigned *id) { (void)text; (void)cap; *id = 0; return 0; }
 __attribute__((weak)) int dm_overlay_custom(int layout, int ctl, float *x, float *y, float *s) { (void)layout; (void)ctl; (void)x; (void)y; *s = 1; return 0; }
 __attribute__((weak)) int dm_overlay_custom_ver(void) { return 0; }
 __attribute__((weak)) int dm_overlay_hidden(int layout, int ctl) { (void)layout; (void)ctl; return 0; }
@@ -229,6 +235,7 @@ enum { SP_DISC = OV_N, SP_BLACK, SP_WHITE, SP_ACCENT, SP_N };   // (black, white
 #define OV_FPS_CHARS "0123456789 FPS-CBATO"   // (the temperature rows: "SOC 52C", "BAT 38C")
 static struct { VkImage img; VkDeviceMemory mem; VkImageView view; VkSampler samp; VkDescriptorSetLayout dsl; VkPipelineLayout layout; VkDescriptorPool pool; VkDescriptorSet set;
                 VkPipeline pipe; VkFormat pfmt; uint32_t w, h, sh, pw, ph, gh, gs; VkBuffer up; VkDeviceMemory upm; uint8_t *px; int uploaded, panel, lay, cver; float sp[SP_N][4];
+                unsigned cmv, tid; float tw;   // the cloud rows' version the panel was drawn at; the corner note's id and width in its row (below the counter's)
                 VkRenderPass rp; VkFramebuffer fb[8]; VkImageView fbview[8]; VkExtent2D fbext[8]; } g_ov;
 static struct { const ov_theme *t; VkImage img; VkDeviceMemory mem; VkImageView view; VkDescriptorSet set; VkBuffer up; VkDeviceMemory upm; uint32_t upk; int ready; } g_tt[2];   // per layout
 // Without dynamic rendering (a Vulkan 1.1 / 1.2 device, V.has_dynrender) the overlay draws in a render pass object over the swapchain image: one pass for the swapchain's
@@ -384,7 +391,7 @@ static void cv_button(const ov_canvas *cv, const float b[4], const char *l, int 
 // The pause menu (overlay_layout.h: the rows, the tabs, the slider's track), in the raster's panel rectangle. Its letters are as large as a row allows (0.30 of
 // its height, about 2.7 mm on a 6.7" phone and 3.6 mm on the 8.8" tablet) and smaller only when the widest row would not fit beside its control
 static const char *const OVM_LABELS[OVM_N] = {"Show gamepad", "Opacity", "Edit layout", "Rumble", "Show FPS", "Mode", "Export save", "Import save", "Face buttons", "Audio output", "Frame rate", "Resolution",
-                                               "Detail distance", "Frame rate limit", "Resume", ""};
+                                               "Detail distance", "Frame rate limit", "Cloud save", "Upload save", "Resume", ""};
 static const char *const OVM_BUTTONS[OVM_N] = {[OVM_EDIT] = "Edit", [OVM_EXPORT] = "Export", [OVM_IMPORT] = "Import", [OVM_AUDIO] = "Select"};   // the rows that are a button: its word
 static const char *const OVM_MODES[2] = {"Handheld", "Docked"};
 static const char *const OVM_DETS[3] = {"1x", "1.5x", "2x"};   // the detail distance factor (front_android.c OVM_DETAIL)
@@ -403,7 +410,8 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
     for (; is > 1; is--) {   // the widest row: its label, a gap and its control
         float need = 0;
         for (int i = 0; i < OVM_RESUME; i++) {
-            float lw = cv_text_w(OVM_LABELS[i], is), cw = i == OVM_MODE ? 2 * (cv_text_w(OVM_MODES[0], is) + sh) : i == OVM_PAD ? 2 * (cv_text_w(OVM_PADS[0], is) + sh) : i == OVM_RATE ? 2 * (cv_text_w(OVM_RATES[0], is) + sh) : i == OVM_RES ? 3 * (cv_text_w(OVM_RESS[1], is) + sh) : i == OVM_DETAIL ? 3 * (cv_text_w(OVM_DETS[1], is) + sh) : i == OVM_LIMIT ? ovm_limit_w(is, sh) : OVM_BUTTONS[i] ? cv_text_w(OVM_BUTTONS[i], is) + 2 * sh : sw + gap + cv_text_w("OFF", is);
+            float lw = cv_text_w(OVM_LABELS[i], is), cw = i == OVM_MODE ? 2 * (cv_text_w(OVM_MODES[0], is) + sh) : i == OVM_PAD ? 2 * (cv_text_w(OVM_PADS[0], is) + sh) : i == OVM_RATE ? 2 * (cv_text_w(OVM_RATES[0], is) + sh) : i == OVM_RES ? 3 * (cv_text_w(OVM_RESS[1], is) + sh) : i == OVM_DETAIL ? 3 * (cv_text_w(OVM_DETS[1], is) + sh) : i == OVM_LIMIT ? ovm_limit_w(is, sh) : i == OVM_CLOUD ? sw + gap + cv_text_w("Uploading", is)
+                     : i == OVM_CLOUD_UP ? cv_text_w("Upload now", is) + 2 * sh : OVM_BUTTONS[i] ? cv_text_w(OVM_BUTTONS[i], is) + 2 * sh : sw + gap + cv_text_w("OFF", is);
             need = fmaxf(need, i == OVM_OPACITY ? fmaxf(lw / 0.38f, cv_text_w("80%", is) / 0.14f) : lw + gap + cw + rh * 0.3f);
         }
         if (need <= rw && cv_text_w(OVM_TAB_NAMES[0], is) < rw / 2 - sh) break;
@@ -435,6 +443,25 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             snprintf(v, sizeof v, "%s", x == OVX_BUSY ? "Exporting..." : x == OVX_DONE ? nm : x == OVX_NOSAVE ? "No save yet" : "Failed");
             while (vs > 1 && cv_text_w(v, vs) > rw - cv_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;
             cv_text(cv, x1 - cv_text_w(v, vs), cy, v, vs, x == OVX_FAILED ? C_ACCENT : C_WHITE);
+        } else if (it == OVM_CLOUD) {   // the sync's switch: on unless this game's sync is off (or a trial build), its status beside it in place of ON / OFF
+            char note[32]; int cs = dm_cloud_status(note, sizeof note), on = cs != DM_CLOUD_DISABLED && cs != DM_CLOUD_TRIAL && cs != DM_CLOUD_OFF; float sx0 = x1 - sw;
+            static const char *const W_[] = {[DM_CLOUD_OFF] = "Off", [DM_CLOUD_DISABLED] = "Off", [DM_CLOUD_TRIAL] = "Trial", [DM_CLOUD_SKIPPED] = "Skipped", [DM_CLOUD_UPTODATE] = "Synced",
+                [DM_CLOUD_PENDING] = "Not sent", [DM_CLOUD_OFFLINE] = "Waiting", [DM_CLOUD_UPLOADING] = "Uploading", [DM_CLOUD_CONFLICT] = "Conflict", [DM_CLOUD_AUTH] = "Token?"};
+            cv_rrect(cv, sx0, cy - sh / 2, x1, cy + sh / 2, sh / 2, on ? C_ACCENT : C_OFF);
+            cv_disc(cv, on ? x1 - sh / 2 : sx0 + sh / 2, cy, sh / 2 - fmaxf(2, sh * 0.1f), on ? C_WHITE : C_KNOB_OFF);
+            const char *word = W_[cs]; cv_text(cv, sx0 - gap - cv_text_w(word, is), cy, word, is, cs == DM_CLOUD_CONFLICT || cs == DM_CLOUD_AUTH ? C_ACCENT : on ? C_WHITE : C_DIM);
+        } else if (it == OVM_CLOUD_UP) {   // Upload now while one is owed; else when the last one went up
+            char note[32], v[48]; int cs = dm_cloud_status(note, sizeof note);
+            if (cs == DM_CLOUD_PENDING || cs == DM_CLOUD_OFFLINE) { float bw = cv_text_w("Upload now", is) + 2 * sh, b[4] = {x1 - bw, cy - rh * 0.30f, bw, rh * 0.60f}; cv_button(cv, b, "Upload now", 0, 0); }
+            else {
+                if (cs == DM_CLOUD_UPLOADING) snprintf(v, sizeof v, "Uploading...");
+                else if (cs == DM_CLOUD_CONFLICT) snprintf(v, sizeof v, "Restart to choose");
+                else if (cs == DM_CLOUD_DISABLED && note[0]) snprintf(v, sizeof v, "On at next start");
+                else if (cs == DM_CLOUD_UPTODATE || cs == DM_CLOUD_AUTH) snprintf(v, sizeof v, note[0] ? "Last %s" : "Nothing to send", note);
+                else snprintf(v, sizeof v, "-");
+                int vs = is; while (vs > 1 && cv_text_w(v, vs) > rw - cv_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;
+                cv_text(cv, x1 - cv_text_w(v, vs), cy, v, vs, C_DIM);
+            }
         } else if (OVM_BUTTONS[it]) {   // a button
             float bw = cv_text_w(OVM_BUTTONS[it], is) + 2 * sh, b[4] = {x1 - bw, cy - rh * 0.30f, bw, rh * 0.60f}; cv_button(cv, b, OVM_BUTTONS[it], 0, 0);
         } else if (it == OVM_MODE || it == OVM_PAD || it == OVM_RATE || it == OVM_RES || it == OVM_DETAIL) {   // two segments, the current one filled: handheld (performance) | docked (resolution); by position | by label
@@ -571,7 +598,7 @@ static void ov_raster(uint8_t *px, uint32_t w, uint32_t h, uint32_t sh) {
 typedef struct { float pos[4], uv[4], alpha; } ov_quad;
 static void ov_draw(VkCommandBuffer cb, const ov_quad *q) { vkCmdPushConstants(cb, g_ov.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof *q, q); vkCmdDraw(cb, 6, 1, 0, 0); }
 static void ov_rect(VkCommandBuffer cb, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, float alpha) {   // screen pixels, texels
-    float W = (float)g_sext.width, H = (float)g_sext.height, tw = (float)g_ov.w, th = (float)(g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh);
+    float W = (float)g_sext.width, H = (float)g_sext.height, tw = (float)g_ov.w, th = (float)(g_ov.h + g_ov.sh + g_ov.ph + 2 * g_ov.gh);
     ov_quad q = {{x0 / W * 2 - 1, y0 / H * 2 - 1, x1 / W * 2 - 1, y1 / H * 2 - 1}, {u0 / tw, v0 / th, u1 / tw, v1 / th}, alpha}; ov_draw(cb, &q);
 }
 static void ov_sprite(VkCommandBuffer cb, int i, float sx, float sy, float r, float alpha) {   // sprite i centred on screen pixel (sx, sy), r screen pixels in half width
@@ -651,6 +678,21 @@ static void ov_frame(VkCommandBuffer cb, int sp, const float b[4], float t, floa
     float x0 = b[0] - b[2] - t, x1 = b[0] + b[2] + t, y0 = b[1] - b[3] - t, y1 = b[1] + b[3] + t;
     ov_block(cb, sp, x0, y0, x1, y0 + t, alpha); ov_block(cb, sp, x0, y1 - t, x1, y1, alpha); ov_block(cb, sp, x0, y0 + t, x0 + t, y1 - t, alpha); ov_block(cb, sp, x1 - t, y0 + t, x1, y1 - t, alpha);
 }
+// The cloud sync's corner note (savecloud_android.c dm_cloud_toast: "Saved", "Waiting", a trial build's): its text rasterized into its own row under the counter's characters
+// when it changes, and drawn in the top right corner on a dark block while it shows (not under the menu)
+static char g_toast[96]; static unsigned g_toast_id; static int g_toast_on;
+static void ov_toast_glyphs(void) {
+    ov_canvas cv = {g_ov.px, g_ov.w, 0, g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh, g_ov.w, g_ov.gh};
+    memset(g_ov.px + 4 * (size_t)cv.y0 * g_ov.w, 0, (size_t)g_ov.w * g_ov.gh * 4);
+    float w = cv_text_w(g_toast, (int)g_ov.gs) + 2 * g_ov.gs; g_ov.tw = fminf(w, (float)g_ov.w);
+    cv_text(&cv, (float)g_ov.gs, g_ov.gh / 2.0f, g_toast, (int)g_ov.gs, C_WHITE);
+}
+static void ov_toast(VkCommandBuffer cb) {
+    float k = (float)g_sext.width / g_ov.w, w = g_ov.tw * k, h = (float)g_ov.gh * k, m = (float)g_sext.height * 0.02f, pad = h * 0.25f, x1 = (float)g_sext.width - m, y0 = m;
+    float bx = g_ov.sp[SP_BLACK][0], by = g_ov.sp[SP_BLACK][1], gy = (float)(g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh);
+    ov_rect(cb, x1 - w - 2 * pad, y0, x1, y0 + h + 2 * pad, bx - 2, by - 2, bx + 2, by + 2, 0.45f);
+    ov_rect(cb, x1 - w - pad, y0 + pad, x1 - pad, y0 + pad + h, 0, gy, g_ov.tw, gy + g_ov.gh, 1);
+}
 static void ov_render(VkCommandBuffer cb, int mode, int menu, int fps) {
     float W = (float)g_sext.width, H = (float)g_sext.height, op = dm_overlay_opacity();
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); int64_t now = (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
@@ -710,6 +752,7 @@ static void ov_render(VkCommandBuffer cb, int mode, int menu, int fps) {
         }
     }
     if (fps && menu < 0) ov_fps(cb, now);
+    if (g_toast_on && menu < 0 && g_ov.tid == g_toast_id) ov_toast(cb);
 }
 // the theme's atlas for a layout into its texture, once (overlay_theme.c reads it at the first present that shows the gamepad in that layout): copied in this
 // present's command buffer; its staging buffer goes at a later present, once the copy has run (its slot's fence signalled, or the slot came round again)
@@ -795,7 +838,7 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
         g_ov.lay = lay; uint32_t sh = ov_layout_sprites(w, h); float mr[4]; ov_menu_rect((float)g_sext.width, (float)g_sext.height, mr);
         g_ov.pw = (uint32_t)(mr[2] / 2) + 1; g_ov.ph = (uint32_t)(mr[3] / 2) + 1; if (g_ov.pw > w) g_ov.pw = w;
         g_ov.gs = (uint32_t)fmaxf(2, roundf(h * 0.022f / PF_CAP)); g_ov.gh = PF_CAP * g_ov.gs + 4;   // the counter's characters: 2.2% of the window's height
-        uint32_t th = h + sh + g_ov.ph + g_ov.gh;
+        uint32_t th = h + sh + g_ov.ph + 2 * g_ov.gh;   // (and a row of the counter's height for the cloud sync's corner note)
         VkImageCreateInfo ic = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0, VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {w, th, 1}, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
         VKCHK(vkCreateImage(V.dev, &ic, NULL, &g_ov.img)); VkMemoryRequirements rq; vkGetImageMemoryRequirements(V.dev, g_ov.img, &rq);
@@ -808,19 +851,22 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
         VkMemoryAllocateInfo bi = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, bq.size, vk_mem_type(bq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0)};
         VKCHK(vkAllocateMemory(V.dev, &bi, NULL, &g_ov.upm)); VKCHK(vkBindBufferMemory(V.dev, g_ov.up, g_ov.upm, 0));
         void *px; VKCHK(vkMapMemory(V.dev, g_ov.upm, 0, VK_WHOLE_SIZE, 0, &px)); g_ov.px = px;
-        g_ov.w = w; g_ov.h = h; g_ov.sh = sh; ov_raster(g_ov.px, w, h, sh); memset(g_ov.px + (size_t)w * (h + sh) * 4, 0, (size_t)w * (g_ov.ph + g_ov.gh) * 4); ov_fps_glyphs();
+        g_ov.w = w; g_ov.h = h; g_ov.sh = sh; ov_raster(g_ov.px, w, h, sh); memset(g_ov.px + (size_t)w * (h + sh) * 4, 0, (size_t)w * (g_ov.ph + 2 * g_ov.gh) * 4); ov_fps_glyphs();
         VkDescriptorImageInfo ii = {g_ov.samp, g_ov.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkWriteDescriptorSet wr = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_ov.set, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ii};
         vkUpdateDescriptorSets(V.dev, 1, &wr, 0, NULL);
-        g_ov.uploaded = 0; g_ov.panel = -1;
+        g_ov.uploaded = 0; g_ov.panel = -1; g_ov.tid = ~0u;
     }
-    uint32_t y0 = 0, rows = g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh;   // the rows to upload
-    if (g_ov.uploaded && menu >= 0 && menu != g_ov.panel) {   // only the panel, after the last copy out of the buffer has run
+    uint32_t y0 = 0, rows = g_ov.h + g_ov.sh + g_ov.ph + 2 * g_ov.gh;   // the rows to upload
+    unsigned cmv = dm_cloud_menu_ver();
+    int want_panel = menu >= 0 && (menu != g_ov.panel || cmv != g_ov.cmv), want_toast = g_toast_on && g_toast_id != g_ov.tid;   // (the cloud rows change without the menu's state)
+    if (g_ov.uploaded && (want_panel || want_toast)) {   // only the panel and / or the note's row, after the last copy out of the buffer has run
         VkFence f[8]; uint32_t n = 0; for (uint32_t i = 0; i < 8; i++) if (i != k) f[n++] = g_pfence[i];
         vkWaitForFences(V.dev, n, f, 1, 1000000000ull);
-        y0 = g_ov.h + g_ov.sh; rows = g_ov.ph; g_ov.uploaded = 0;
+        y0 = want_panel ? g_ov.h + g_ov.sh : g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh; rows = g_ov.h + g_ov.sh + g_ov.ph + 2 * g_ov.gh - y0; g_ov.uploaded = 0;
     }
-    if (menu >= 0 && menu != g_ov.panel) { ov_panel(menu); g_ov.panel = menu; }
+    if (want_panel) { ov_panel(menu); g_ov.panel = menu; g_ov.cmv = cmv; }
+    if (want_toast) { ov_toast_glyphs(); g_ov.tid = g_toast_id; }
     if (!g_ov.uploaded) {
         VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, y0 ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, g_ov.img, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
@@ -916,7 +962,8 @@ static void present_window(vkimg_t *im, const int crop[4], double period, uint64
     VkImageLayout lay = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     int external = dm_external_active();
     int ovm = external ? 0 : dm_overlay_visible(), menu = external ? -1 : dm_menu_state(), fps = dm_overlay_fps();
-    if ((ovm || menu >= 0 || fps) && overlay_ready(cb, k, menu) && (V.has_dynrender || ov_fb(idx))) {   // without dynamic rendering, only with the image's framebuffer
+    g_toast_on = !external && dm_cloud_toast(g_toast, sizeof g_toast, &g_toast_id);
+    if ((ovm || menu >= 0 || fps || g_toast_on) && overlay_ready(cb, k, menu) && (V.has_dynrender || ov_fb(idx))) {   // without dynamic rendering, only with the image's framebuffer
         barrier(cb, tgt, lay, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL); lay = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         VkRenderingAttachmentInfo ca = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, NULL, tview, lay, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE};
         VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO, NULL, 0, {{0, 0}, g_sext}, 1, 0, 1, &ca, NULL, NULL};

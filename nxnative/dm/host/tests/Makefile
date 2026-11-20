@@ -82,6 +82,11 @@ $(B)/t_vorbis: t_vorbis.c ../../third_party/stb_vorbis/stb_vorbis.c | $(B)
 	clang -O1 -g -Wno-unused-function -Wno-tautological-compare -o $@ t_vorbis.c
 $(B)/t_vorbis_divides: t_vorbis.c ../../third_party/stb_vorbis/stb_vorbis.c | $(B)
 	clang -O1 -g -DSTB_VORBIS_DIVIDES_IN_RESIDUE -Wno-unused-function -Wno-tautological-compare -o $@ t_vorbis.c
+# the save's cloud sync (dm/android/savesync.h): no game profile
+run: $(B)/t_savesync
+$(B)/t_savesync: t_savesync.c ../../android/savesync.h ../../android/datasync.h | $(B)
+	clang -O1 -g -Wall -Werror -Wno-unused-function -o $@ t_savesync.c
+	TMPDIR="$(abspath $(B))" $@
 $(B):
 	mkdir -p $@
 .PHONY: run tsan

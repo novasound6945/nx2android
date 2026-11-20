@@ -55,6 +55,9 @@ MANIFEST = ('manifest', [(False, 'package', PKG), (True, 'versionCode', ARGS.ver
     ('uses-permission', [(True, 'name', 'android.permission.ACCESS_NETWORK_STATE')], []),
     ('uses-permission', [(True, 'name', 'android.permission.ACCESS_WIFI_STATE')], []),
     ('uses-permission', [(True, 'name', 'android.permission.CHANGE_WIFI_MULTICAST_STATE')], []),
+    # The save's cloud sync (savecloud_android.c, a files folder with sync.txt): a partial wake lock held up to 15 s while the save goes up as the app leaves the screen
+    # (sleep, HOME). A normal permission (granted at install); without sync.txt nothing takes it
+    ('uses-permission', [(True, 'name', 'android.permission.WAKE_LOCK')], []),
     # A RomFS read from a folder outside the app's files folder (porter install --romfs-at: a game dump another app also reads, a folder on the SD card; env.txt's DM_ROMFS):
     # All files access from Android 11 (an appop, off until porter's `appops set` or the player's switch in Settings turns it on), and on Android 10, which has no
     # All files access, READ_EXTERNAL_STORAGE in the legacy storage view (requestLegacyExternalStorage below; `pm grant`). Neither is asked for at run time, so a port

@@ -12,8 +12,11 @@
 // An asset of version 2 (porter port --data-pointer) names a pointer file as well: the sync thread reads it before files.json (pointer_resolve), without the Authorization
 // header, and takes the server root and credentials it holds (+ the pack's folder under the root); without an answer, the pointer line it last read (kept in the app's
 // internal storage, encrypted as it came); without that, the asset's own address. An asset of version 1 never goes that way
+// The same screen shows the save's cloud sync at the start (savecloud_android.c dm_cloud_begin, after the shader preparation): draw_cloud draws its view (savecloud.h
+// dm_cloud_view, which that file fills), so what the screen looks like is this file's alone; it shows only once a step takes 300 ms, or at once for a question
 #include "dm.h"
 #include "datasync.h"
+#include "savecloud.h"
 #include "pixel_font.h"
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
@@ -38,6 +41,7 @@ static struct {
     void (*done)(void); int pipe[2];
 } S = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, .status = -1, .pipe = {-1, -1}};
 static struct { int on, done, total, gl_tried; } P;   // the shader preparation (dm_prep_begin), under S.mu: the screen shows it instead of the sync
+static struct { int on, gl_tried; } CL;              // the cloud sync's start (dm_cloud_screen_begin), under S.mu: the screen shows its view
 // the pointer (an asset of version 2): its address, key and the pack's folder under the root; the asset's own server (base, auth) for when neither the pointer nor the
 // cache answers; cache: the file in the app's internal storage the last pointer line read is kept in (as it came, encrypted). fresh: the pointer itself answered this run
 static struct { int on, fresh; char pointer[1024], sub[1024], base[1024], auth[600], cache[600]; uint8_t key[32]; } PT;
@@ -264,6 +268,43 @@ static void draw_prep(canvas *c, int done, int total, double el) {   // el: seco
     dur(a, sizeof a, el, ko); if (done > 16 && done < total) dur(b, sizeof b, el * (total - done) / done, ko); else snprintf(b, sizeof b, "-");
     snprintf(t, sizeof t, ko ? "%s 지남, 남은 시간 약 %s" : "%s so far, about %s left", a, b); ctext(c, t, y, 2, RGB(170, 180, 200));
 }
+// The cloud sync's view (savecloud.h dm_cloud_view): a title, small lines, two cards side by side or a row of buttons, a bar, a hint at the bottom. cl_layout places the cards
+// and buttons, for the drawing and for a touch's hit (dm_cloud_screen_hit) alike
+static int cl_canvas_h(int ww, int wh) { int ch = ww > 0 && wh > 0 ? 640 * wh / ww : 360; return ch < 240 ? 240 : ch; }
+static int cl_layout(int cw, int ch, const dm_cloud_view *v, int r[3][4]) {   // the rectangles (x, y, w, h) of the cards, else of the buttons; their count
+    if (v->ncards) { int w = 250, h = 112, gap = 24, x0 = (cw - 2 * w - gap) / 2, y = ch / 2 - 64;
+        for (int i = 0; i < 2; i++) { r[i][0] = x0 + i * (w + gap); r[i][1] = y; r[i][2] = w; r[i][3] = h; } return 2; }
+    int n = v->nbtn, gap = 16, h = 30, w[3], tot = 0;
+    for (int i = 0; i < n; i++) { w[i] = pf_width(dm_overlay_font(), v->btn[i]) + 40; if (w[i] < 150) w[i] = 150; tot += w[i] + (i ? gap : 0); }
+    for (int i = 0, x = (cw - tot) / 2; i < n; x += w[i] + gap, i++) { r[i][0] = x; r[i][1] = ch - 92; r[i][2] = w[i]; r[i][3] = h; }
+    return n;
+}
+static void rect_line(canvas *c, int x, int y, int w, int h, int t, uint32_t col) { fill(c, x, y, w, t, col); fill(c, x, y + h - t, w, t, col); fill(c, x, y, t, h, col); fill(c, x + w - t, y, t, h, col); }
+static void draw_cloud(canvas *c, const dm_cloud_view *v) {
+    const uint32_t ink = RGB(235, 238, 245), dim = RGB(150, 160, 180), acc = RGB(90, 160, 255), box = RGB(34, 38, 48);
+    fill(c, 0, 0, c->w, c->h, RGB(18, 20, 26));
+    int y = v->ncards ? c->h / 2 - 104 : c->h / 2 - 70;
+    ctext_fit(c, v->title, y, 2, ink); y += 26;
+    for (int i = 0; i < 3; i++) if (v->line[i][0]) { ctext_fit(c, v->line[i], y, 1, i == 2 ? dim : RGB(200, 206, 220)); y += 16; }
+    if (v->progress >= 0) { int bw = c->w - 160, bx = 80, f = v->progress > 1000 ? 1000 : v->progress; y += 6;
+        fill(c, bx, y, bw, 8, RGB(50, 55, 68)); fill(c, bx, y, bw * f / 1000, 8, acc);
+        char t[16]; snprintf(t, sizeof t, "%d%%", f / 10); ctext(c, t, y + 24, 1, dim); }
+    int r[3][4], n = cl_layout(c->w, c->h, v, r);
+    for (int i = 0; i < n; i++) {
+        int x = r[i][0], yy = r[i][1], w = r[i][2], h = r[i][3], sel = i == v->sel;
+        fill(c, x, yy, w, h, sel ? RGB(40, 58, 90) : box);
+        if (sel) rect_line(c, x, yy, w, h, 2, acc);
+        if (v->ncards) {
+            const dm_cloud_card *k = &v->card[i]; int cx = x + 12;
+            text(c, k->head, cx, yy + 18, 1, sel ? ink : RGB(200, 206, 220));
+            if (k->newer) { const char *b = korean() ? "더 최근" : "newer"; int bw = pf_width(dm_overlay_font(), b) + 10; fill(c, x + w - bw - 8, yy + 6, bw, 16, acc); text(c, b, x + w - bw - 3, yy + 18, 1, ink); }
+            text(c, k->who, cx, yy + 36, 1, dim);
+            text(c, k->ago, cx, yy + 72, 2, ink);
+            text(c, k->date, cx, yy + 96, 1, RGB(200, 206, 220));
+        } else { int tw = pf_width(dm_overlay_font(), v->btn[i]); text(c, v->btn[i], x + (w - tw) / 2, yy + h / 2 + 5, 1, ink); }
+    }
+    if (v->foot[0]) ctext_fit(c, v->foot, c->h - 28, 1, dim);
+}
 static struct {   // libEGL / libGLESv2, opened here (the host links neither)
     EGLDisplay (*GetDisplay)(EGLNativeDisplayType); EGLBoolean (*Initialize)(EGLDisplay, EGLint *, EGLint *); EGLBoolean (*ChooseConfig)(EGLDisplay, const EGLint *, EGLConfig *, EGLint, EGLint *);
     EGLContext (*CreateContext)(EGLDisplay, EGLConfig, EGLContext, const EGLint *); EGLSurface (*CreateWindowSurface)(EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint *);
@@ -330,12 +371,15 @@ static void *screen_thread(void *a) {
         }
         // drawn only once the sync takes a moment: a launch with the data up to date shows no screen at all; the preparation once it makes parts (EGL opened then)
         int pd = P.done, pt = P.total; if (P.on && pt && !P.gl_tried) { P.gl_tried = 1; G.ok = !gl_load(); if (!G.ok) LOG("[RED] shaders: no EGL / GLES 2: the preparation runs without its screen"); t0 = t; }
-        if (w && G.ok && (P.on ? pt > 0 : t - t0 > 400)) {
+        dm_cloud_view cv; int cl_show = 0;
+        if (CL.on) { dm_cloud_view_get(&cv); cl_show = cv.urgent || t - t0 > 300;   // (savecloud.h: its lock is never held while this file's is taken)
+            if (cl_show && !CL.gl_tried) { CL.gl_tried = 1; G.ok = !gl_load(); if (!G.ok) LOG("[RED] cloud: no EGL / GLES 2: the sync's start runs without its screen"); } }
+        if (w && G.ok && (CL.on ? cl_show : P.on ? pt > 0 : t - t0 > 400)) {
             pthread_mutex_unlock(&S.mu);
             int ww = ANativeWindow_getWidth(w), wh = ANativeWindow_getHeight(w), cw = 640, ch = ww > 0 && wh > 0 ? 640 * wh / ww : 360;
             if (ch < 240) ch = 240;
             if (c.w != cw || c.h != ch) { free(c.px); c.px = malloc((size_t)cw * ch * 4); c.w = cw; c.h = ch; }
-            if (c.px) { if (P.on) draw_prep(&c, pd, pt, (t - t0) / 1000.0); else draw(&c, &p, st, ws, msg, speed); gl_show(&c, w); }
+            if (c.px) { if (CL.on) draw_cloud(&c, &cv); else if (P.on) draw_prep(&c, pd, pt, (t - t0) / 1000.0); else draw(&c, &p, st, ws, msg, speed); gl_show(&c, w); }
             pthread_mutex_lock(&S.mu);
         }
         struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 200 * 1000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
@@ -474,4 +518,30 @@ int dm_prep_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(void)) {
     if (pthread_create(&t, NULL, prep_thread, NULL)) { LOG("[RED] shaders: cannot start the preparation thread"); pthread_mutex_lock(&S.mu); S.finished = 1; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); return 1; }
     pthread_detach(t);
     return 1;
+}
+
+// ---- the save's cloud sync at the start (savecloud_android.c): this screen while it runs; done() on the main thread once dm_cloud_screen_end ends it ----
+int dm_cloud_screen_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(void)) {
+    ALooper *lp = ALooper_forThread();
+    int np[2];   // a pipe of its own, as dm_prep_begin's (it may be called from a looper callback whose fd is removed when it returns)
+    if (!lp || pipe(np) || ALooper_addFd(lp, np[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, sync_ready, NULL) != 1) { LOG("[RED] cloud: no looper on the main thread"); return 0; }
+    pthread_mutex_lock(&S.mu);
+    S.pipe[0] = np[0]; S.pipe[1] = np[1]; S.act = act; if (w && !S.win) S.win = w; S.done = done; S.finished = 0; S.lost = 0; S.released = 0;
+    P.on = 0; CL.on = 1; CL.gl_tried = 0;
+    G.ok = 0; G.prog = 0; G.tex = 0; G.surf = NULL; G.on = NULL;   // (an earlier screen's context is gone with it)
+    pthread_mutex_unlock(&S.mu);
+    pthread_t t;
+    if (pthread_create(&t, NULL, screen_thread, NULL)) { LOG("[RED] cloud: cannot start the screen thread"); ALooper_removeFd(lp, np[0]); close(np[0]); close(np[1]); CL.on = 0; return 0; }
+    pthread_detach(t);
+    return 1;
+}
+void dm_cloud_screen_end(void) { pthread_mutex_lock(&S.mu); if (CL.on) { S.finished = 1; pthread_cond_broadcast(&S.cv); } pthread_mutex_unlock(&S.mu); }
+void dm_cloud_screen_poke(void) { pthread_mutex_lock(&S.mu); pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); }
+int dm_cloud_screen_hit(float x, float y, int *kind) {
+    pthread_mutex_lock(&S.mu); ANativeWindow *w = S.win; int ww = w ? ANativeWindow_getWidth(w) : 0, wh = w ? ANativeWindow_getHeight(w) : 0; pthread_mutex_unlock(&S.mu);
+    if (ww <= 0 || wh <= 0) return -1;
+    dm_cloud_view v; dm_cloud_view_get(&v); int ch = cl_canvas_h(ww, wh), r[3][4], n = cl_layout(640, ch, &v, r);
+    float cx = x * 640.0f / ww, cy = y * (float)ch / wh;
+    for (int i = 0; i < n; i++) if (cx >= r[i][0] && cx < r[i][0] + r[i][2] && cy >= r[i][1] && cy < r[i][1] + r[i][3]) { *kind = v.ncards ? 1 : 2; return i; }
+    return -1;
 }

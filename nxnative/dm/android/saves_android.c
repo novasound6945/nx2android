@@ -155,24 +155,30 @@ int dm_saves_request_import(const char *name) {
     LOG("[saves] %s will be imported at the next start", name); return 0;
 }
 
-static void import_apply(const char *name, const char *req) {
+static int import_apply(const char *name, const char *req) {   // 0 when the folder is the save now
     char src[700], srcd[720], err[600] = "", bk[96] = ""; snprintf(src, sizeof src, "%s/%s", g_dir, name); snprintf(srcd, sizeof srcd, "%s.device", src);
-    if (!name[0] || strchr(name, '/') || name[0] == '.' || !is_dir(src)) { result(req, "result=error\nerror=no save folder %s in %s", name, g_dir); return; }
-    if (!has_entries(src) && !is_dir(srcd)) { result(req, "result=error\nerror=%s is empty", name); return; }
+    if (!name[0] || strchr(name, '/') || name[0] == '.' || !is_dir(src)) { result(req, "result=error\nerror=no save folder %s in %s", name, g_dir); return -1; }
+    if (!has_entries(src) && !is_dir(srcd)) { result(req, "result=error\nerror=%s is empty", name); return -1; }
     int r = dm_saves_export("-before-import", bk, sizeof bk, err, sizeof err);   // the current save first, so an import can be taken back
-    if (r && r != -ENOENT) { result(req, "result=error\nerror=the current save could not be backed up first (%s): nothing was imported", err); return; }
+    if (r && r != -ENOENT) { result(req, "result=error\nerror=the current save could not be backed up first (%s): nothing was imported", err); return -1; }
     if (r) bk[0] = 0;
     const char *from[2] = {src, srcd}, *to[2] = {g_save, g_dev}; char tmp[2][640]; long files = 0; long long bytes = 0;
     for (int k = 0; k < 2; k++) {   // both copies first, then both swaps
         snprintf(tmp[k], sizeof tmp[k], "%s.import", to[k]); rm_tree(tmp[k]);
         if (k == 1 && !is_dir(srcd)) continue;   // no device save in the folder: the game's own stays
         if ((r = copy_tree(from[k], tmp[k], &files, &bytes, err, sizeof err))) { rm_tree(tmp[0]); rm_tree(tmp[1]);
-            result(req, "result=error\nerror=copying %s failed: %s (%s); the save is unchanged", name, err, strerror(-r)); return; }
+            result(req, "result=error\nerror=copying %s failed: %s (%s); the save is unchanged", name, err, strerror(-r)); return -1; }
     }
     for (int k = 0; k < 2; k++) if (is_dir(tmp[k]) && (r = swap_in(tmp[k], to[k]))) {
-        result(req, "result=error\nerror=swapping in %s failed (%s)%s", to[k], strerror(-r), k ? "; the save itself was imported" : ": the save is unchanged"); return; }
+        result(req, "result=error\nerror=swapping in %s failed (%s)%s", to[k], strerror(-r), k ? "; the save itself was imported" : ": the save is unchanged"); return -1; }
     result(req, "result=ok\nname=%s\nbackup=%s\nfiles=%ld\nbytes=%lld", name, bk, files, bytes);
+    return 0;
 }
+// The cloud sync (savecloud_android.c): the trees it archives, and a folder of saves/ it unpacked the server's save into, imported at once (it runs at the start, before the
+// host mounts the save, as dm_saves_start does: the same backup first, the same swap)
+const char *dm_saves_save_path(void) { return g_save; }
+const char *dm_saves_device_path(void) { return g_dev; }
+int dm_saves_import_now(const char *name) { return import_apply(name, "cloud"); }
 static int read_request(const char *file, char *first, int fcap, char *req, int rcap, int *quit) {   // saves/<file>: its first line, its request= token; removed
     char p[640], line[256]; snprintf(p, sizeof p, "%s/%s", g_dir, file);
     FILE *f = fopen(p, "r"); if (!f) return 0;
