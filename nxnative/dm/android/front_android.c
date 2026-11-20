@@ -100,6 +100,8 @@ int dm_notice_begin(ANativeActivity *act, ANativeWindow *w, const char *const ko
 void dm_overlay_redraw(void);   // gfx_vk_present.c (weak default below)
 static void on_window_created(ANativeActivity *a, ANativeWindow *w) { (void)a; pthread_mutex_lock(&g_win_mu); g_win = w; pthread_mutex_unlock(&g_win_mu); dm_sync_window(w);
     if (dm_menu_state() >= 0) dm_overlay_redraw(); }   // (-1 while nothing holds the game, and before it runs)
+__attribute__((weak)) void vk_mem_low(void) {}   // the backend gives back what it can at its next submission (gfx_vk_core.c vk_mem_tick)
+static void on_low_memory(ANativeActivity *a) { (void)a; LOG("[mem] Android says it is low on memory (onLowMemory)"); vk_mem_low(); }
 static void on_window_destroyed(ANativeActivity *a, ANativeWindow *w) { (void)a; (void)w; pthread_mutex_lock(&g_win_mu); g_win = NULL; pthread_mutex_unlock(&g_win_mu); dm_sync_window(NULL); vk_window_lost(); }
 JNIEXPORT void JNICALL Java_org_nx2a_ExternalActivity_externalSurface(JNIEnv *env, jclass cls, jobject surface) {
     (void)cls;
@@ -1571,7 +1573,7 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
     int sdk; { AConfiguration *cfg = AConfiguration_new(); AConfiguration_fromAssetManager(cfg, act->assetManager); g_dpi = AConfiguration_getDensity(cfg); sdk = AConfiguration_getSdkVersion(cfg); AConfiguration_delete(cfg); }
     act->callbacks->onNativeWindowCreated = on_window_created; act->callbacks->onNativeWindowDestroyed = on_window_destroyed;
     act->callbacks->onInputQueueCreated = on_queue_created; act->callbacks->onInputQueueDestroyed = on_queue_destroyed;
-    act->callbacks->onPause = on_pause; act->callbacks->onResume = on_resume; act->callbacks->onWindowFocusChanged = on_window_focus; act->callbacks->onDestroy = on_destroy;
+    act->callbacks->onPause = on_pause; act->callbacks->onResume = on_resume; act->callbacks->onWindowFocusChanged = on_window_focus; act->callbacks->onDestroy = on_destroy; act->callbacks->onLowMemory = on_low_memory;
     ANativeActivity_setWindowFlags(act, AWINDOW_FLAG_KEEP_SCREEN_ON | AWINDOW_FLAG_FULLSCREEN, 0);
     static int started; if (started++) return;   // a second onCreate (configuration change) keeps the running game
     JNIEnv *env = act->env;

@@ -394,6 +394,7 @@ static void *compute_warm(void *arg) {
     for (int i = 0; i < n; i++) {
         uint64_t ck[3] = {keys[i], 0, 0};
         pthread_mutex_lock(&g_cpipe_mu); int have = nvn_hm_get(&g_cpipes, ck) != NULL; pthread_mutex_unlock(&g_cpipe_mu);
+        if (!have && !prewarm_room()) break;   // (the prewarm's floor: compute pipelines hold GPU memory of their own too)
         vkshader_t *cs = have ? NULL : vk_shader(keys[i], 5); if (!cs) continue;
         VkPipeline p = compute_build(cs, 0, 0); made++;
         pthread_mutex_lock(&g_cpipe_mu); if (!nvn_hm_get(&g_cpipes, ck)) nvn_hm_put(&g_cpipes, ck, p); else if (p != (void *)1) vkDestroyPipeline(V.dev, p, NULL); pthread_mutex_unlock(&g_cpipe_mu);
