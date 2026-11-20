@@ -1,0 +1,7 @@
+# A-Train: All Aboard! Tourism (Unity 2019.4.18f1, IL2CPP, SDK 10.4.1), update 1.0.1 (v65536). Played on a Retroid Pocket Nova and a Retroid Pocket 6 (Adreno 740, Turnip).
+status	experimental
+package	org.nx2a.t0100a3e010e56000
+orientation	landscape
+# Docked play by touch (the menus need a tap now and then): Unity 2019.4's player takes the panel's 1280x720 values as pixels of its 1920x1080 docked screen, so taps
+# landed off the menu items (hle_touch.c DM_TOUCH_DOCKED, the same player as Unpacking's).
+env	DM_TOUCH_DOCKED=screen
