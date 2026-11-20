@@ -40,6 +40,34 @@ static void save(stv_canvas *c, const char *dir, const char *name) {
     assert(lit > 200);   // text was drawn
     printf("%s\n", p);
 }
+// The touch areas against the picture: each of the n targets answers a touch somewhere (scanned every 2 px), all inside the window, none overlapping; and where a
+// target can be chosen (sel not NULL), what changes when it is chosen (its edge, its fill, the ring 6 design px out) is where it answers a touch, give or take that ring
+static const stv_view *TV; static const dm_cloud_view *TQ;
+static int hit_at(int W, int H, float x, float y) { int k = 0; return TQ ? stv_hit(TQ, W, H, x, y, &k) : stv_page_hit(TV, W, H, x, y); }
+static void touch_check(stv_canvas *c, stv_view *v, int n, int *sel, int nsel) {
+    int W = c->w, H = c->h, bx[8][4]; assert(n <= 8);
+    for (int i = 0; i < n; i++) { bx[i][0] = bx[i][1] = 1 << 30; bx[i][2] = bx[i][3] = -1; }
+    for (int y = 0; y < H; y += 2) for (int x = 0; x < W; x += 2) { int k = hit_at(W, H, x + 0.5f, y + 0.5f); if (k < 0) continue; assert(k < n);
+        if (x < bx[k][0]) bx[k][0] = x; if (y < bx[k][1]) bx[k][1] = y; if (x > bx[k][2]) bx[k][2] = x; if (y > bx[k][3]) bx[k][3] = y; }
+    for (int i = 0; i < n; i++) {
+        assert(bx[i][2] >= 0 && bx[i][0] > 4 && bx[i][1] > 4 && bx[i][2] < W - 4 && bx[i][3] < H - 4);
+        for (int j = 0; j < i; j++) assert(bx[i][2] < bx[j][0] || bx[j][2] < bx[i][0] || bx[i][3] < bx[j][1] || bx[j][3] < bx[i][1]);
+    }
+    if (!sel) return;
+    float sc = (W / 1280.0f < H / 720.0f ? W / 1280.0f : H / 720.0f) * 1.3f; int keep = *sel; size_t np = (size_t)W * H;
+    uint32_t *a = malloc(np * 4); assert(a);
+    for (int i = 0; i < nsel; i++) {
+        *sel = -1; stv_draw(c, v, 0); memcpy(a, c->px, np * 4); *sel = i; stv_draw(c, v, 0);
+        int d[4] = {1 << 30, 1 << 30, -1, -1};
+        for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) if (a[(size_t)y * W + x] != c->px[(size_t)y * W + x]) {
+            if (x < d[0]) d[0] = x; if (y < d[1]) d[1] = y; if (x > d[2]) d[2] = x; if (y > d[3]) d[3] = y; }
+        int out = (int)(8 * sc) + 3;
+        assert(d[2] >= 0);
+        assert(d[0] <= bx[i][0] + 2 && d[1] <= bx[i][1] + 2 && d[2] >= bx[i][2] - 2 && d[3] >= bx[i][3] - 2);   // the touch area within what is drawn
+        assert(d[0] >= bx[i][0] - out && d[1] >= bx[i][1] - out && d[2] <= bx[i][2] + out && d[3] <= bx[i][3] + out);   // and what is drawn no wider than it and its ring
+    }
+    free(a); *sel = keep; stv_draw(c, v, 0);
+}
 int main(int argc, char **argv) {
     if (argc != 7) { fprintf(stderr, "usage: start_screen_fixture regular.ttf bold.ttf font.nxpf out_dir w h\n"); return 2; }
     size_t rn = 0, bn = 0, pn = 0; uint8_t *reg = slurp(argv[1], &rn), *bold = slurp(argv[2], &bn), *pf = slurp(argv[3], &pn);
@@ -72,14 +100,13 @@ int main(int argc, char **argv) {
     head(&v, icon, ""); v.ask = &q; stv_draw(&c, &v, 0); save(&c, argv[4], "3-conflict");
     int kind = 0; assert(stv_hit(&q, W, H, W * 0.75f, H * 0.5f, &kind) == 1 && kind == 1); assert(stv_hit(&q, W, H, W * 0.25f, H * 0.5f, &kind) == 0 && kind == 1);
     assert(stv_hit(&q, W, H, 2, 2, &kind) == -1);
+    TQ = &q; touch_check(&c, &v, 2, &q.sel, 2);
     // 4. the cloud cannot be reached
     memset(&q, 0, sizeof q); q.ask = 1; q.icon = DM_CLOUD_ICON_OFFLINE; q.progress = -1; q.nbtn = 2; q.sel = 0;
     snprintf(q.title, sizeof q.title, "클라우드에 연결할 수 없어요"); snprintf(q.line[0], sizeof q.line[0], "이 기기 세이브로 시작해요. 연결되면 나중에 올려요.");
     snprintf(q.btn[0], sizeof q.btn[0], "그래도 플레이"); snprintf(q.btn[1], sizeof q.btn[1], "다시 시도"); snprintf(q.count, sizeof q.count, "7초 뒤 자동으로 시작해요"); q.count_permille = 300;
     stv_draw(&c, &v, 0); save(&c, argv[4], "4-offline");
-    { float sc = W / 1280.0f < H / 720.0f ? W / 1280.0f : H / 720.0f; int seen[2] = {0, 0};   // the buttons, 260 wide 20 apart around the middle
-      for (int y = 0; y < H; y += 4) for (int i = 0; i < 2; i++) { int k = stv_hit(&q, W, H, W * 0.5f + (i ? 140 : -140) * sc, (float)y, &kind); if (k >= 0) { assert(k == i && kind == 2); seen[i]++; } }
-      assert(seen[0] && seen[1] && seen[0] < 60 * sc / 4 + 2); }
+    touch_check(&c, &v, 2, &q.sel, 2);
     // 5. another device has progress the cloud has not got
     memset(&q, 0, sizeof q); q.ask = 1; q.icon = DM_CLOUD_ICON_WARN; q.progress = -1; q.nbtn = 2; q.count_permille = -1;
     snprintf(q.title, sizeof q.title, "다른 기기에 아직 안 올라온 진행이 있어요");
@@ -108,14 +135,12 @@ int main(int argc, char **argv) {
     snprintf(ln->item[2], sizeof ln->item[2], "앱 설정"); snprintf(ln->note[2], sizeof ln->note[2], "데이터 6.2 GB · 바로 시작 꺼짐");
     snprintf(ln->start, sizeof ln->start, "게임 시작"); snprintf(ln->keys, sizeof ln->keys, "↑↓ 고르기 · A 선택"); ln->sel = 3;
     stv_draw(&c, &v, 0); save(&c, argv[4], "12-launcher");
-    for (int i = 0; i < 4; i++) {   // each item answers a touch at its middle; nothing between Start and the items' last
-        float sc = W / 1280.0f < H / 720.0f ? W / 1280.0f : H / 720.0f, bw = W / sc, bh = H / sc; int wide = W * 2 >= H * 3;
-        float ih = wide ? 60 : 64, list = 3 * ih + 30 + (wide ? 24 : 32) + 72, y0 = wide ? (bh - list) / 2 : (bh - (72 + 36 + 1.448f * 14 + 36 + list)) / 2 + 72 + 36 + 1.448f * 14 + 36;
-        float x = wide ? (bw - 916) / 2 + 396 + 260 : bw / 2, y = i < 3 ? y0 + i * (ih + 10) + ih / 2 : y0 + 3 * (ih + 10) + (wide ? 24 : 32) + 36;
-        assert(stv_page_hit(&v, W, H, x * sc, y * sc) == i);
-        if (i == 3) assert(stv_page_hit(&v, W, H, x * sc, (y - 36 - (wide ? 12 : 16)) * sc) == -1);
-    }
-    assert(stv_page_hit(&v, W, H, 2, 2) == -1);
+    TQ = NULL; TV = &v; touch_check(&c, &v, 4, &ln->sel, 4); assert(stv_page_hit(&v, W, H, 2, 2) == -1);
+    // 12 with a long name: smaller to 80 %, then two lines at a space (side by side: the column of 340)
+    snprintf(v.name, sizeof v.name, "A열차로 가자 시작해요 관광지 개발"); stv_draw(&c, &v, 0); save(&c, argv[4], "18-launcher-long-name");
+    snprintf(v.name, sizeof v.name, "슈퍼로봇대전Y"); stv_draw(&c, &v, 0); save(&c, argv[4], "19-launcher-korean-name");
+    snprintf(v.name, sizeof v.name, "The Legend of Heroes: Trails through Daybreak II"); stv_draw(&c, &v, 0); save(&c, argv[4], "20-launcher-two-line-name");
+    snprintf(v.name, sizeof v.name, "SUPER ROBOT WARS Y");
     // 13. Start pressed before the shaders were ready: it says it starts once they are (B cancels)
     ln->status[1].state = STV_RUN; snprintf(ln->status[1].text, sizeof ln->status[1].text, "셰이더 준비 중 · 62%%");
     ln->waiting = 1; snprintf(ln->start_sub, sizeof ln->start_sub, "준비가 끝나면 바로 시작해요 · B 취소"); v.anim = 1;
@@ -132,10 +157,9 @@ int main(int argc, char **argv) {
     snprintf(cp->back, sizeof cp->back, "클라우드 세이브로 되돌리기"); snprintf(cp->back_note, sizeof cp->back_note, "A 길게 · 이 기기 세이브는 백업 1칸에"); cp->hold = 380;
     snprintf(cp->keys, sizeof cp->keys, "↑↓←→ 고르기 · A 선택 · B 돌아가기"); cp->sel = 0; cp->checked = 0;
     stv_draw(&c, &v, 0); save(&c, argv[4], "14-cloud-settings");
-    { float sc = W / 1280.0f < H / 720.0f ? W / 1280.0f : H / 720.0f, bw = W / sc, bh = H / sc, x0 = (bw - 1040) / 2, y0 = 96 + (bh - 960) / 2; if (y0 < 48) y0 = 48;
-      float top = y0 + 80 + 1.448f * 14 + 14, mh = 44 + 1.448f * 19 + 4 + 1.448f * 14;
-      for (int i = 0; i < 3; i++) assert(stv_page_hit(&v, W, H, (x0 + 260) * sc, (top + i * (mh + 12) + mh / 2) * sc) == i);
-      float uy = top + 40 + 4 * 1.448f * 15 + 36 + 12; assert(stv_page_hit(&v, W, H, (x0 + 800) * sc, (uy + 28) * sc) == 3); assert(stv_page_hit(&v, W, H, (x0 + 800) * sc, (uy + 68 + 28) * sc) == 4); }
+    touch_check(&c, &v, 5, &cp->sel, 5);
+    { stv_view e; memset(&e, 0, sizeof e); e.screen = STV_SCREEN_CLOUD; e.cp.nrow = 4;   // datasync_android.c's lnr_hit: a view with nothing but its page
+      for (int y = 0; y < H; y += 7) for (int x = 0; x < W; x += 7) assert(stv_page_hit(&e, W, H, x, y) == stv_page_hit(&v, W, H, x, y)); }
     // 15. the app's settings
     v.screen = STV_SCREEN_APP; stv_apppage *ap = &v.ap;
     snprintf(ap->title, sizeof ap->title, "앱 설정"); snprintf(ap->label[0], sizeof ap->label[0], "시작"); snprintf(ap->label[1], sizeof ap->label[1], "게임 데이터");
@@ -145,10 +169,9 @@ int main(int argc, char **argv) {
     snprintf(ap->verify, sizeof ap->verify, "데이터 다시 확인"); snprintf(ap->clear, sizeof ap->clear, "셰이더 캐시 비우기");
     snprintf(ap->note, sizeof ap->note, "데이터 다시 확인은 파일을 하나씩 검사해 망가진 것만 다시 받아요."); snprintf(ap->keys, sizeof ap->keys, "↑↓ 고르기 · A 선택 · B 돌아가기"); ap->sel = -1;
     stv_draw(&c, &v, 0); save(&c, argv[4], "15-app-settings");
-    { float sc = W / 1280.0f < H / 720.0f ? W / 1280.0f : H / 720.0f, bw = W / sc, bh = H / sc, x0 = (bw - 720) / 2, y0 = 120 + (bh - 960) / 2; if (y0 < 56) y0 = 56;
-      float sy = y0 + 1.448f * 30 + 28 + 1.448f * 14 + 10, sh = 40 + 1.448f * 18 + 4 + 42, by = sy + sh + 28 + 1.448f * 14 + 10 + 40 + 3 * 1.448f * 15 + 24 + 10;
-      assert(stv_page_hit(&v, W, H, (x0 + 360) * sc, (sy + sh / 2) * sc) == 0); assert(stv_page_hit(&v, W, H, (x0 + 100) * sc, (by + 28) * sc) == 1);
-      assert(stv_page_hit(&v, W, H, (x0 + 620) * sc, (by + 28) * sc) == 2); assert(stv_page_hit(&v, W, H, (x0 + 360) * sc, (by + 28) * sc) == -1); }
+    touch_check(&c, &v, 3, &ap->sel, 3);
+    { stv_view e; memset(&e, 0, sizeof e); e.screen = STV_SCREEN_APP;
+      for (int y = 0; y < H; y += 7) for (int x = 0; x < W; x += 7) assert(stv_page_hit(&e, W, H, x, y) == stv_page_hit(&v, W, H, x, y)); }
     // 16. the last run was played without the sync
     memset(&q, 0, sizeof q); q.ask = 1; q.style = DM_CLOUD_STYLE_LIST; q.progress = -1; q.count_permille = -1; q.nbtn = 3; q.sel = 0;
     snprintf(q.title, sizeof q.title, "지난번에 동기화 없이 한 플레이가 있어요"); snprintf(q.line[0], sizeof q.line[0], "테스트로 하셨다면 클라우드 세이브로 되돌리세요");
@@ -158,9 +181,7 @@ int main(int argc, char **argv) {
     snprintf(q.bnote[1], sizeof q.bnote[1], "클라우드 세이브는 백업해 둬요"); snprintf(q.bnote[2], sizeof q.bnote[2], "이번에도 올리지 않고 플레이");
     snprintf(q.foot, sizeof q.foot, "되돌린 테스트 세이브는 이 기기 백업 1칸에 남아요"); snprintf(q.foot2, sizeof q.foot2, "↑↓ 고르기 · A 선택");
     head(&v, icon, ""); v.ask = &q; stv_draw(&c, &v, 0); save(&c, argv[4], "16-after-test");
-    { float sc = W / 1280.0f < H / 720.0f ? W / 1280.0f : H / 720.0f; int seen[3] = {0, 0, 0};
-      for (int y = 0; y < H; y += 3) { int k = stv_hit(&q, W, H, W * 0.5f, (float)y, &kind); if (k >= 0) { assert(kind == 2 && k < 3); seen[k]++; } }
-      assert(seen[0] && seen[1] && seen[2] && seen[0] > seen[1] && seen[0] < 68 * sc / 3 + 2); }
+    TQ = &q; touch_check(&c, &v, 3, &q.sel, 3);
     // 17. manual: progress not uploaded
     memset(&q, 0, sizeof q); q.ask = 1; q.style = DM_CLOUD_STYLE_PAIR; q.progress = -1; q.count_permille = -1; q.nbtn = 2;
     snprintf(q.title, sizeof q.title, "이 기기에 안 올린 진행이 있어요"); snprintf(q.line[0], sizeof q.line[0], "수동 모드 · 올릴지 정해 주세요");
@@ -168,9 +189,7 @@ int main(int argc, char **argv) {
     snprintf(q.row_k[1], sizeof q.row_k[1], "클라우드"); snprintf(q.row_v[1], sizeof q.row_v[1], "이 기기에서 올림 · 오늘 오전 6:41");
     snprintf(q.btn[0], sizeof q.btn[0], "A · 올리기"); snprintf(q.btn[1], sizeof q.btn[1], "B · 그대로 두기"); snprintf(q.foot, sizeof q.foot, "클라우드 세이브 설정에서 자동으로 바꿀 수 있어요");
     stv_draw(&c, &v, 0); save(&c, argv[4], "17-manual-pending");
-    { float sc = W / 1280.0f < H / 720.0f ? W / 1280.0f : H / 720.0f; int seen[2] = {0, 0};
-      for (int y = 0; y < H; y += 3) for (int i = 0; i < 2; i++) { int k = stv_hit(&q, W, H, W * 0.5f + (i ? 154 : -154) * sc, (float)y, &kind); if (k >= 0) { assert(k == i && kind == 2); seen[i]++; } }
-      assert(seen[0] && seen[1]); assert(stv_hit(&q, W, H, W * 0.5f, 2, &kind) == -1); }
+    touch_check(&c, &v, 2, NULL, 0); assert(stv_hit(&q, W, H, W * 0.5f, 2, &kind) == -1);
     // the rate: a steady 10 MB/s reads as 10 MB/s, and the time left as what is left at that speed
     stv_rate r; stv_rate_reset(&r);
     for (int t = 0; t <= 20000; t += 250) stv_rate_feed(&r, t, t * 10485.76, 1e9 - t * 10485.76);

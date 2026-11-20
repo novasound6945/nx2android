@@ -1,6 +1,8 @@
-// The start screen's drawing (startscreen.h): the design's px are for a 1280 px wide screen and scale with the window (s = min(w / 1280, h / 720): 1.5 on a 1920 x 1080
-// Retroid Pocket 6, 1 on a 1280 x 960 Retroid Pocket Nova). A screen narrower than 3:2 stacks the game's name over the steps; a wider one puts them side by side.
-// Every line of text stays one line: one too long for its place is drawn smaller (to 80 %), then cut with an ellipsis (a name may break at its spaces, two lines at most)
+// The start screen's drawing (startscreen.h): the design's px are for a 1280 px wide screen and scale with the window, drawn 1.3 times as big as the mock-ups
+// (s = 1.3 min(w / 1280, h / 720): 1.95 on a 1920 x 1080 Retroid Pocket 6, 1.3 on a 1280 x 960 Retroid Pocket Nova; a page too tall for that at 16:9 is drawn a little
+// smaller, 1 at least). The margins and the widths follow the window where the mock-ups' did not fit. A screen narrower than 3:2 stacks the game's name over the steps; a
+// wider one puts them side by side. Every line of text stays one line: one too long for its place is drawn smaller (to 80 %), then cut with an ellipsis (a game's name
+// may break at its spaces, two lines at most)
 #include "startscreen.h"
 #include "pixel_font.h"
 #include <math.h>
@@ -236,7 +238,31 @@ static void step_icon(stv_canvas *c, int state, float x, float y, float px, doub
 
 // ---- the steps ----
 typedef struct { float s, W, H; } box;   // s: px a design px; W, H: the canvas in design px
-static box box_of(int w, int h) { box b; b.s = fminf(w / 1280.0f, h / 720.0f); if (b.s <= 0) b.s = 1; b.W = w / b.s; b.H = h / b.s; return b; }
+#define ZOOM 1.3f   // the design's px against the mock-ups'
+static float s_of(int w, int h) { float s = fminf(w / 1280.0f, h / 720.0f); return s > 0 ? s : 1; }
+static box box_k(int w, int h, float k) { box b; b.s = s_of(w, h) * k; b.W = w / b.s; b.H = h / b.s; return b; }
+static box box_of(int w, int h) { return box_k(w, h, ZOOM); }
+// a page that needs need_w x need_h design px: ZOOM when it fits, else as big as fits (1 at least)
+static box box_need(int w, int h, float need_w, float need_h) {
+    float s0 = s_of(w, h), k = fminf(ZOOM, fminf(w / (s0 * need_w), h / (s0 * need_h)));
+    return box_k(w, h, k < 1 ? 1 : k);
+}
+// a game's name in two lines at most (maxw pixels, bold, letter spacing sp pixels at *sz): one line, made smaller to 80 % when that is enough; else broken at the last
+// space that lets the first line fit, both lines at the size the longer needs (80 % at least; line() cuts what is still too long). Returns the lines, *sz their size
+static int name_lines(const char *name, float *sz, float sp, float maxw, char *l1, char *l2, size_t cap) {
+    float size = *sz, w = text_w(name, 1, size, sp); l2[0] = 0; snprintf(l1, cap, "%s", name);
+    if (w <= maxw || maxw <= 0) return 1;
+    if (w * 0.8f <= maxw) { *sz = size * maxw / w; return 1; }
+    const char *cut = NULL;
+    for (int pass = 0; pass < 2 && !cut; pass++) { float k = pass ? 0.8f : 1;   // the last space whose line fits at the full size, else at 80 %
+        for (const char *q = name; *q; q++) if (*q == ' ') { size_t n = (size_t)(q - name); if (n >= cap) break; char t[400]; if (n >= sizeof t) break;
+            memcpy(t, name, n); t[n] = 0; if (text_w(t, 1, size * k, sp * k) <= maxw) cut = q; else break; } }
+    if (!cut) return 1;   // no space to break at: one line, made to fit
+    size_t n = (size_t)(cut - name); memcpy(l1, name, n); l1[n] = 0; snprintf(l2, cap, "%s", cut + 1);
+    float wm = fmaxf(text_w(l1, 1, size, sp), text_w(l2, 1, size, sp));
+    if (wm > maxw) *sz = size * fmaxf(0.8f, maxw / wm);
+    return 2;
+}
 // a card of steps at (x, y) design px, w wide; returns its height
 typedef struct { float pad_y, pad_x, size, icon, gap; } card_style;
 static float card_h(card_style k) { float rh = fmaxf(k.icon, LHN * k.size); return 2 * k.pad_y + STV_NSTEPS * rh + (STV_NSTEPS - 1) * k.gap; }
@@ -272,6 +298,7 @@ static float hints_h(const stv_view *v, float size) { return !v->hint[0] ? 0 : L
 static void foot(stv_canvas *c, const char *t, box b) { line(c, t, b.W / 2 * b.s, (b.H - 36 - LHN * 14) * b.s, 0, 0, 14 * b.s, DIM2, CENTER, (b.W - 64) * b.s, 0); }
 static int wide_of(int w, int h) { return h > 0 && w * 2 >= h * 3; }   // 3:2 and wider: side by side
 
+static void head_line(stv_canvas *c, const stv_view *v, box b, float y, int empty);
 static void draw_steps(stv_canvas *c, const stv_view *v, double t) {
     box b = box_of(c->w, c->h); float s = b.s; int bar = v->bar >= 0, icon = v->icon && v->icon_w > 0 && v->icon_h > 0;
     if (!wide_of(c->w, c->h)) {   // Main.dc.html / Download.dc.html: the name over the steps, all centred
@@ -279,28 +306,19 @@ static void draw_steps(stv_canvas *c, const stv_view *v, double t) {
         float gap = bar ? 36 : 40, cw = bar ? 720 : 584; card_style k = bar ? (card_style){24, 32, 17, 20, 12} : (card_style){28, 32, 18, 22, 14};
         float hs = bar ? 14 : 15, hh = hints_h(v, hs);
         float total = 72 + gap + (bar ? bar_h(14) + gap : 0) + card_h(k) + (hh ? gap + hh : 0), y = (b.H - total) / 2, cx = b.W / 2;
-        // the head: the icon (72, radius 16), 20 px, the name (30 bold, -0.5 spacing) over the version (15)
-        char nm[400]; float nsz = 30 * s, nw = fit(nm, sizeof nm, v->name, 1, &nsz, -0.5f * s, (fminf(b.W - 128, 1000) - 92) * s) / s;
-        float vw = text_w(v->version, 0, 15 * s, 0) / s, tw = fmaxf(nw, vw), x0 = cx - (92 + tw) / 2, ty = y + (72 - (LHN * 30 + 4 + LHN * 15)) / 2;
-        if (icon) image(c, v->icon, v->icon_w, v->icon_h, x0 * s, y * s, 72 * s, 16 * s);
-        text_at(c, nm, (x0 + 92) * s, (ty + (LHN * 30 - LHN * nsz / s) / 2 + ASC * nsz / s) * s, 1, nsz, INK, -0.5f * s);
-        line(c, v->version, (x0 + 92) * s, (ty + LHN * 30 + 4) * s, 0, 0, 15 * s, DIM, LEFT, tw * s, 0);
-        y += 72 + gap;
+        head_line(c, v, b, y, 0); y += 72 + gap;   // the head: the icon (72, radius 16), 20 px, the name (30 bold, -0.5 spacing) over the version (15)
         if (bar) { bar_block(c, v, b, cx - 360, y, 720, 14); y += bar_h(14) + gap; }
         steps_card(c, v, b, cx - cw / 2, y, cw, k, t); y += card_h(k) + gap;
         if (hh) hints(c, v, cx, y, hs, s, b.W - 64, CENTER);
     } else {   // Wide.dc.html: the icon, name and version in a column of 340 at the left, the progress and the steps at the right
         background(c, 1, 320 * s, c->h / 2.0f, 480 * s, 100 * s, 0.16f, v->glow);
-        float lx = 80, lw = 340, rx = lx + lw + 56, rw = b.W - 80 - rx; card_style k = {22, 28, 17, 20, 12};
-        // the name: two lines at most, broken at a space only (a line too long for 340 is made to fit)
-        char l1[400] = "", l2[400] = ""; float sz = 30 * s; const char *sp = NULL;
-        if (text_w(v->name, 1, sz, -0.5f * s) > lw * s) for (const char *q = v->name; *q; q++) if (*q == ' ') { char tmp[400]; size_t n = (size_t)(q - v->name); if (n >= sizeof tmp) break;
-            memcpy(tmp, v->name, n); tmp[n] = 0; if (text_w(tmp, 1, sz, -0.5f * s) <= lw * s) sp = q; else break; }
-        if (sp) { size_t n = (size_t)(sp - v->name); memcpy(l1, v->name, n); l1[n] = 0; snprintf(l2, sizeof l2, "%s", sp + 1); } else snprintf(l1, sizeof l1, "%s", v->name);
-        int lines = l2[0] ? 2 : 1; float nl = 1.25f * 30, lh = 96 + 18 + lines * nl + 18 + LHN * 15, ly = (b.H - lh) / 2;
+        float lx = fminf(80, fmaxf(48, (b.W - 340 - 56 - 560) / 2)), lw = 340, rx = lx + lw + 56, rw = b.W - lx - rx; card_style k = {22, 28, 17, 20, 12};   // (the right side 560 wide at least while the margins can give)
+        // the name: two lines at most, broken at a space only
+        char l1[400], l2[400]; float sz = 30 * s; int lines = name_lines(v->name, &sz, -0.5f * s, lw * s, l1, l2, sizeof l1);
+        float nl = 1.25f * 30, lh = 96 + 18 + lines * nl + 18 + LHN * 15, ly = (b.H - lh) / 2;
         if (icon) image(c, v->icon, v->icon_w, v->icon_h, lx * s, ly * s, 96 * s, 22 * s);
-        line(c, l1, lx * s, (ly + 114) * s, nl * s, 1, 30 * s, INK, LEFT, lw * s, -0.5f * s);
-        if (lines > 1) line(c, l2, lx * s, (ly + 114 + nl) * s, nl * s, 1, 30 * s, INK, LEFT, lw * s, -0.5f * s);
+        line(c, l1, lx * s, (ly + 114) * s, nl * s, 1, sz, INK, LEFT, lw * s, -0.5f * sz / 30);
+        if (lines > 1) line(c, l2, lx * s, (ly + 114 + nl) * s, nl * s, 1, sz, INK, LEFT, lw * s, -0.5f * sz / 30);
         line(c, v->version, lx * s, (ly + 114 + lines * nl + 18) * s, 0, 0, 15 * s, DIM, LEFT, lw * s, 0);
         float hh = hints_h(v, 13), rh = (bar ? bar_h(12) + 28 : 0) + card_h(k) + (hh ? 28 + hh : 0), y = (b.H - rh) / 2;
         if (bar) { bar_block(c, v, b, rx, y, rw, 12); y += bar_h(12) + 28; }
@@ -311,7 +329,9 @@ static void draw_steps(stv_canvas *c, const stv_view *v, double t) {
 }
 
 // ---- a question of the cloud's start (Conflict / Offline / OtherDevice.dc.html): an icon, a title and body, two cards or a row of buttons, a countdown, hints ----
-typedef struct { float y_icon, y_title, y_body, y_main, y_cbar, y_count, y_foot, y_card; int body_b, nbody; float card_hgt, head_h[2]; float r[3][4]; int n; } qlay;
+typedef struct { float y_icon, y_title, y_body, y_main, y_cbar, y_count, y_foot, y_card, card_w; int body_b, nbody; float card_hgt, head_h[2]; float r[3][4]; int n; } qlay;
+// the top of a column total high, centred, kept off the top (24) and off what the bottom keeps (bottom)
+static float q_top(box b, float total, float bottom) { float y = (b.H - total) / 2; if (y + total > b.H - bottom) y = b.H - bottom - total; return fmaxf(24, y); }
 static float card_head(const dm_cloud_card *k) { return k->newer ? LHN * 13 + 8 : LHN * 15; }
 static float card_inner(const dm_cloud_card *k) { return card_head(k) + 10 + LHN * 40 + 10 + LHN * 16 + (k->size[0] ? 10 + 6 + 1 + 14 + LHN * 15 : 0); }
 static qlay q_layout(const dm_cloud_view *q, box b) {   // in design px (the rectangles too); no font needed (a touch is tested on the main thread)
@@ -319,15 +339,17 @@ static qlay q_layout(const dm_cloud_view *q, box b) {   // in design px (the rec
     if (q->style == DM_CLOUD_STYLE_LIST || q->style == DM_CLOUD_STYLE_PAIR) {   // AfterTest / ManualPending.dc.html: the title and its line, the card of rows, the buttons, a line; 36 apart
         int list = q->style == DM_CLOUD_STYLE_LIST, n = list ? (q->nbtn > 3 ? 3 : q->nbtn) : 2, nr = q->nrow > 2 ? 2 : q->nrow;
         float th = LHN * 30 + (q->line[0][0] ? 10 + LHN * 16 : 0), ch = nr ? 40 + nr * LHN * 15 + (nr - 1) * 12 : 0, bh = list ? (n ? 68 + (n - 1) * 70 : 0) : 64, fh = q->foot[0] ? LHN * 14 : 0;
-        float y = (b.H - (th + (ch ? 36 + ch : 0) + 36 + bh + (fh ? 36 + fh : 0))) / 2;
-        L.y_title = y; L.y_body = y + LHN * 30 + 10; y += th + 36;
-        if (ch) { L.y_card = y; L.card_hgt = ch; y += ch + 36; }
-        L.y_main = y; L.n = n;
+        float bottom = q->foot2[0] ? 36 + LHN * 14 + 12 : 24, fixed = th + ch + bh + fh, ng = (ch ? 1 : 0) + 1 + (fh ? 1 : 0), gap = 36;   // (foot2: the bottom line)
+        if (fixed + ng * gap > b.H - bottom - 24) gap = fmaxf(16, (b.H - bottom - 24 - fixed) / ng);   // 36 apart, closer on a short screen
+        float rw = fminf(600, b.W - 120), y = q_top(b, fixed + ng * gap, bottom);
+        L.y_title = y; L.y_body = y + LHN * 30 + 10; y += th + gap;
+        if (ch) { L.y_card = y; L.card_hgt = ch; y += ch + gap; }
+        L.card_w = rw + 56; L.y_main = y; L.n = n;   // (the card: 600 plus its padding, CSS's content box)
         for (int i = 0; i < n; i++) {
-            if (list) { L.r[i][0] = b.W / 2 - 300; L.r[i][1] = y + (i ? 68 + 10 + (i - 1) * 70 : 0); L.r[i][2] = 600; L.r[i][3] = i ? 60 : 68; }
-            else { L.r[i][0] = b.W / 2 - 300 + i * 308; L.r[i][1] = y; L.r[i][2] = 292; L.r[i][3] = 64; }
+            if (list) { L.r[i][0] = b.W / 2 - rw / 2; L.r[i][1] = y + (i ? 68 + 10 + (i - 1) * 70 : 0); L.r[i][2] = rw; L.r[i][3] = i ? 60 : 68; }
+            else { float w = (rw - 16) / 2; L.r[i][0] = b.W / 2 - rw / 2 + i * (w + 16); L.r[i][1] = y; L.r[i][2] = w; L.r[i][3] = 64; }
         }
-        L.y_foot = y + bh + 36;
+        L.y_foot = y + bh + gap;
         return L;
     }
     L.nbody = !!q->line[0][0] + !!q->line[1][0]; L.body_b = L.nbody == 2;
@@ -339,12 +361,14 @@ static qlay q_layout(const dm_cloud_view *q, box b) {   // in design px (the rec
     else if (q->nbtn) { hs[nb] = 60; ys[nb++] = &L.y_main; }
     if (q->count[0] && q->nbtn && !q->ncards) { hs[nb] = 4; ys[nb++] = &L.y_cbar; }
     int nf = !!q->foot[0] + !!q->foot2[0]; if (nf) { hs[nb] = nf == 2 ? LHN * 15 + 8 + LHN * 14 : LHN * 14; ys[nb++] = &L.y_foot; }
-    float total = 0; for (int i = 0; i < nb; i++) total += hs[i] + (i ? gap : 0);
-    float cnt = q->count[0] && q->nbtn && !q->ncards ? 12 + LHN * 14 : 0; total += cnt;
-    float y = (b.H - total) / 2;
+    float fixed = 0; for (int i = 0; i < nb; i++) fixed += hs[i];
+    float cnt = q->count[0] && q->nbtn && !q->ncards ? 12 + LHN * 14 : 0; fixed += cnt;
+    if (nb > 1 && fixed + (nb - 1) * gap > b.H - 48) gap = fmaxf(16, (b.H - 48 - fixed) / (nb - 1));   // closer on a short screen
+    float y = q_top(b, fixed + (nb - 1) * gap, 24);
     for (int i = 0; i < nb; i++) { *ys[i] = y; y += hs[i] + gap; if (ys[i] == &L.y_cbar) { L.y_count = y - gap + 12; y += cnt; } }
     L.y_body = L.y_title + LHN * 30 + (L.body_b ? 12 : 10);
-    if (q->ncards) { L.n = 2; for (int i = 0; i < 2; i++) { L.r[i][0] = b.W / 2 - 456 + i * 472; L.r[i][1] = L.y_main; L.r[i][2] = 440; L.r[i][3] = L.card_hgt; } }
+    if (q->ncards) { float cw = fminf(912, b.W - 64), w = (cw - 32) / 2; L.n = 2;   // two cards of 440, 32 apart (narrower to keep 32 at the sides)
+        for (int i = 0; i < 2; i++) { L.r[i][0] = b.W / 2 - cw / 2 + i * (w + 32); L.r[i][1] = L.y_main; L.r[i][2] = w; L.r[i][3] = L.card_hgt; } }
     else { L.n = q->nbtn > 3 ? 3 : q->nbtn; float tw = L.n * 260 + (L.n - 1) * 20;
         for (int i = 0; i < L.n; i++) { L.r[i][0] = b.W / 2 - tw / 2 + i * 280; L.r[i][1] = L.y_main; L.r[i][2] = 260; L.r[i][3] = 60; } }
     return L;
@@ -362,7 +386,7 @@ static void draw_pick(stv_canvas *c, const dm_cloud_view *q, box b, qlay L) {   
     line(c, q->title, cx * s, L.y_title * s, 0, 1, 30 * s, INK, CENTER, (b.W - 64) * s, 0);
     line(c, q->line[0], cx * s, L.y_body * s, 0, 0, 16 * s, DIM, CENTER, (b.W - 64) * s, 0);
     if (L.card_hgt > 0) {   // (the rows' names are 48 bytes here: copied into the card's 32-byte columns would cut them, so drawn the same way by hand)
-        float x = cx - 328, w = 656; rrect(c, x * s, L.y_card * s, w * s, L.card_hgt * s, 16 * s, CARD, 1);   // (width 600 plus its padding: CSS's content box)
+        float w = L.card_w, x = cx - w / 2; rrect(c, x * s, L.y_card * s, w * s, L.card_hgt * s, 16 * s, CARD, 1);
         for (int i = 0; i < q->nrow && i < 2; i++) { float top = L.y_card + 20 + i * (LHN * 15 + 12);
             float kw = line(c, q->row_k[i], (x + 28) * s, top * s, 0, 0, 15 * s, DIM, LEFT, (w - 56) * 0.45f * s, 0) / s;
             line(c, q->row_v[i], (x + w - 28) * s, top * s, 0, 0, 15 * s, INK, RIGHT, (w - 56 - kw - 16) * s, 0); }
@@ -471,13 +495,15 @@ static int para(stv_canvas *c, const char *s, float x, float top, float maxw, fl
     }
     return n;
 }
-static void head_line(stv_canvas *c, const stv_view *v, box b, float y) {   // the narrow screens' head (Main.dc.html's): the icon 72, the name over the version, centred
+static void head_line(stv_canvas *c, const stv_view *v, box b, float y, int empty) {   // the narrow screens' head (Main.dc.html's): the icon 72 (empty: an empty square
+    // without one), the name (two lines at most) over the version, centred against the icon
     float s = b.s, cx = b.W / 2; int icon = v->icon && v->icon_w > 0 && v->icon_h > 0;
-    char nm[400]; float nsz = 30 * s, nw = fit(nm, sizeof nm, v->name, 1, &nsz, -0.5f * s, (fminf(b.W - 128, 1000) - 92) * s) / s;
-    float vw = text_w(v->version, 0, 15 * s, 0) / s, tw = fmaxf(nw, vw), x0 = cx - (92 + tw) / 2, ty = y + (72 - (LHN * 30 + 4 + LHN * 15)) / 2;
-    if (icon) image(c, v->icon, v->icon_w, v->icon_h, x0 * s, y * s, 72 * s, 16 * s); else rrect(c, x0 * s, y * s, 72 * s, 72 * s, 16 * s, EDGE, 1);
-    text_at(c, nm, (x0 + 92) * s, (ty + (LHN * 30 - LHN * nsz / s) / 2 + ASC * nsz / s) * s, 1, nsz, INK, -0.5f * s);
-    line(c, v->version, (x0 + 92) * s, (ty + LHN * 30 + 4) * s, 0, 0, 15 * s, DIM, LEFT, tw * s, 0);
+    char l1[400], l2[400]; float nsz = 30 * s, maxw = fminf(b.W - 128, 1000) - 92; int lines = name_lines(v->name, &nsz, -0.5f * s, maxw * s, l1, l2, sizeof l1);
+    float sp = -0.5f * nsz / 30, nw = fminf(maxw, fmaxf(text_w(l1, 1, nsz, sp), lines > 1 ? text_w(l2, 1, nsz, sp) : 0) / s), nl = lines > 1 ? 1.25f * 30 : LHN * 30;
+    float vw = text_w(v->version, 0, 15 * s, 0) / s, tw = fminf(maxw, fmaxf(nw, vw)), x0 = cx - (92 + tw) / 2, ty = y + (72 - (lines * nl + 4 + LHN * 15)) / 2;
+    if (icon) image(c, v->icon, v->icon_w, v->icon_h, x0 * s, y * s, 72 * s, 16 * s); else if (empty) rrect(c, x0 * s, y * s, 72 * s, 72 * s, 16 * s, EDGE, 1);
+    for (int i = 0; i < lines; i++) line(c, i ? l2 : l1, (x0 + 92) * s, (ty + i * nl) * s, nl * s, 1, nsz, INK, LEFT, maxw * s, sp);
+    line(c, v->version, (x0 + 92) * s, (ty + lines * nl + 4) * s, 0, 0, 15 * s, DIM, LEFT, tw * s, 0);
 }
 static void foot_at(stv_canvas *c, const char *t, box b, float bottom, float size) { line(c, t, b.W / 2 * b.s, (b.H - bottom - LHN * size) * b.s, 0, 0, size * b.s, DIM2, CENTER, (b.W - 64) * b.s, 0); }
 
@@ -486,37 +512,35 @@ static llay ln_layout(box b, int wide) {
     llay L; memset(&L, 0, sizeof L);
     float ih = wide ? 60 : 64, mt = wide ? 24 : 32, list = 3 * ih + 3 * 10 + mt + 72, x, y;
     if (!wide) { float total = 72 + 36 + LHN * 14 + 36 + list; L.head_y = (b.H - total) / 2; L.status_y = L.head_y + 72 + 36; y = L.status_y + LHN * 14 + 36; x = b.W / 2 - 260; }
-    else { L.colx = (b.W - 916) / 2; x = L.colx + 340 + 56; y = (b.H - list) / 2; }
+    else { float gap = fminf(56, fmaxf(32, b.W - 96 - 860)); L.colx = (b.W - 860 - gap) / 2; x = L.colx + 340 + gap; y = (b.H - list) / 2; }   // (the columns 56 apart, less to keep 48 at the sides)
     for (int i = 0; i < 3; i++) { L.r[i][0] = x; L.r[i][1] = y + i * (ih + 10); L.r[i][2] = 520; L.r[i][3] = ih; }
     L.r[3][0] = x; L.r[3][1] = y + 3 * (ih + 10) + mt; L.r[3][2] = 520; L.r[3][3] = 72;
     return L;
 }
-static void status_at(stv_canvas *c, const stv_status *st, float x, float top, float s, float gap, double t) {   // the icon (16) and the words (14), top: the line's
+static void status_at(stv_canvas *c, const stv_status *st, float x, float top, float s, float gap, float maxw, double t) {   // the icon (16) and the words (14), top: the
+    // line's; maxw: the words' room (0: as they are)
     step_icon(c, st->state, x * s, (top + (LHN * 14 - 16) / 2) * s, 16 * s, t);
-    line(c, st->text, (x + 16 + gap) * s, top * s, 0, 0, 14 * s, st->state == STV_RUN ? INK : st->state == STV_FAIL ? WARN : DIM, LEFT, 0, 0);
+    line(c, st->text, (x + 16 + gap) * s, top * s, 0, 0, 14 * s, st->state == STV_RUN ? INK : st->state == STV_FAIL ? WARN : DIM, LEFT, maxw * s, 0);
 }
 static void badge_a(stv_canvas *c, float s, float cx, float cy) { disc(c, cx * s, cy * s, 14 * s, BG, 0.18f); line(c, "A", cx * s, (cy - LHN * 14 / 2) * s, 0, 1, 14 * s, BG, CENTER, 0, 0); }
 static void draw_launcher(stv_canvas *c, const stv_view *v, double t) {
     box b = box_of(c->w, c->h); float s = b.s; int wide = wide_of(c->w, c->h); const stv_launcher *n = &v->ln; llay L = ln_layout(b, wide);
     if (!wide) {   // Launcher.dc.html: the head, the three statuses in a row, the items
         background(c, 1, c->w / 2.0f, (b.H / 2 - 100) * s, 600 * s, 110 * s, 0.16f, v->glow);
-        head_line(c, v, b, L.head_y);
+        head_line(c, v, b, L.head_y, 1);
         float w[STV_NSTEPS], tot = 0;
         for (int i = 0; i < STV_NSTEPS; i++) { w[i] = 16 + 6 + text_w(n->status[i].text, 0, 14 * s, 0) / s; tot += w[i] + (i ? 22 : 0); }
         float x = b.W / 2 - tot / 2;
-        for (int i = 0; i < STV_NSTEPS; i++) { status_at(c, &n->status[i], x, L.status_y, s, 6, t); x += w[i] + 22; }
+        for (int i = 0; i < STV_NSTEPS; i++) { status_at(c, &n->status[i], x, L.status_y, s, 6, 0, t); x += w[i] + 22; }
     } else {   // LauncherWide.dc.html: the icon (88), the name (two lines at most), the version and the statuses in a column of 340 at the left, the items at the right
         background(c, 1, (L.colx + 108) * s, (b.H / 2 - 10) * s, 460 * s, 100 * s, 0.16f, v->glow);
-        float lw = 340, nl = 1.25f * 28; char l1[400] = "", l2[400] = ""; const char *sp = NULL; float sz = 28 * s;
-        if (text_w(v->name, 1, sz, -0.5f * s) > lw * s) for (const char *q = v->name; *q; q++) if (*q == ' ') { char tmp[400]; size_t k = (size_t)(q - v->name); if (k >= sizeof tmp) break;
-            memcpy(tmp, v->name, k); tmp[k] = 0; if (text_w(tmp, 1, sz, -0.5f * s) <= lw * s) sp = q; else break; }
-        if (sp) { size_t k = (size_t)(sp - v->name); memcpy(l1, v->name, k); l1[k] = 0; snprintf(l2, sizeof l2, "%s", sp + 1); } else snprintf(l1, sizeof l1, "%s", v->name);
-        int lines = l2[0] ? 2 : 1; float h = 88 + 22 + lines * nl + 6 + LHN * 14 + 22 + 3 * LHN * 14 + 2 * 10, y = (b.H - h) / 2, x = L.colx;
+        float lw = 340, nl = 1.25f * 28; char l1[400], l2[400]; float sz = 28 * s; int lines = name_lines(v->name, &sz, -0.5f * s, lw * s, l1, l2, sizeof l1);
+        float h = 88 + 22 + lines * nl + 6 + LHN * 14 + 22 + 3 * LHN * 14 + 2 * 10, y = (b.H - h) / 2, x = L.colx;
         if (v->icon && v->icon_w > 0 && v->icon_h > 0) image(c, v->icon, v->icon_w, v->icon_h, x * s, y * s, 88 * s, 20 * s); else rrect(c, x * s, y * s, 88 * s, 88 * s, 20 * s, EDGE, 1);
         y += 88 + 22;
-        line(c, l1, x * s, y * s, nl * s, 1, 28 * s, INK, LEFT, lw * s, -0.5f * s); if (lines > 1) line(c, l2, x * s, (y + nl) * s, nl * s, 1, 28 * s, INK, LEFT, lw * s, -0.5f * s);
+        line(c, l1, x * s, y * s, nl * s, 1, sz, INK, LEFT, lw * s, -0.5f * sz / 28); if (lines > 1) line(c, l2, x * s, (y + nl) * s, nl * s, 1, sz, INK, LEFT, lw * s, -0.5f * sz / 28);
         y += lines * nl + 6; line(c, v->version, x * s, y * s, 0, 0, 14 * s, DIM, LEFT, lw * s, 0); y += LHN * 14 + 22;
-        for (int i = 0; i < STV_NSTEPS; i++) { status_at(c, &n->status[i], x, y, s, 8, t); y += LHN * 14 + 10; }
+        for (int i = 0; i < STV_NSTEPS; i++) { status_at(c, &n->status[i], x, y, s, 8, lw - 24, t); y += LHN * 14 + 10; }
     }
     float ls = wide ? 17 : 18, ns = wide ? 13 : 14;
     for (int i = 0; i < 3; i++) {
@@ -542,14 +566,24 @@ static void draw_launcher(stv_canvas *c, const stv_view *v, double t) {
     if (n->keys[0]) foot_at(c, n->keys, b, wide ? 24 : 36, wide ? 13 : 14);
 }
 
-typedef struct { float x0, y0, top, mh, note_y, rx, rw, card_y, card_h, r[5][4]; } clay;   // r: the modes (0..2), Upload now (3), Back to the cloud save (4)
+// the two pages: the title (30 bold) and the room under it; the keys' line at the bottom (14, 28 up) and the room above it; the sides kept 32 wide
+#define PG_TITLE (LHN * 30 + 28)
+#define PG_FOOT (16 + LHN * 14 + 28)
+static float pg_top(box b, float content) { return fmaxf(32, (b.H - PG_FOOT - content) / 2); }   // centred above the keys' line
+typedef struct { float x0, cw, lw, y0, top, mh, note_y, rx, rw, card_y, card_h, r[5][4]; int note_n; } clay;   // r: the modes (0..2), Upload now (3), Back to the cloud
+// save (4); cw the page's width, lw the modes' (the mock-up's 1040 and 520: narrower where the window is, the modes giving first); note_n: the note's lines
+static float cp_mh(void) { return 44 + LHN * 19 + 4 + LHN * 14; }
+static float cp_content(int note_n) { return PG_TITLE + LHN * 14 + 14 + 3 * cp_mh() + 2 * 12 + 16 + note_n * 1.5f * 13; }   // the left column, the taller
+static box cp_box(int w, int h) { return box_need(w, h, 880 + 64, 32 + cp_content(2) + PG_FOOT); }
 static clay cp_layout(const stv_cloudpage *p, box b) {
     clay L; memset(&L, 0, sizeof L);
-    L.x0 = (b.W - 1040) / 2; L.y0 = fmaxf(48, 96 + (b.H - 960) / 2); L.top = L.y0 + 80;
-    float y = L.top + LHN * 14 + 2 + 12; L.mh = 44 + LHN * 19 + 4 + LHN * 14;
-    for (int i = 0; i < 3; i++) { L.r[i][0] = L.x0; L.r[i][1] = y + i * (L.mh + 12); L.r[i][2] = 520; L.r[i][3] = L.mh; }
-    L.note_y = y + 3 * L.mh + 2 * 12 + 12 + 4;
-    L.rx = L.x0 + 560; L.rw = 480; L.card_y = y; int n = p->nrow < 0 ? 0 : p->nrow > 4 ? 4 : p->nrow;
+    L.cw = fminf(1040, b.W - 64); L.rw = fminf(480, L.cw - 460); L.lw = L.cw - 40 - L.rw; L.x0 = (b.W - L.cw) / 2;
+    L.note_n = b.H - PG_FOOT - 32 >= cp_content(3) ? 3 : 2;
+    L.y0 = pg_top(b, cp_content(L.note_n)); L.top = L.y0 + PG_TITLE;
+    float y = L.top + LHN * 14 + 14; L.mh = cp_mh();
+    for (int i = 0; i < 3; i++) { L.r[i][0] = L.x0; L.r[i][1] = y + i * (L.mh + 12); L.r[i][2] = L.lw; L.r[i][3] = L.mh; }
+    L.note_y = y + 3 * L.mh + 2 * 12 + 16;
+    L.rx = L.x0 + L.lw + 40; L.card_y = y; int n = p->nrow < 0 ? 0 : p->nrow > 4 ? 4 : p->nrow;
     L.card_h = 40 + n * LHN * 15 + (n > 1 ? (n - 1) * 12 : 0);
     float uy = L.card_y + L.card_h + 12;
     L.r[3][0] = L.rx; L.r[3][1] = uy; L.r[3][2] = L.rw; L.r[3][3] = 56;
@@ -567,10 +601,10 @@ static void kv_card(stv_canvas *c, float s, float x, float y, float w, float h, 
         line(c, val[i], (x + w - pad) * s, top * s, 0, 0, 15 * s, col_of(col[i]), RIGHT, (w - 2 * pad - kw - 16) * s, 0); }
 }
 static void draw_cloudpage(stv_canvas *c, const stv_view *v) {
-    box b = box_of(c->w, c->h); float s = b.s; const stv_cloudpage *p = &v->cp; clay L = cp_layout(p, b);
+    box b = cp_box(c->w, c->h); float s = b.s; const stv_cloudpage *p = &v->cp; clay L = cp_layout(p, b);
     background(c, 0, 0, 0, 0, 0, 0, 0);
-    page_title(c, p->title, v->name, L.x0, 1040, L.y0, s);
-    line(c, p->label[0], L.x0 * s, L.top * s, 0, 0, 14 * s, DIM, LEFT, 520 * s, 0);
+    page_title(c, p->title, v->name, L.x0, L.cw, L.y0, s);
+    line(c, p->label[0], L.x0 * s, L.top * s, 0, 0, 14 * s, DIM, LEFT, L.lw * s, 0);
     for (int i = 0; i < 3; i++) {   // the modes: a radio, the name (19 bold) over what it does (14); the one chosen with the accent's edge
         const float *r = L.r[i]; int sel = p->sel == i && !p->modes_off, on = p->checked == i;
         if (sel) edged(c, s, r, 16, 2, ACC, CARD_SEL); else edged(c, s, r, 16, 2, EDGE, CARD);
@@ -580,7 +614,7 @@ static void draw_cloudpage(stv_canvas *c, const stv_view *v) {
         line(c, p->mode[i], tx * s, (r[1] + 22) * s, 0, 1, 19 * s, p->modes_off && !on ? DIM2 : INK, LEFT, tw * s, 0);
         line(c, p->desc[i], tx * s, (r[1] + 22 + LHN * 19 + 4) * s, 0, 0, 14 * s, p->modes_off && !on ? DIM2 : BODY, LEFT, tw * s, 0);
     }
-    if (p->note[0]) para(c, p->note, L.x0 * s, L.note_y * s, 520 * s, 13 * s, 1.5f * 13 * s, DIM2, LEFT, 3);
+    if (p->note[0]) para(c, p->note, L.x0 * s, L.note_y * s, L.lw * s, 13 * s, 1.5f * 13 * s, DIM2, LEFT, L.note_n);
     line(c, p->label[1], L.rx * s, L.top * s, 0, 0, 14 * s, DIM, LEFT, L.rw * s, 0);
     kv_card(c, s, L.rx, L.card_y, L.rw, L.card_h, p->nrow > 4 ? 4 : p->nrow, p->key, p->val, p->col, 24);
     const float *u = L.r[3];   // Upload now
@@ -594,26 +628,40 @@ static void draw_cloudpage(stv_canvas *c, const stv_view *v) {
     if (!p->back_off && p->hold > 0) { float hw = k[2] * (p->hold > 1000 ? 1000 : p->hold) / 1000.0f; rrect_clip(c, k[0] * s, k[1] * s, k[2] * s, k[3] * s, 14 * s, RED_HOLD, 0.22f, (k[0] + hw) * s); }
     float bw = line(c, p->back, (k[0] + 24) * s, k[1] * s, k[3] * s, 0, 16 * s, p->back_off ? DIM2 : RED_INK, LEFT, (k[2] - 48) * 0.55f * s, 0) / s;
     line(c, p->back_note, (k[0] + k[2] - 24) * s, k[1] * s, k[3] * s, 0, 13 * s, p->back_off ? DIM2 : RED_DIM, RIGHT, (k[2] - 48 - bw - 16) * s, 0);
-    if (p->keys[0]) foot_at(c, p->keys, b, 36, 14);
+    if (p->keys[0]) foot_at(c, p->keys, b, 28, 14);
 }
 
-typedef struct { float x0, y0, lab1, lab2, note_y, sw[4], card[4], btn[2][4]; } alay;
+// the app's page: one column of 720 (AppSettings.dc.html), or where that is too tall for the window, two (the switch at the left, the data's card, its buttons and the
+// note at the right; each half of the page's width)
+typedef struct { float x0, w, y0, lab1, lab2, lab2x, labw, note_x, note_y, note_w, sw[4], card[4], btn[2][4]; } alay;
+static float ap_sh(void) { return 40 + LHN * 18 + 4 + 2 * 1.5f * 14; }
+static float ap_data(void) { return 40 + 3 * LHN * 15 + 2 * 12 + 10 + 56 + 10 + 2 * 1.5f * 13; }   // the data's card, the buttons, the note's two lines
+static float ap_one(void) { return PG_TITLE + LHN * 14 + 10 + ap_sh() + 28 + LHN * 14 + 10 + ap_data(); }
+static float ap_two(void) { return PG_TITLE + LHN * 14 + 10 + fmaxf(ap_sh(), ap_data()); }
+static box ap_box(int w, int h) {
+    box b = box_of(w, h);
+    return b.H >= 32 + ap_one() + PG_FOOT ? b : box_need(w, h, 880 + 64, 32 + ap_two() + PG_FOOT);
+}
 static alay ap_layout(box b) {
     alay L; memset(&L, 0, sizeof L);
-    L.x0 = (b.W - 720) / 2; L.y0 = fmaxf(56, 120 + (b.H - 960) / 2);
-    float y = L.y0 + LHN * 30 + 28; L.lab1 = y; y += LHN * 14 + 10;
-    float sh = 40 + LHN * 18 + 4 + 2 * 1.5f * 14; L.sw[0] = L.x0; L.sw[1] = y; L.sw[2] = 720; L.sw[3] = sh; y += sh + 28;
-    L.lab2 = y; y += LHN * 14 + 10;
-    float ch = 40 + 3 * LHN * 15 + 2 * 12; L.card[0] = L.x0; L.card[1] = y; L.card[2] = 720; L.card[3] = ch; y += ch + 10;
-    for (int i = 0; i < 2; i++) { L.btn[i][0] = L.x0 + i * 365; L.btn[i][1] = y; L.btn[i][2] = 355; L.btn[i][3] = 56; }
-    L.note_y = y + 56 + 10;
+    int two = b.H < 32 + ap_one() + PG_FOOT; float sh = ap_sh(), ch = 40 + 3 * LHN * 15 + 2 * 12, y, cw, cx;
+    if (!two) { L.w = cw = 720; L.x0 = cx = (b.W - 720) / 2; L.y0 = pg_top(b, ap_one()); L.labw = 720; }
+    else { L.w = fminf(1040, b.W - 64); L.x0 = (b.W - L.w) / 2; cw = L.labw = (L.w - 40) / 2; cx = L.x0 + cw + 40; L.y0 = pg_top(b, ap_two()); }
+    y = L.y0 + PG_TITLE; L.lab1 = y; y += LHN * 14 + 10;
+    L.sw[0] = L.x0; L.sw[1] = y; L.sw[2] = cw; L.sw[3] = sh;
+    if (!two) { y += sh + 28; L.lab2 = y; y += LHN * 14 + 10; } else L.lab2 = L.lab1;
+    L.lab2x = cx;
+    L.card[0] = cx; L.card[1] = y; L.card[2] = cw; L.card[3] = ch; y += ch + 10;
+    float bw = (cw - 10) / 2;   // (the mock-up's 355, 10 apart)
+    for (int i = 0; i < 2; i++) { L.btn[i][0] = cx + i * (bw + 10); L.btn[i][1] = y; L.btn[i][2] = bw; L.btn[i][3] = 56; }
+    L.note_x = cx; L.note_y = y + 56 + 10; L.note_w = cw;
     return L;
 }
 static void draw_apppage(stv_canvas *c, const stv_view *v) {
-    box b = box_of(c->w, c->h); float s = b.s; const stv_apppage *p = &v->ap; alay L = ap_layout(b);
+    box b = ap_box(c->w, c->h); float s = b.s; const stv_apppage *p = &v->ap; alay L = ap_layout(b);
     background(c, 0, 0, 0, 0, 0, 0, 0);
-    page_title(c, p->title, v->name, L.x0, 720, L.y0, s);
-    line(c, p->label[0], L.x0 * s, L.lab1 * s, 0, 0, 14 * s, DIM, LEFT, 720 * s, 0);
+    page_title(c, p->title, v->name, L.x0, L.w, L.y0, s);
+    line(c, p->label[0], L.x0 * s, L.lab1 * s, 0, 0, 14 * s, DIM, LEFT, L.labw * s, 0);
     const float *r = L.sw;   // the switch's card: the name (18), two lines (14, 1.5), the switch (56 x 32) at the right
     if (p->sel == 0) edged(c, s, r, 16, 2, ACC, CARD); else rrect(c, r[0] * s, r[1] * s, r[2] * s, r[3] * s, 16 * s, CARD, 1);
     line(c, p->quick, (r[0] + 24) * s, (r[1] + 20) * s, 0, 0, 18 * s, INK, LEFT, (r[2] - 48 - 56 - 20) * s, 0);
@@ -621,18 +669,19 @@ static void draw_apppage(stv_canvas *c, const stv_view *v) {
     float tx = r[0] + r[2] - 24 - 56, ty = r[1] + (r[3] - 32) / 2;
     rrect(c, tx * s, ty * s, 56 * s, 32 * s, 16 * s, p->quick_on ? ACC : TRACK_OFF, 1);
     disc(c, (tx + (p->quick_on ? 28 : 4) + 12) * s, (ty + 4 + 12) * s, 12 * s, p->quick_on ? 0xFFFFFFu : BODY, 1);
-    line(c, p->label[1], L.x0 * s, L.lab2 * s, 0, 0, 14 * s, DIM, LEFT, 720 * s, 0);
+    line(c, p->label[1], L.lab2x * s, L.lab2 * s, 0, 0, 14 * s, DIM, LEFT, L.labw * s, 0);
     kv_card(c, s, L.card[0], L.card[1], L.card[2], L.card[3], p->nrow > 3 ? 3 : p->nrow, p->key, p->val, p->col, 24);
     for (int i = 0; i < 2; i++) {
         const float *k = L.btn[i]; int off = i ? p->clear_off : p->verify_off;
         if (p->sel == i + 1) edged(c, s, k, 14, 2, ACC, CARD_SEL); else rrect(c, k[0] * s, k[1] * s, k[2] * s, k[3] * s, 14 * s, BTN, 1);
         line(c, i ? p->clear : p->verify, (k[0] + k[2] / 2) * s, k[1] * s, k[3] * s, 0, 16 * s, off ? DIM2 : INK, CENTER, (k[2] - 32) * s, 0);
     }
-    if (p->note[0]) para(c, p->note, L.x0 * s, L.note_y * s, 720 * s, 13 * s, 1.5f * 13 * s, DIM2, LEFT, 2);
-    if (p->keys[0]) foot_at(c, p->keys, b, 36, 14);
+    if (p->note[0]) para(c, p->note, L.note_x * s, L.note_y * s, L.note_w * s, 13 * s, 1.5f * 13 * s, DIM2, LEFT, 2);
+    if (p->keys[0]) foot_at(c, p->keys, b, 28, 14);
 }
 int stv_page_hit(const stv_view *v, int w, int h, float x, float y) {
-    box b = box_of(w, h); float X = x / b.s, Y = y / b.s; const float *r[5]; int n = 0;
+    box b = v->screen == STV_SCREEN_CLOUD ? cp_box(w, h) : v->screen == STV_SCREEN_APP ? ap_box(w, h) : box_of(w, h);   // (each page's, as it is drawn)
+    float X = x / b.s, Y = y / b.s; const float *r[5]; int n = 0;
     llay ll; clay cl; alay al;
     if (v->screen == STV_SCREEN_LAUNCHER) { ll = ln_layout(b, wide_of(w, h)); for (int i = 0; i < 4; i++) r[n++] = ll.r[i]; }
     else if (v->screen == STV_SCREEN_CLOUD) { cl = cp_layout(&v->cp, b); for (int i = 0; i < 5; i++) r[n++] = cl.r[i]; }
