@@ -319,7 +319,7 @@ static void build_launcher(stv_view *v, const snap_t *x, const stv_step *steps, 
         if (ci->progress >= 0) { snprintf(t, sizeof t, ko ? "클라우드 세이브 받는 중 · %d%%" : "Downloading the cloud save · %d%%", ci->progress / 10); st_set(&s[2], STV_RUN, t); }
         else st_set(&s[2], STV_RUN, L("클라우드 세이브 확인 중", "Checking the cloud save")); }
     else if (ci->skipped) st_set(&s[2], STV_SKIP, L("클라우드 세이브 · 건너뜀", "Cloud save · skipped"));
-    else if (!ci->avail) st_set(&s[2], steps[STV_CLOUD].state == STV_SKIP ? STV_SKIP : STV_WAIT, steps[STV_CLOUD].state == STV_SKIP ? L("클라우드 세이브 · 사용 안 함", "Cloud save · off") : L("클라우드 세이브 대기", "Cloud save waiting"));
+    else if (!ci->avail) st_set(&s[2], steps[STV_CLOUD].state == STV_SKIP ? STV_SKIP : STV_WAIT, steps[STV_CLOUD].state == STV_SKIP ? L("클라우드 세이브 · 기기 연결 필요", "Cloud save · not linked") : L("클라우드 세이브 대기", "Cloud save waiting"));
     else if (ci->trial) st_set(&s[2], STV_SKIP, L("클라우드 세이브 · 시험판", "Cloud save · trial build"));
     else if (ci->mode == 2) st_set(&s[2], STV_SKIP, L("클라우드 세이브 · 이 기기만", "Cloud save · this device only"));
     else if (ci->auth) st_set(&s[2], STV_FAIL, L("클라우드 세이브 · 연결 끊김", "Cloud save · unlinked"));
@@ -334,7 +334,7 @@ static void build_launcher(stv_view *v, const snap_t *x, const stv_step *steps, 
         snprintf(l->item[0], sizeof l->item[0], "%s", L("동기화 없이 플레이", "Play without the sync"));
         snprintf(l->note[0], sizeof l->note[0], "%s", ci->avail && ci->mode != 2 ? L("테스트 · 이번 판은 올리지 않아요", "A test · this run is not uploaded") : L("이번 판은 올리지 않아요", "This run is not uploaded"));
         snprintf(l->item[1], sizeof l->item[1], "%s", L("클라우드 세이브", "Cloud save"));
-        if (!ci->avail) snprintf(l->note[1], sizeof l->note[1], "%s", steps[STV_CLOUD].state == STV_SKIP ? L("사용 안 함", "Off") : L("확인 전", "Not checked yet"));
+        if (!ci->avail) snprintf(l->note[1], sizeof l->note[1], "%s", steps[STV_CLOUD].state == STV_SKIP ? L("기기 연결 필요", "Not linked") : L("확인 전", "Not checked yet"));
         else if (ci->trial) snprintf(l->note[1], sizeof l->note[1], "%s", L("시험판 · 이 기기만", "Trial build · this device only"));
         else if (ci->mode == 2) snprintf(l->note[1], sizeof l->note[1], "%s", mname);
         else if (ci->cloud_time > 0) { ss_fmt_ago(a, sizeof a, ci->cloud_time, now, ko); snprintf(l->note[1], sizeof l->note[1], ko ? "%s · %s에서 %s" : "%s · from %s, %s", mname, ci->cloud_dev[0] ? ci->cloud_dev : "-", a); }
@@ -627,7 +627,7 @@ void dm_start_screen_open(ANativeActivity *act, const char *root) {
     if (!V.has_server && !ds_bundles_dir(root)) { V.step[STV_DATA].state = STV_DONE; snprintf(V.step[STV_DATA].note, sizeof V.step[STV_DATA].note, "%s", L("준비됨", "Ready")); }
     if (!vk_gpl_prepare) { V.step[STV_SHADERS].state = STV_SKIP; snprintf(V.step[STV_SHADERS].note, sizeof V.step[STV_SHADERS].note, "%s", L("필요 없음", "Not needed")); }
     snprintf(p, sizeof p, "%s/sync.txt", root);
-    if (stat(p, &st)) { V.step[STV_CLOUD].state = STV_SKIP; snprintf(V.step[STV_CLOUD].note, sizeof V.step[STV_CLOUD].note, "%s", L("사용 안 함", "Off")); }
+    if (stat(p, &st)) { V.step[STV_CLOUD].state = STV_SKIP; snprintf(V.step[STV_CLOUD].note, sizeof V.step[STV_CLOUD].note, "%s", L("기기 연결 필요", "Not linked")); }
     checked_path(p, sizeof p); size_t n = 0; char *ck = p[0] ? ds_read(p, &n, 64) : NULL; V.checked[0] = 0;
     if (ck) LN.checked_t = strtoll(ck, NULL, 10);
     if (ck) { time_t t = (time_t)strtoll(ck, NULL, 10); struct tm tm; if (t > 0 && localtime_r(&t, &tm)) snprintf(V.checked, sizeof V.checked, korean() ? "%d월 %d일" : "%d/%d", tm.tm_mon + 1, tm.tm_mday); free(ck); }
