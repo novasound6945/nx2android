@@ -359,6 +359,8 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
     so = host.build_host(old['package'], r['title_id'], old['debuggable'], cache, jobs, r['profile']['games_dir'])
     with zipfile.ZipFile(apk) as z: have = set(z.namelist()); manifest = z.read('AndroidManifest.xml')
     fonts = {n: f for n, f in pipeline.ui_font_assets().items() if f'assets/{n}' not in have}   # the overlay's font, for an APK released before it came; the APK's own is kept
+    icon = host.start_icon_asset(apk, cache, pipeline.start_icon)   # the start screen's icon, for an APK released before it came: from its launcher icon
+    if icon: fonts[icon[1].split('=', 1)[0]] = icon[1].split('=', 1)[1]
     entries, _, _ = apkdriver.rebuild(str(apk), apkdriver.KEEP, host=str(so), assets=fonts, manifest=axml.set_version(manifest, code, name))
     k = {n: int(v) for n, v in kj.items() if n != 'cert'}
     z, cd, eocd = apksign.build_zip(entries)
