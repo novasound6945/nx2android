@@ -4,13 +4,22 @@
 #pragma once
 #include <math.h>
 #include "dm_input.h"
-enum { OV_STICK_L, OV_STICK_R, OV_BUTTON, OV_DPAD, OV_MENU };   // OV_MENU: the menu button (always shown, 70%): pauses the game and opens the settings
+enum { OV_STICK_L, OV_STICK_R, OV_BUTTON, OV_DPAD, OV_MENU };   // OV_MENU: the menu button (shown with the gamepad on or off, 70%; env.txt DM_MENU_BUTTON=0 leaves it out): pauses the game and opens the settings
 typedef struct { int kind; float ax, x, y, w, h; uint64_t btn; const char *label, *name; } ov_ctl;   // ax: the anchor, as a fraction of the window's width; name: the table's
 // The layouts: dm/android/overlay_default.tsv with the game profile's moves (android.tsv overlay rows), compiled by build.py into android_profile.h. Both list the
 // same controls in the same order, so a control's index means the same in either (a press keeps it across a change of layout)
 #include "android_profile.h"
 static const ov_ctl OV_LAYOUTS[2][DM_AOV_N] = {{DM_AOV_TABLET}, {DM_AOV_PHONE}};
 #define OV_N DM_AOV_N
+// Touch sticks start at the finger's down point; the right stick has finer low-speed aiming.
+static inline void ov_touch_stick(float x, float y, float radius, int right, float *dx, float *dy) {
+    if (radius <= 0) { *dx = *dy = 0; return; }
+    float m = hypotf(x, y) / radius;
+    if (m <= 0.05f) { *dx = *dy = 0; return; }
+    float v = fminf((m - 0.05f) / 0.95f, 1.0f);
+    if (right) v *= 0.7f + 0.3f * v;
+    *dx = x / (m * radius) * v; *dy = y / (m * radius) * v;
+}
 // the layout in use: the phone's when the window is at least OV_PHONE_ASPECT wide for its height (a 20:9 phone is 2.2, a 16:10 tablet 1.6), else the tablet's
 #define OV_PHONE_ASPECT 1.9f
 static inline int ov_layout_for_size(int width, int height) { return height > 0 && (float)width / (float)height >= OV_PHONE_ASPECT; }
@@ -31,7 +40,7 @@ int64_t dm_overlay_pressed(int ctl, uint64_t bit);   // CLOCK_MONOTONIC ns of th
 int dm_overlay_custom(int layout, int ctl, float *x, float *y, float *s);
 int dm_overlay_custom_ver(void);   // counts the changes (the theme-less drawing is rasterized again)
 // a control the player hid in the layout editor (Hide): not drawn and not touchable in play. In the editor it is drawn and can be chosen, so it can be
-// shown again: dm_overlay_hidden says whether it is hidden, dm_overlay_off whether play leaves it out now (hidden and the editor closed). Never the menu button
+// shown again: dm_overlay_hidden says whether it is hidden, dm_overlay_off whether play leaves it out now (hidden and the editor closed). The player never hides the menu button; DM_MENU_BUTTON=0 does (front_android.c g_menu_btn)
 int dm_overlay_hidden(int layout, int ctl);
 int dm_overlay_off(int layout, int ctl);
 static inline int ov_off(const ov_ctl *c);   // (below: c in OV_LAYOUTS)
@@ -200,6 +209,7 @@ static inline int ov_menu_item(int tab, int row) {   // the rows a tab has follo
 // changes with each, so two bits do), bits 26..27 the frame rate limit (0..OVM_LIMITS-1: Auto, 60, 40, 30), bit 28 face buttons by label, bit 29 the frame step's
 // target is 60 fps, bits 19 and 30 the Resolution row's step (0 to 2: bit 19 its low bit; bit 31 stays clear, a state is never negative). Bit 16: the text entry's
 // panel instead (its edit count below); bit 17: the layout editor (OVE_ST_* below); bit 18: the save picker (OVS_ST)
+#define OVT_ST 0x10000   // the mode bits of dm_menu_state, one each: OVT_ST the text entry, OVE_ST the layout editor, OVS_ST the save picker (tests/test_menu_bits.py)
 int dm_menu_state(void);
 enum { OVX_IDLE, OVX_BUSY, OVX_DONE, OVX_NOSAVE, OVX_FAILED };   // Export save: the button; copying; the export's name; the game has not saved yet; failed
 int dm_save_note(char *out, int cap);   // front_android.c: the outcome (OVX_*) and the last export's name, or why it failed

@@ -151,6 +151,9 @@ static _Atomic int g_tx_on, g_menu;
 static char g_res_scales[3][16]; static int res_steps(void) { return 0; } static void res_apply(int step) { (void)step; }
 static _Atomic int g_set_detail; static void detail_apply(int step) { (void)step; }
 int dm_fps_target_get(void) { return 0; }
+// dm/host/dm_pacing.c's two switches the governor's policy reads (game_mode_sync), as there
+static int dm_pacing_adaptive(int *explicit_set) { const char *e = getenv("DM_ADAPTIVE_FPS"); if (explicit_set) *explicit_set = e && *e; return !(e && !atoi(e)); }
+static int dm_pacing_pin(void) { const char *e = getenv("DM_FPS_PIN"); int v = e ? atoi(e) : 0; return v == 60 || v == 40 || v == 30 ? v : 0; }
 ''' + settings + state + pin + 'static void menu_press(int item) {\n' + press[len('else '):] + '\n}\n' + SETTINGS_MAIN   # (the line ends in a comment)
         out = self._run(source, None)
         self.assertIn('[menu] frame rate limit: 40 fps (settings.txt limit=40, over the env files\' DM_FPS_PIN 60)', out)

@@ -30,3 +30,6 @@ env	DM_VK_DYN_UBO=0
 # 4:3 screens (Retroid Pocket Nova, 1280x960): a second rewrite of main, patches.py's ASPECT_4_3 (960x720 render, the UI in a 16:9 band), in the data pack's mods-4x3/;
 # the app runs it on a screen narrower than 3:2 (DM_ASPECT=4:3 / 16:9 or the settings' aspect= chooses by hand)
 variant	4x3
+readme_name	Dark Souls: Remastered
+readme_image	docs/images/dark-souls-remastered.jpg
+readme_tag	v0.4.0

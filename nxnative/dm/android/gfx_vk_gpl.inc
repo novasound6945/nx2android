@@ -18,7 +18,7 @@ int vk_shader_keys(uint32_t stage, uint64_t *out, int max);
 void vk_pipeline_cache_save(void);
 
 typedef struct { uint32_t topo, restart, nattr, nbind; struct { uint32_t loc, binding, fmt, off; } attr[16]; struct { uint32_t binding, stride, rate, divisor; } bind[17]; } gvikey;
-typedef struct { uint64_t vs, gs, um0, im0, um2, im2; uint32_t xo0, xo2; gpl_rast r; uint32_t pad; } gprkey;   // gs: its translation for the draw's topology (vk_shader_gs_topo)
+typedef struct { uint64_t vs, gs, um0, im0, um2, im2; uint32_t xo0, xo2; gpl_rast r; uint32_t vi0; } gprkey;   // gs: its translation for the draw's topology (vk_shader_gs_topo); vi0: the vertex inputs' signedness flips (vi_flip_of)
 typedef struct { uint64_t fs, um, im; uint32_t fd, ms; } gfskey;   // fd: vk_shader_module's variant bits (the alpha test's function in bits 4-7; its reference is a push constant); ms: samples | a2c << 8 for shaders that need the multisample state (gpl_fs_ms), else 0
 typedef struct { uint32_t ncol, cfmt[8], dfmt, samples, a2c, blend_en, logic_en, logic_op, wmask[8]; struct { uint32_t src, dst, srca, dsta, eq, eqa; } bl[8]; } gfokey;
 static nvn_hmap g_gvi = {.klen = sizeof(gvikey)}, g_gpr = {.klen = sizeof(gprkey)}, g_gfs = {.klen = sizeof(gfskey)}, g_gfo = {.klen = sizeof(gfokey)};
@@ -71,8 +71,8 @@ static VkPipeline gpl_pr_make(const gprkey *pk, vkshader_t *vs, vkshader_t *gs) 
     if (bs >= 0) { snprintf(g_build[bs].what, sizeof g_build[bs].what, "pre-rasterization library, vertex shader %016llx (views %#llx/%#llx, outputs added %#x), geometry %016llx; clamp %u mode %u clip %u",
                             (unsigned long long)pk->vs, (unsigned long long)pk->um0, (unsigned long long)pk->im0, pk->xo0, (unsigned long long)pk->gs, pk->r.clamp, pk->r.mode, pk->r.clip); g_build[bs].phase = 1; }
     VkPipelineShaderStageCreateInfo ss[2]; uint32_t ns = 0;
-    ss[ns++] = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(VK_SHADER_STAGE_VERTEX_BIT, NULL), 0, VK_SHADER_STAGE_VERTEX_BIT, vk_shader_module(vs, pk->um0, pk->im0, pk->xo0, 0), "main", NULL};
-    if (gs) ss[ns++] = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(VK_SHADER_STAGE_GEOMETRY_BIT, NULL), 0, VK_SHADER_STAGE_GEOMETRY_BIT, vk_shader_module(gs, pk->um2, pk->im2, pk->xo2, 0), "main", NULL};
+    ss[ns++] = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(VK_SHADER_STAGE_VERTEX_BIT, NULL), 0, VK_SHADER_STAGE_VERTEX_BIT, vk_shader_module(vs, pk->um0, pk->im0, pk->xo0, 0, pk->vi0), "main", NULL};
+    if (gs) ss[ns++] = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(VK_SHADER_STAGE_GEOMETRY_BIT, NULL), 0, VK_SHADER_STAGE_GEOMETRY_BIT, vk_shader_module(gs, pk->um2, pk->im2, pk->xo2, 0, 0), "main", NULL};
     VkDescriptorSetLayout dsl[5] = {vs->dsl}; int nsets = 1; if (gs) { dsl[gs->set] = gs->dsl; nsets = gs->set + 1; }
     VkPipelineViewportDepthClipControlCreateInfoEXT dcc = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_DEPTH_CLIP_CONTROL_CREATE_INFO_EXT, NULL, pk->r.clip};
     VkPipelineViewportStateCreateInfo vp = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, pk->r.clip ? &dcc : NULL, 0, 1, NULL, 1, NULL};
@@ -108,7 +108,7 @@ static VkPipeline gpl_fs_make(const gfskey *fk, vkshader_t *fs) {
     if (bs >= 0) { snprintf(g_build[bs].what, sizeof g_build[bs].what, "fragment shader library, shader %016llx (views %#llx/%#llx, variant %#x, multisample %#x)",
                             (unsigned long long)fk->fs, (unsigned long long)fk->um, (unsigned long long)fk->im, fk->fd, fk->ms); g_build[bs].phase = 1; }
     VkPipelineShaderStageCreateInfo ss = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(VK_SHADER_STAGE_FRAGMENT_BIT, NULL), 0, VK_SHADER_STAGE_FRAGMENT_BIT,
-        fs ? vk_shader_module(fs, fk->um, fk->im, 0, (int)fk->fd) : VK_NULL_HANDLE, "main", NULL};   // (an alpha test variant reads its reference from the push constants)
+        fs ? vk_shader_module(fs, fk->um, fk->im, 0, (int)fk->fd, 0) : VK_NULL_HANDLE, "main", NULL};   // (an alpha test variant reads its reference from the push constants)
     VkDescriptorSetLayout dsl[5] = {0}; int nsets = 0; if (fs) { dsl[fs->set] = fs->dsl; nsets = fs->set + 1; }
     VkStencilOpState so = {VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS, 0xff, 0xff, 0};
     VkPipelineDepthStencilStateCreateInfo ds = {VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, NULL, 0, 0, 0, VK_COMPARE_OP_ALWAYS, 0, 0, so, so, 0, 1};
@@ -158,7 +158,8 @@ static VkPipeline gpl_part(int fs_part, const void *key, vkshader_t *a, vkshader
     return gpl_put(m, key, p);
 }
 static int gpl_eligible(const pkey *k) {
-    return V.gpl && !k->raster_discard && !k->alt && !k->debug_mode && !(S.sh[0] && S.sh[0]->xfb) && !(S.sh[2] && S.sh[2]->xfb);
+    return V.gpl && !k->raster_discard && !k->alt && !k->debug_mode && !k->gs_split &&   // (gs_split: two geometry passes, gfx_vk_exec_xfb.inc, whole pipelines only)
+           !(S.sh[0] && S.sh[0]->xfb) && !(S.sh[2] && S.sh[2]->xfb);
 }
 // the four parts of a draw's pipeline (shader parts from the preparation, or made now), linked without link-time optimization. NULL when one could not be made (logged)
 static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout) {
@@ -166,6 +167,7 @@ static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout) {
     vkshader_t *vs = S.sh[0], *fs = S.sh[1], *gs = S.sh[2] ? vk_shader_gs_topo(S.sh[2], (VkPrimitiveTopology)k->topo) : NULL;
     uint32_t xo0 = (gs ? gs->in_locs : fs ? fs->in_locs : 0) & ~vs->out_locs, xo2 = gs ? (fs ? fs->in_locs : 0) & ~gs->out_locs : 0;   // as build_pipeline
     gprkey pk = gpl_pr_key(vs, gs, k->um[0], k->im[0], xo0, k->um[2], k->im[2], xo2, gpl_rast_key(V.gpl_eds3, k->depth_clamp, k->mode, k->clip_neg1, V.has_depth_clip_ctl));
+    pk.vi0 = vi_flip_of(k, vs);   // (the preparation's parts have none: a draw that needs a flip makes its part)
     gfskey fk = gpl_fs_key(fs, k->um[1], k->im[1], (k->fdz ? 1 : 0) | (k->dual ? 2 : 0) | (k->atest & 15) << 4, k->samples, k->a2c);
     // DM_VK_GPL_FSMS=1 (live, diagnosis of the colour flashes while a linked pipeline draws): every fragment part of a multisampled (or alpha-to-coverage) draw takes
     // the draw's multisample state, as the whole pipeline's fragment shader does, not only the per-sample shaders (gpl_fs_ms). Valid either way (VUID-...-06633/06635:

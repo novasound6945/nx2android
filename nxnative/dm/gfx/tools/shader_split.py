@@ -20,6 +20,7 @@
 #       ROMANCE OF THE THREE KINGDOMS 8 REMAKE's newer RDB keeps them in .fdata files (a PDRK header, then IDRK entries of zlib or LZ4 chunks)
 #   · SPKG (the older KTGL of Fire Emblem: Three Houses): shader packages of G2S containers, loose and inside the LINKDATA archive DATA0.bin / DATA1.bin, see kt_shaders and linkdata_jobs
 #   · SDF (Capcom's RE Engine, Monster Hunter Rise): shader definitions inside the PAK archives (KPKA, entries zstd / deflate compressed), only the newest copy of each path, see kpka_jobs and sdf_shaders
+#   · LSPK (Larian's packages, Divinity: Original Sin 2 - Definitive Edition): GLSLC outputs in the zlib stream of each .bshd member (stored or LZ4 in the package), see lspk_entries and lspk_shaders
 #   · Trinity packs (Game Freak, Pokémon Legends: Z-A): BNSH inside the files of arc/data.trpfs (Oodle Mermaid, decoded by the game's own decoder in the Mac host), see trpfs_jobs and trinity_shaders
 #   · SPK (Capcom's MT Framework, The Great Ace Attorney Chronicles): the shader package inside an ARC archive (zlib entries), code area + control section per shader, see mtarc_members and mtspk_shaders
 #   · BEA (NintendoWare Bezel Engine archives, Big Brain Academy: Brain vs. Brain): BNSH in the .bfsha entries of the archives (zstd entries), see bea_members
@@ -401,6 +402,63 @@ def kpka_shaders(path, rel, ents, out):
         for e in ents:
             if e[3] >= 0x10 and kpka_data(d, e, 4) == b'SDF\0': out.extend(sdf_shaders(kpka_data(d, e), f'/{rel}#{e[0]:016x}'))
 
+LSPK = 'Larian LSPK'
+def lspk_entries(path):
+    """Larian's package (Divinity: Original Sin 2 - Definitive Edition: 47 .pak files, 10.6 GB), version 13: the header is at the end, 'LSPK' in the last 4 bytes and the header's length in the 4
+    before (0x28): u32 version, u32 file list offset, u32 file list length, u16 part count, u8 flags, u8 priority, 16-byte MD5. The file list is u32 count, then an LZ4 block of count 280-byte entries
+    {256-byte path, u32 offset, u32 stored length, u32 length (0: stored), u32 part, u32 flags, u32 CRC}; flags bits 0-3: 0 stored, 1 zlib, 2 LZ4 block. A part above 0 lives in <name>_<part>.pak,
+    which has no header of its own (Voice_1.pak … Voice_3.pak). → [(path, offset, stored length, length, part, flags)], or None for a file with no LSPK footer"""
+    import lz4.block
+    with open(path, 'rb') as f:
+        f.seek(0, 2); n = f.tell()
+        if n < 0x30: return None
+        f.seek(n - 8); hsz, magic = struct.unpack('<I4s', f.read(8))
+        if magic != b'LSPK' or not 0x28 <= hsz <= n: return None
+        f.seek(n - hsz); ver, flo, fls = struct.unpack('<III', f.read(12))
+        if ver != 13: red(f'{path}: LSPK version {ver}: only version 13 is known')
+        f.seek(flo); cnt, = struct.unpack('<I', f.read(4)); raw = lz4.block.decompress(f.read(fls - 4), uncompressed_size=cnt * 280)
+    return [(nm.split(b'\0', 1)[0].decode('utf-8', 'replace'), off, csz, usz, part, fl) for nm, off, csz, usz, part, fl, _ in struct.iter_unpack('<256sIIIIII', raw)]
+
+def lspk_jobs(files, parts=64):
+    """Every member of every LSPK package (the header decides, not the name), in ranges of about equal stored length. → ([(pak path, rel, (LSPK, entries)), …], the package paths and their parts)"""
+    paks = [(p, r, es) for p, r in files if p.endswith('.pak') and (es := lspk_entries(p)) is not None]
+    jobs, step = [], sum(e[2] for _, _, es in paks for e in es) / parts or 1
+    taken = set()
+    for p, r, es in paks:
+        taken.add(p); taken |= {f'{p[:-4]}_{e[4]}.pak' for e in es if e[4]}
+        cur, size = [], 0
+        for e in sorted(es, key=lambda e: (e[4], e[1])):
+            cur.append(e); size += e[2]
+            if size >= step: jobs.append((p, r, (LSPK, tuple(cur)))); cur, size = [], 0
+        if cur: jobs.append((p, r, (LSPK, tuple(cur))))
+    return jobs, taken
+
+def lspk_shaders(path, rel, ents, out):
+    """GLSLC outputs in a range of LSPK members (lspk_jobs). The shaders are the .bshd members (EngineShaders.pak and Materials.pak stored, Engine.pak and CommunityMods.pak LZ4): a u32, then a zlib
+    stream of the engine's shader file, which holds whole GLSLC outputs (vertex and pixel, one stage each). A stored member is tested by its first 8 bytes before it is read whole, so the 6 GB of
+    stored Wwise voices and Bink movies are not read"""
+    import lz4.block, zlib
+    files = {}
+    try:
+        for nm, off, csz, usz, part, fl in ents:
+            if not csz: continue
+            fp = path if not part else f'{path[:-4]}_{part}.pak'
+            f = files.get(fp) or files.setdefault(fp, open(fp, 'rb'))
+            f.seek(off)
+            if fl & 0xf == 0:
+                head = f.read(8)
+                if head[4:5] != b'\x78' and b'\x91\x68\x86\x19' not in head: continue
+                d = head + f.read(csz - 8)
+            elif fl & 0xf == 1: d = zlib.decompress(f.read(csz))
+            elif fl & 0xf == 2: d = lz4.block.decompress(f.read(csz), uncompressed_size=usz)
+            else: red(f'/{rel}/{nm}: LSPK compression {fl & 0xf} is not known')
+            if d[4:5] == b'\x78':
+                try: d = zlib.decompress(d[4:])
+                except zlib.error: pass
+            if b'\x91\x68\x86\x19' in d: out.extend(glslc_shaders(d, f'/{rel}/{nm}', need=False))
+    finally:
+        for f in files.values(): f.close()
+
 PKZL, PGDAT = b'pkzl', b'DAT\0'
 PG_STAGES = {b'VSO\0': 'vs', b'HSO\0': 'hs', b'DSO\0': 'ds', b'GSO\0': 'gs', b'PSO\0': 'ps', b'CSO\0': 'cs'}
 def pkz_entries(path):
@@ -443,6 +501,39 @@ def pkz_shaders(path, rel, ents, out):
             if len(d) != usz: red(f'/{rel}/{name}: {len(d)} bytes decoded, the entry says {usz}')
             scan_blob(d, f'/{rel}/{name}', out)
 
+# CPK and binding-table readers adapted from seedds/nxnative's shader_split.py.
+# The local NieR 1.0.3 DAT census matches its 1,371 objects / 1,225 distinct keys.
+CPK = b'CPK '
+def cpk_jobs(files, parts=64):
+    """Every entry of every CRI CPK archive in ranges of about equal length (Bayonetta 2: six in the RomFS root, 9.5 GB, 6,091 files, 12 GB of them CRILAYLA-compressed; its shaders are BNSH
+    files in shader.dat, shader2.dat and shadereff.dat, but no file name is relied on). → ([(path, rel, entries), …], the CPK paths)"""
+    import cpk
+    with_head = []
+    for p, r in files:
+        if p.lower().endswith('.cpk'):
+            with open(p, 'rb') as f: h = f.read(4)
+            if h != CPK: continue
+            try: with_head.append((p, r, cpk.files(p)))
+            except (ValueError, struct.error, KeyError, UnicodeDecodeError) as e:   # a layout cpk.py does not read: scanned as a loose file, as before CPKs were read (13 Sentinels and Catherine: Full Body were not checked)
+                print(f'[RED] /{r}: the CPK cannot be read ({e}); scanned as one file', flush=True)
+    jobs, step = [], sum(e[3] for _, _, es in with_head for e in es) / parts
+    for p, r, es in with_head:
+        cur, size = [], 0
+        for e in es:
+            cur.append(e); size += e[3]
+            if size >= step: jobs.append((p, r, tuple(cur))); cur, size = [], 0
+        if cur: jobs.append((p, r, tuple(cur)))
+    return jobs, {p for p, _, _ in with_head}
+
+def cpk_shaders(path, rel, ents, out):
+    """A range of CPK entries (cpk_jobs), each decoded (CRILAYLA or stored) and scanned like a loose file"""
+    import cpk
+    for e in ents:
+        try: d = cpk.read(path, e)
+        except (ValueError, IndexError) as x:   # a compression cpk.py does not decode: the entry is left out, and the split goes on
+            print(f'[RED] /{rel}/{e[0]}: {x}; not scanned', flush=True); continue
+        scan_blob(d, f'/{rel}/{e[0]}', out)
+
 def pgdat_members(d, label):
     """A PlatinumGames DAT archive: 'DAT\\0', u32 file count, then the offsets of five tables: file offsets (u32 each), extensions (4 bytes each), names (u32 name length, then one name of that
     length each), file lengths (u32 each), a name hash map. Members may be DAT archives again. → [(name, data)], or None when the tables do not fit the data (another game's file that only starts
@@ -465,6 +556,25 @@ def pg_shader(d, label):
     ctl, code = d[octl:octl + nctl], d[ocode:ocode + ncode]
     why = check(label, st, ctl, code)
     if not why and st != 'cs' and sph_stage(code) != st: why = f'the SPH stage {sph_stage(code)} does not match the object\'s magic'
+    if why: red(f'{label} ({st}): {why}')
+    return [(f'{label}#PGSO', st, ctl, code)]
+
+def pg_sized_shader(d, label):
+    """PlatinumGames' binding-table form: u32 prefix length (including itself), bindings, u32 code length, code, u32 control length, control. NieR:Automata's 1,371 objects in five DATs
+    all have a 0x88-byte prefix and 0x880 control bytes; keys match the objects passed to NVN at boot. Recognize the section boundaries and NVN magics, without relying on a title or filename."""
+    if len(d) < 12: return []
+    prefix = struct.unpack_from('<I', d)[0]
+    if prefix < 4 or prefix & 3 or prefix + 8 > len(d): return []
+    ncode = struct.unpack_from('<I', d, prefix)[0]
+    codeoff, ctlsize = prefix + 4, prefix + 4 + ncode
+    if ncode < 0x80 or ctlsize + 4 > len(d) or d[codeoff:codeoff + 4] not in (GFX_MAGIC, CS_MAGIC): return []
+    nctl = struct.unpack_from('<I', d, ctlsize)[0]
+    ctloff = ctlsize + 4
+    if nctl < 0x760 or ctloff + nctl != len(d) or d[ctloff:ctloff + 4] != CTL_MAGIC: return []
+    ctl, code = d[ctloff:], d[codeoff:ctlsize]
+    st = 'cs' if code[:4] == CS_MAGIC else sph_stage(code)
+    if st is None: red(f'{label}: binding-table shader has an unknown SPH stage')
+    why = check(label, st, ctl, code)
     if why: red(f'{label} ({st}): {why}')
     return [(f'{label}#PGSO', st, ctl, code)]
 
@@ -1452,6 +1562,7 @@ def scan_blob(d, label, out):
         for nm, m in mem: scan_blob(m, f'{label}/{nm}', out)
         return
     if d[:4] in PG_STAGES and len(d) >= 0x18 and d[(o := struct.unpack_from('<I', d, 0xc)[0]):o + 4] == CTL_MAGIC: out.extend(pg_shader(d, label)); return
+    if pg := pg_sized_shader(d, label): out.extend(pg); return
     for m in re.finditer(b'BNSH\0\0\0\0', d):
         size = struct.unpack_from('<I', d, m.start() + 0x1c)[0]
         if m.start() + size <= len(d) and d[m.start() + 0x60:m.start() + 0x64] == b'grsc':
@@ -1690,6 +1801,9 @@ def scan_file(args):
     if len(args) > 2 and head[:8] == ONEPACK:   # a range of Trinity packs (trpfs_jobs)
         trinity_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and args[2][0] == LSPK:   # members of a Larian package (lspk_jobs)
+        lspk_shaders(path, rel, args[2][1], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == MONO_ARD:   # files of a Monolith archive (ard_jobs)
         ard_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -1699,6 +1813,9 @@ def scan_file(args):
     if len(args) > 2 and args[2][0] == UE_INLINE:   # files of an archive-less version 11 Unreal pak (ue_inline_jobs)
         bad = ue_inline_pak_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), {UE_DAMAGED: [f'/{rel}#{n}' for n in bad]} if bad else trees
+    if len(args) > 2 and head[:4] == CPK:   # entries of a CRI CPK (cpk_jobs)
+        cpk_shaders(path, rel, args[2], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and head[:4] == PKZL:   # entries of a PlatinumGames PKZ (pkz_jobs)
         pkz_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -1826,8 +1943,10 @@ def main():
     arc_jobs, arcs = smash_arc_jobs(files)   # Super Smash Bros. Ultimate's data.arc: its current files, in ranges
     pz_jobs, pkzs = pkz_jobs(files)   # Bayonetta 3's PKZ archives, Oodle Kraken decoded by the game's own decoder in the Mac host
     ar_jobs, ards = ard_jobs(files)   # Xenoblade Chronicles 3's archive (bf3.arh / bf3.ard)
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ar_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in ards]
+    cp_jobs, cpks = cpk_jobs(files)   # CRI CPK entries, decoded and scanned recursively (PlatinumGames DATs)
+    ls_jobs, lspks = lspk_jobs([(p, r) for p, r in files if p not in paks])   # Divinity: Original Sin 2's Larian packages (and their footerless _N parts)
+    big += cp_jobs + pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ar_jobs + ls_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in ards and p not in cpks and p not in lspks]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         results += list(ex.map(scan_file, big)) + list(ex.map(scan_file, files, chunksize=16))
     trees, defer = {}, []

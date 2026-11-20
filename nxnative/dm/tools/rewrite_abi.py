@@ -44,6 +44,7 @@ COMMITS = {
     '41cef5393f267bc8e8a910951b0c253fe2e8fb36': ('same', 'a give-up branch in an exclusive window takes the fall-through stub: the stub a branch goes to'),
     'f9d8d26c3a211a298b0fbebcd3db9119e0fd3403': ('same', 'merge of caaf20fa (progress lines)'),
     'df0f938a61ea84355e1c1640033ce38c36efaaf6': ('same', 'the fork\'s copy of 41cef539'),
+    '937f81a6605325fd74ca78d19c62cb7a302be112': ('same', 'upstream main\'s commit of 41cef539 (#423): the fall-through stub for a give-up branch; the tables\' format is unchanged, the stub a branch goes to differs'),
 }
 
 

@@ -33,7 +33,7 @@ def source(d, changed=None):   # the game files: small and large under RomFS/ an
 
 
 def profile(bundles=(MAX, SIZE)):
-    return types.SimpleNamespace(name='Bundle Test', id='0100000000B00000', package=PKG, env=['DM_X=1'], settings={'overlay': '1'}, requires=[], bundles=bundles)
+    return types.SimpleNamespace(name='Bundle Test', id='0100000000B00000', package=PKG, env=['DM_ADAPTIVE_FPS=0'], settings={'overlay': '1'}, requires=[], bundles=bundles)
 
 
 def make_pack(t, name='Test-data', bundles=(MAX, SIZE), changed=None):

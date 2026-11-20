@@ -38,6 +38,30 @@ class AndroidProfiles(unittest.TestCase):
         self.assertIn(NEO, [r.id for r in rows]); self.assertTrue(all(r.android for r in rows))
         self.assertGreater(len(profiles.all_entries(android_only=False)), len(rows))
 
+    def test_vulkan_driver_key(self):   # android.tsv vulkan_driver: the driver the profile was tested with (porter packs Turnip for 'turnip')
+        self.assertEqual(android_profile.load(profile_dir([('status', 'boots')]).name).vulkan_driver, 'system')
+        self.assertEqual(android_profile.load(profile_dir([('status', 'boots'), ('vulkan_driver', 'turnip')]).name).vulkan_driver, 'turnip')
+        with self.assertRaises(android_profile.ProfileError): android_profile.load(profile_dir([('status', 'boots'), ('vulkan_driver', 'mesa')]).name)
+
+    def test_env_rows_checked_against_the_settings_registry(self):   # nxnative/dm/settings.tsv: a typo or a debug switch fails the profile
+        self.assertEqual(android_profile.load(profile_dir([('status', 'boots'), ('env', 'DM_VK_CB_DRAWS=32')]).name).env, ['DM_VK_CB_DRAWS=32'])
+        for bad in ('DM_VK_CB_DRAWZ=32', 'DM_VK_X_NOBAR=1', 'DM_VK_FDZ=yes'):
+            with self.assertRaises(android_profile.ProfileError): android_profile.load(profile_dir([('status', 'boots'), ('env', bad)]).name)
+
+    def test_pacing_preset(self):   # android.tsv pacing: env rows before the profile's own; a profile may not set one of them again
+        p = android_profile.load(profile_dir([('status', 'boots'), ('pacing', 'fixed30'), ('env', 'DM_VK_CB_DRAWS=32')]).name)
+        self.assertEqual(p.env, ['DM_FPS_TARGET=30', 'DM_ADAPTIVE_FPS=0', 'DM_VK_CB_DRAWS=32'])
+        self.assertEqual(android_profile.load(profile_dir([('status', 'boots')]).name).pacing, 'adaptive')
+        for rows in ([('pacing', 'fast')], [('pacing', 'steady'), ('env', 'DM_ADAPTIVE_FPS=1')]):
+            with self.assertRaises(android_profile.ProfileError): android_profile.load(profile_dir([('status', 'boots')] + rows).name)
+
+    def test_find_turnip(self):
+        from porter import toolchain
+        with tempfile.TemporaryDirectory() as t:
+            lib = Path(t) / 'libvulkan_freedreno.so'; lib.write_bytes(b'ELF')
+            self.assertEqual(toolchain.find_turnip({'turnip': str(lib)}), lib)
+            self.assertIsNone(toolchain.find_turnip({'turnip': str(Path(t) / 'missing.so')}))
+
     def test_fps_setting(self):   # the pause menu's Show FPS (front_android.c settings_load fps=)
         d = profile_dir([('status', 'boots'), ('setting', 'fps=1')])
         self.assertEqual(android_profile.load(d.name).settings, {'fps': '1'})
@@ -175,8 +199,8 @@ class DataPack(unittest.TestCase):
 
     def test_variants(self):   # android.tsv variant rows: checked; the pack's mods-<v>/ beside mods/, env-<v>.txt for a variant's env rows, the manifest's list; owned like mods/
         try:
-            p = android_profile.load(profile_dir([('status', 'experimental'), ('variant', '4x3 DM_X=1')]).name)
-            self.assertEqual(p.variants, {'4x3': ['DM_X=1']})
+            p = android_profile.load(profile_dir([('status', 'experimental'), ('variant', '4x3 DM_ADAPTIVE_FPS=0')]).name)
+            self.assertEqual(p.variants, {'4x3': ['DM_ADAPTIVE_FPS=0']})
             for bad in ('16x10', '4x3 lower=1'):
                 with self.assertRaises(android_profile.ProfileError): android_profile.load(profile_dir([('status', 'experimental'), ('variant', bad)]).name)
         finally: os.environ.pop('DM_GAMES_DIR', None)
@@ -186,10 +210,10 @@ class DataPack(unittest.TestCase):
             for d, b in (('patched', b'a'), ('patched-4x3', b'b')): (t / d).mkdir(); (t / d / 'main.patched.bin').write_bytes(b * 10)
             (t / 'romfs').mkdir(); (t / 'romfs/a.bin').write_bytes(b'y')
             man = datapack.build(t / 'out-data', profile=p, version='v0', display='1.0', patched=t / 'patched', romfs=t / 'romfs', shaders=None,
-                                 variants={'4x3': (t / 'patched-4x3', ['DM_X=1'])})
+                                 variants={'4x3': (t / 'patched-4x3', ['DM_ADAPTIVE_FPS=0'])})
             o = t / 'out-data'
             self.assertEqual(((o / 'mods/main.patched.bin').read_bytes(), (o / 'mods-4x3/main.patched.bin').read_bytes()), (b'a' * 10, b'b' * 10))
-            self.assertIn('DM_X=1\n', (o / 'env-4x3.txt').read_text()); self.assertNotIn('DM_X', (o / 'env.txt').read_text())
+            self.assertIn('DM_ADAPTIVE_FPS=0\n', (o / 'env-4x3.txt').read_text()); self.assertNotIn('DM_ADAPTIVE_FPS', (o / 'env.txt').read_text())
             self.assertEqual(man['variants'], ['4x3'])
             self.assertEqual(datapack.build(t / 'plain-data', profile=p, version='v0', display='1.0', patched=t / 'patched', romfs=t / 'romfs', shaders=None)['variants'], [])
             self.assertTrue(datapack.owned('mods-4x3/main.patched.bin') and datapack.owned('RomFS/a.bin') and not datapack.owned('settings.txt') and not datapack.owned('modsx'))
@@ -347,12 +371,33 @@ class Misc(unittest.TestCase):
         self.assertTrue(cli._parser().parse_args(['port', 'x', '--mt-replay']).mt_replay); self.assertFalse(cli._parser().parse_args(['port', 'x']).mt_replay)
         self.assertFalse(pipeline.Options(Path(".")).mt_replay)
 
+    def test_options_from_args_covers_every_field(self):   # porter port: each Options field comes from the argument of its name (Options.from_args), no hand list
+        import dataclasses
+        from porter import cli
+        a = cli._parser().parse_args(['port', 'game', '-k', 'k.keys', '--firmware', 'fw', '--vulkan-driver', 'system', '--jobs', '3', '--alias-headroom', '4'])
+        o = pipeline.Options.from_args(a, vercode_offset=7)
+        self.assertEqual((o.folder, o.keys, o.firmware, o.vulkan_driver, o.jobs, o.alias_headroom, o.vercode_offset), (Path('game'), Path('k.keys'), Path('fw'), 'system', 3, 4, 7))
+        self.assertEqual({f.name for f in dataclasses.fields(pipeline.Options)} - set(vars(a)), set(), 'an Options field with no porter port argument of its name')
+
+    def test_no_menu_button_option(self):   # --no-menu-button (issue #397): off unless given; the port then writes DM_MENU_BUTTON=0 to env.txt (front_android.c g_menu_btn)
+        from porter import cli
+        self.assertTrue(cli._parser().parse_args(['port', 'x', '--no-menu-button']).no_menu_button)
+        self.assertFalse(cli._parser().parse_args(['port', 'x']).no_menu_button)
+        self.assertFalse(pipeline.Options(Path(".")).no_menu_button)
+        src = (Path(pipeline.__file__).read_text(encoding='utf-8'))
+        self.assertIn("(['DM_MENU_BUTTON=0'] if self.o.no_menu_button else [])", src)   # in the data pack's env rows, beside --mt-replay's
+        self.assertTrue(pipeline.Options.from_args(cli._parser().parse_args(['port', 'x', '--no-menu-button'])).no_menu_button)   # the CLI passes it on
+        front = (Path(pipeline.__file__).parents[1] / 'nxnative/dm/android/front_android.c').read_text(encoding='utf-8')
+        self.assertIn('getenv("DM_MENU_BUTTON")', front)   # the name the device reads is the name porter writes
+
     def test_sysdata_no_firmware_text(self):   # the [RED] line without --firmware: MiiModel's wording as before; the shared fonts say what the host draws instead
         mii = pipeline.sysdata_no_firmware('Mario Kart 8 Deluxe', [0x0100000000000802])
         self.assertEqual(mii, 'Mario Kart 8 Deluxe reads system data from the console\'s firmware (0100000000000802); without --firmware <your firmware dump\'s system content folder> '
                               'the host\'s stand-in is used and those parts draw nothing (MiiModel: the Mii heads)')
         fonts = pipeline.sysdata_no_firmware('Kirby', [0x0100000000000811, 0x0100000000000810])
         self.assertIn('(0100000000000811, 0100000000000810)', fonts); self.assertIn('--shared-font <ttf>', fonts); self.assertIn('stand-ins', fonts)
+        regional = pipeline.sysdata_no_firmware('Link\'s Awakening', [0x0100000000000814, 0x0100000000000813, 0x0100000000000812])
+        self.assertIn('(0100000000000814, 0100000000000813, 0100000000000812)', regional); self.assertIn('button icons', regional)
         self.assertNotIn('MiiModel', fonts); self.assertNotIn('\n', fonts)
         both = pipeline.sysdata_no_firmware('X', [0x0100000000000802, 0x0100000000000810])
         self.assertIn('MiiModel: the Mii heads', both); self.assertIn('(0100000000000810)', both)

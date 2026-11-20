@@ -53,7 +53,7 @@ def source(d, crowd=0, aoc=True, changed=None):
 
 
 def profile(packs=True, bundles=(MAX, SIZE), zstd=False, **kw):
-    return types.SimpleNamespace(name='Pack Test', id='0100000000C00000', package=PKG, env=['DM_X=1'], settings={}, requires=[], bundles=bundles, romfs_packs=packs,
+    return types.SimpleNamespace(name='Pack Test', id='0100000000C00000', package=PKG, env=['DM_ADAPTIVE_FPS=0'], settings={}, requires=[], bundles=bundles, romfs_packs=packs,
                                  romfs_zstd=zstd, **kw)
 
 

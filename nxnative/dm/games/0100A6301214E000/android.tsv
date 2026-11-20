@@ -27,3 +27,5 @@ package	org.nx2a.t0100a6301214e000
 orientation	landscape
 data_bundles	1048576	67108864
 romfs_packs	on
+readme_image	docs/images/fire-emblem-engage.jpg
+readme_tag	v0.4.0

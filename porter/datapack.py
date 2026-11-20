@@ -8,7 +8,7 @@
 #   shaders.dmsv   the Vulkan shaders (dm/android/tools/shader_vk.py)
 #   nintendo_ext.ttf  the button-icon font, the stand-in for the Nintendo extension shared font (dm/tools/make_ext_font.py; env.txt's DM_SHARED_FONT_EXT)
 #   standard.ttf   the player's font for the system's shared fonts, with --shared-font (env.txt's DM_SHARED_FONT)
-#   env.txt        host switches: the game language, the DLC folder, the profile's env rows, then the port's (--fps60, --mt-replay); on the device the installer adds its
+#   env.txt        host switches: the game language, the DLC folder, the profile's env rows, then the port's (--fps60, --mt-replay, --no-menu-button); on the device the installer adds its
 #                  DM_ROMFS row after them when the app reads its RomFS from another folder (porter/install.py, --romfs-at): that is a fact of one device, not of the pack.
 #                  An install merges the device's env.txt with the pack's (porter/install.py merge_env): the pack's rows win for their keys, the device's own rows are kept
 #   settings.txt   the pause menu's first-launch defaults (the profile's setting rows, then the port's: --touch); the installer never replaces the player's own
@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from porter.upstream import BuildError
+from porter.upstream import settings_registry
 
 MANIFEST = 'nx2a-data.json'
 ENV = 'env.txt'
@@ -227,6 +228,21 @@ def bundled(man): return bool(man and man.get('bundles'))   # whether a pack's m
 def files_folder(package): return f'/sdcard/Android/data/{package}/files'
 
 
+SEEDABLE = ('RomFS', 'aoc')   # parts another port of the same game version on the device can give a new install (porter/install.py seed_from_sibling)
+
+
+def part_key(d, part):
+    """{'files', 'bytes', 'key'} of a pack part (RomFS, aoc): the key is a hash of its paths and sizes. Two packs of one game version have the same key for the same
+    files (a RomFS is the game's own, the same in every port of that version; a packed RomFS has other sizes), which lets an install copy the part on the device
+    from another port of the game instead of pushing it again. None when the part is not in the pack"""
+    import hashlib
+    r = Path(d) / part
+    if not r.is_dir(): return None
+    files = sorted((p.relative_to(r).as_posix(), p.stat().st_size) for p in r.rglob('*') if p.is_file())
+    h = hashlib.sha256(''.join(f'{rel}\t{size}\n' for rel, size in files).encode('utf-8')).hexdigest()
+    return {'files': len(files), 'bytes': sum(s for _, s in files), 'key': h}
+
+
 def romfs_sizes(d):   # {path in the RomFS: size} of the pack in d, '/'-separated as the device lists them (install --romfs-at compares a folder on the device with it)
     r = Path(d) / ROMFS
     return {p.relative_to(r).as_posix(): p.stat().st_size for p in r.rglob('*') if p.is_file()} if r.is_dir() else {}
@@ -295,6 +311,7 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
     if sysdata: rows.append(f'DM_SYSDATA={files_folder(package)}/sysdata')
     if packs: rows.append(f'DM_ROMFS_PACK={files_folder(package)}/{PACK_INDEX}')
     rows += profile.env + list(env)
+    if bad := settings_registry.check_env(rows, ('profile', 'porter'), 'env.txt '): raise ValueError('; '.join(bad))   # nxnative/dm/settings.tsv
     (tmp / ENV).write_text('\n'.join(rows) + '\n', encoding='utf-8', newline='\n')
     for v, (_, venv) in variants.items():
         if venv: (tmp / f'env-{v}.txt').write_text(f'# variant {v}: applied after env.txt when the app runs mods-{v}/\n' + '\n'.join(venv) + '\n', encoding='utf-8', newline='\n'); n += 1
@@ -307,6 +324,7 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
     if packs: man['packs'] = packs         # (the same: no key without romfs_packs)
     if profile_h: man['profile_h'] = profile_h
     if rewrite_abi is not None: man['rewrite_abi'] = rewrite_abi
+    if parts := {p: k for p in SEEDABLE if (k := part_key(tmp, p))}: man['parts'] = parts   # the content keys install's seeding compares
     (tmp / MANIFEST).write_text(json.dumps(man, indent=2), encoding='utf-8')
     if dst.exists(): shutil.rmtree(dst)
     for i in range(20):   # Windows: a folder just removed can stay delete-pending while another process (an indexer, a virus scan) holds it, and the rename is refused meanwhile

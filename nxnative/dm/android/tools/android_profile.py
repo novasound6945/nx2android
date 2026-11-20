@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # A game profile's Android keys: dm/games/<id>/android.tsv (key <TAB> value, # comments), beside the profile's game.tsv. A profile without one has not been ported to Android.
 # Keys (docs/ARCHITECTURE.md "Game profiles on Android"):
-#   status       playable | wip (plays, but parts are missing: docs/PORT_STATUS.md says which) | boots | experimental
+#   status       playable | wip (plays, but parts are missing: the game's README.md says which) | boots | experimental
 #   tested       <version> <device>: what the status was checked on
 #   package      the app's package name (default org.nx2a.t<title ID in lowercase>: a package name's parts start with a letter)
 #   orientation  landscape (default) | any
 #   requires     device features, separated by spaces: bcn (BC texture compression)
-#   sysdata      system data titles the game reads from the console's firmware, 16-digit hex title IDs separated by spaces (0100000000000802: MiiModel, the Mii heads Mario Kart 8 Deluxe builds; 0100000000000811 and 0100000000000810: the shared fonts, standard and Nintendo extension);
+#   sysdata      system data titles the game reads from the console's firmware, 16-digit hex title IDs separated by spaces (0100000000000802: MiiModel, the Mii heads Mario Kart 8 Deluxe builds; 0100000000000811 and 0100000000000810: the shared fonts, standard and Nintendo extension; 0100000000000814, 0100000000000813 and 0100000000000812: simplified Chinese, traditional Chinese and Korean);
 #                porter extracts each from the player's firmware dump (--firmware) into the data pack, and the host mounts it in place of its stand-in (the fonts: the host decodes them)
 #   setting      <name>=<value>, one row each: the pause menu's defaults on first launch (overlay, rumble, docked, fps, opacity: 20..80 by 5, rate: the frame rate
 #                limit, 0 auto (env.txt's DM_FPS_PIN, else the adaptive rate) or 60, 40, 30); a device that already has a settings.txt keeps it, so a new row reaches new installs only
@@ -35,14 +35,26 @@ HERE = Path(__file__).resolve().parent
 ANDROID = HERE.parent
 sys.path.insert(0, str(ANDROID.parent / 'games'))
 import game   # noqa: E402  (the profile folders, DM_GAMES_DIR included)
+sys.path.insert(0, str(HERE))
+import settings_registry   # noqa: E402  (nxnative/dm/settings.tsv: which switches a profile may set)
 
 STATUS = ('playable', 'wip', 'boots', 'experimental')
 SETTINGS = {'overlay': ('0', '1'), 'rumble': ('0', '1'), 'docked': ('0', '1'), 'fps': ('0', '1'), 'aspect': ('auto', '4:3', '16:9'),   # the pause menu's settings (front_android.c settings_load)
             'opacity': tuple(str(v) for v in range(20, 81, 5)),                                    # the gamepad's, percent (overlay_layout.h OV_OPACITY_MIN..MAX)
             'limit': ('0', '60', '40', '30')}                                                      # the frame rate limit, 0 auto (front_android.c LIMIT_STEPS)
 REQUIRES = ('bcn',)
+# pacing <preset>: the profile's frame-pacing policy in one row (docs/ARCHITECTURE.md, Frame pacing; nxnative/dm/host/dm_pacing.c reads the switches).
+# Each preset is env rows the data pack's env.txt gets before the profile's own env rows; a profile may not also set one of them.
+PACING = {
+    'adaptive': [],                                         # the default: the profile's fps_target, the governor steps between 60, 40 and 30
+    'steady': ['DM_ADAPTIVE_FPS=0'],                        # the profile's fps_target, no governor steps
+    'fixed60': ['DM_FPS_TARGET=60', 'DM_ADAPTIVE_FPS=0'],   # held at 60 fps
+    'fixed30': ['DM_FPS_TARGET=30', 'DM_ADAPTIVE_FPS=0'],   # held at 30 fps
+    'game': ['DM_FPS_TARGET=0', 'DM_ADAPTIVE_FPS=0'],       # the game's own frame limit, no governor
+}
 KINDS = {'stick_l': 'OV_STICK_L', 'stick_r': 'OV_STICK_R', 'button': 'OV_BUTTON', 'dpad': 'OV_DPAD', 'menu': 'OV_MENU'}
-SINGLE = ('status', 'tested', 'package', 'orientation', 'requires', 'sysdata', 'romfs', 'data_bundles', 'romfs_packs')
+SINGLE = ('status', 'tested', 'package', 'orientation', 'requires', 'sysdata', 'romfs', 'data_bundles', 'romfs_packs', 'vulkan_driver', 'pacing', 'readme_name', 'readme_image',
+          'readme_tag')
 BUNDLE_MAX = 1 << 30   # data_bundles: the largest bundle (the app downloads one whole and reads it twice, its SHA-256 then its files, before deleting it)
 REPEAT = ('setting', 'env', 'overlay', 'variant')
 VARIANTS = ('4x3',)   # the variants the app knows how to pick (front_android.c aspect_variant)
@@ -109,6 +121,8 @@ class AndroidProfile:
     @property
     def requires(self): return self.get('requires').split()
     @property
+    def vulkan_driver(self): return self.get('vulkan_driver', 'system')   # 'turnip': the port packs Mesa's Turnip when the porter finds it (porter.toolchain.find_turnip)
+    @property
     def sysdata(self): return [int(t, 16) for t in self.get('sysdata').split()]   # title IDs
     @property
     def bundles(self):   # (max file bytes, bundle bytes) of data_bundles, None without the row (every file of the pack on its own, as before)
@@ -126,8 +140,10 @@ class AndroidProfile:
         return dict(v.split('=', 1) for v in self.values('setting'))
 
     @property
-    def env(self):   # ['KEY=VALUE', ...]
-        return self.values('env')
+    def pacing(self): return self.get('pacing', 'adaptive')
+    @property
+    def env(self):   # ['KEY=VALUE', ...]: the pacing preset's rows, then the profile's env rows
+        return PACING.get(self.pacing, []) + self.values('env')
 
     @property
     def variants(self):   # {name: ['KEY=VALUE', ...]} in the order of the rows; {} for a game with one rewrite
@@ -147,6 +163,15 @@ class AndroidProfile:
         if not re.fullmatch(r'[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+', self.package): bad.append(f'package {self.package!r} is not a package name')
         if self.get('orientation', 'landscape') not in ('landscape', 'any'): bad.append('orientation: landscape or any')
         if self.get('romfs', 'raw') not in ('raw', 'zstd'): bad.append('romfs: raw or zstd')
+        if self.vulkan_driver not in ('system', 'turnip'): bad.append('vulkan_driver: system or turnip')
+        readme = [k for k in ('readme_image', 'readme_tag') if self.get(k)]
+        if (readme or self.get('readme_name')) and len(readme) != 2: bad.append("readme_image and readme_tag go together (README.md's Games list and the game's own README.md, docs/gen_tables.py)")
+        if self.get('readme_tag') and not re.fullmatch(r'v\d+\.\d+\.\d+', self.get('readme_tag')): bad.append(f"readme_tag {self.get('readme_tag')!r}: the nx2android version tested, v<major>.<minor>.<patch>")
+        if self.get('readme_image') and not (ANDROID.parents[2] / self.get('readme_image')).is_file(): bad.append(f"readme_image {self.get('readme_image')!r}: no such file in the repository")
+        if self.pacing not in PACING: bad.append(f'pacing {self.pacing!r}: one of {", ".join(PACING)}')
+        else:
+            preset = {r.split('=', 1)[0] for r in PACING[self.pacing]}
+            bad += [f'env {v!r}: pacing {self.pacing} sets {v.split("=", 1)[0]} already' for v in self.values('env') if v.split('=', 1)[0] in preset]
         bad += [f'requires {r!r}: one of {", ".join(REQUIRES)}' for r in self.requires if r not in REQUIRES]
         bad += [f'sysdata {t!r}: a 16-digit hex title ID' for t in self.get('sysdata').split() if not re.fullmatch(r'[0-9A-Fa-f]{16}', t)]
         if self.get('data_bundles') and not (self.bundles and 0 < self.bundles[0] < self.bundles[1] <= BUNDLE_MAX):
@@ -162,7 +187,8 @@ class AndroidProfile:
             c = v.split()
             if not c or c[0] not in VARIANTS or c[0] in seen or not all(re.fullmatch(r'[A-Z_][A-Z0-9_]*=\S*', x) for x in c[1:]):
                 bad.append(f'variant {v!r}: <{"|".join(VARIANTS)}> [KEY=VALUE ...], each variant once')
-            if c: seen.add(c[0])
+            if c: seen.add(c[0]); bad += settings_registry.check_env(c[1:], ('profile',), f'variant {c[0]} ')
+        bad += settings_registry.check_env(self.env, ('profile',), 'env ')   # a typo or a debug-only switch fails the port, not silently the game
         names = {r['name'] for r in default_layout()}
         for v in self.values('overlay'):
             c = v.split()

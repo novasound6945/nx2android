@@ -28,6 +28,9 @@ class Device(Adb):
         self.fs, self.text, self.sdk_, self.access, self.grants, self.free, self.ops = dict(files), dict(text or {}), sdk, access, grants, free, []
         self.md5, self.installed_, self.requests = md5 if md5 is not None else {}, installed, requests
     def pick(self): return 'dev'
+    def sd_volume(self): return '/storage/ABCD-1234'
+    gone = None   # a card taken out: its /storage/<id>, which Android removes while it is not mounted
+    def is_dir(self, path): return not (self.gone and (path + '/').startswith(self.gone + '/'))
     def prop(self, name): return str(self.sdk_) if name == 'ro.build.version.sdk' else 'Test'
     def gpu(self): return 'Qualcomm, Adreno (TM) 830'
     def free_bytes(self, path='/sdcard'): return self.free
@@ -64,6 +67,7 @@ class Device(Adb):
         if script.startswith('pm grant') and self.grants: self.access = 'granted'
         if script.startswith('dumpsys package'): return '      android.permission.READ_EXTERNAL_STORAGE: granted=true\n' if self.access == 'granted' else ''
         if script.startswith('rm -rf '): d = shlex.split(script)[2] + '/'; self.fs = {k: v for k, v in self.fs.items() if not k.startswith(d)}
+        if script.startswith('cd ') and ' && rm -f ' in script: w = shlex.split(script); d = w[1]; [self.fs.pop(f'{d}/{r}', None) for r in w[5:]]
         return ''
     def step(self, kind, what=''):   # the index of the first op of that kind whose text holds what (-1: none)
         return next((i for i, o in enumerate(self.ops) if o[0] == kind and what in ' '.join(map(str, o[1:]))), -1)
@@ -126,7 +130,7 @@ class RomfsAt(unittest.TestCase):
         self.assertEqual(install.device_romfs(install.env_with_romfs(env, '/sdcard/b')), '/sdcard/b')   # the last one, as the app applies them
 
     def test_merge_env(self):   # merge_env: the pack's rows win for their keys; the device's other rows, comments and blank lines are kept after them, in their order
-        pack = '# porter\nDM_LANG=en-US\nDM_VK_PIPE_LOG=1\n'
+        pack = '# porter\nDM_LANG=en-US\nDM_VK_DYN_UBO=1\n'
         dev = ("# the player's\nDM_LANG=fr-FR\nDM_PAD_LABEL=1\n\nDM_VK_TEXBIND=t.png\n"
                f"{install.ROMFS_MARK}: an earlier install\nDM_ROMFS=/sdcard/old\n")
         self.assertEqual(install.merge_env(pack, dev, prev_pack_keys=()), pack + "# the player's\nDM_PAD_LABEL=1\n\nDM_VK_TEXBIND=t.png\n")
@@ -152,20 +156,20 @@ class RomfsAt(unittest.TestCase):
 
     def test_merge_env_prev_pack(self):   # prev_pack_keys (the previous pack's manifest env_keys): a row it defined and this pack no longer does was the pack's, not the player's, and is dropped
         v2 = 'DM_LANG=en-US\nDM_SHARED_FONT_EXT=/x.ttf\n'
-        device = 'DM_LANG=fr-FR\nDM_VK_PIPE_LOG=1\nDM_SHARED_FONT_EXT=/x.ttf\nDM_VK_TEXBIND=all\nDM_PAD_LABEL=1\n'
-        prev = ('DM_LANG', 'DM_VK_PIPE_LOG', 'DM_SHARED_FONT_EXT')
+        device = 'DM_LANG=fr-FR\nDM_VK_DYN_UBO=1\nDM_SHARED_FONT_EXT=/x.ttf\nDM_VK_TEXBIND=all\nDM_PAD_LABEL=1\n'
+        prev = ('DM_LANG', 'DM_VK_DYN_UBO', 'DM_SHARED_FONT_EXT')
         got = install.merge_env(v2, device, prev_pack_keys=prev)
         self.assertEqual(got, v2 + 'DM_VK_TEXBIND=all\nDM_PAD_LABEL=1\n')   # the removed switch gone, the player's rows kept, in their order
         self.assertEqual(got.count('DM_LANG='), 1); self.assertIn('DM_LANG=en-US', got); self.assertNotIn('DM_LANG=fr-FR', got)   # a switch the new pack still defines comes from the pack
         self.assertEqual(install.merge_env(v2, device), v2)   # keys unknown (None): replaced as before the merge, so the old pack's dropped rows do not linger, and the player's go once
         self.assertEqual(install.merge_env(v2, device, DUMP), install.env_with_romfs(v2, DUMP))   # the installer's row still goes last
         self.assertEqual(install.merge_env(v2, 'DM_PAD_LABEL=1\n', prev_pack_keys=prev), v2 + 'DM_PAD_LABEL=1\n')   # a row no pack ever defined is the player's
-        self.assertEqual(install.merge_env(v2, device, prev_pack_keys=()), v2 + 'DM_VK_PIPE_LOG=1\nDM_VK_TEXBIND=all\nDM_PAD_LABEL=1\n')   # known, and the old pack defined none: all kept
+        self.assertEqual(install.merge_env(v2, device, prev_pack_keys=()), v2 + 'DM_VK_DYN_UBO=1\nDM_VK_TEXBIND=all\nDM_PAD_LABEL=1\n')   # known, and the old pack defined none: all kept
 
     def test_manifest_env_keys(self):   # datapack.build records the pack's env.txt keys in the manifest (as the app parses them); install reads them back off the device
-        prof = SimpleNamespace(name='Test Game', id='0100000000AAA000', package=PKG, env=['DM_VK_PIPE_LOG=1', '# a profile comment'], settings={}, requires=[])
+        prof = SimpleNamespace(name='Test Game', id='0100000000AAA000', package=PKG, env=['DM_VK_DYN_UBO=1', '# a profile comment'], settings={}, requires=[])
         man = datapack.build(self.t / 'pack', profile=prof, version='v1', display='1.0', patched=None, romfs=None, shaders=None, env=['DM_SHARED_FONT_EXT=/x.ttf'])
-        self.assertEqual(man['env_keys'], ['DM_LANG', 'DM_VK_PIPE_LOG', 'DM_SHARED_FONT_EXT'])
+        self.assertEqual(man['env_keys'], ['DM_LANG', 'DM_VK_DYN_UBO', 'DM_SHARED_FONT_EXT'])
         self.assertEqual(datapack.read_manifest(self.t / 'pack')['env_keys'], man['env_keys'])
         self.assertEqual(install.manifest_env_keys(json.dumps(man)), man['env_keys'])
         for unknown in ('', 'not json', '{"x": 1}', '[1, 2]'): self.assertIsNone(install.manifest_env_keys(unknown))   # unknown is not 'no keys'
@@ -187,8 +191,8 @@ class RomfsAt(unittest.TestCase):
 
     def test_env_prev_pack_on_install(self):   # install-level provenance: the device's manifest env_keys say which rows the old pack wrote — one the new pack no longer defines is removed
         pack = (self.data / 'env.txt').read_text(encoding='utf-8')          # '# porter\nDM_LANG=en-US\n'
-        dev_env = pack + 'DM_VK_PIPE_LOG=1\nDM_PAD_LABEL=1\nDM_ROMFS=/sdcard/my_hand_dump\n'   # the old pack's diagnostic row, the player's row, a hand-written DM_ROMFS
-        man = json.dumps({'package': PKG, 'env_keys': ['DM_LANG', 'DM_VK_PIPE_LOG']})   # the pack the device has now
+        dev_env = pack + 'DM_VK_DYN_UBO=1\nDM_PAD_LABEL=1\nDM_ROMFS=/sdcard/my_hand_dump\n'   # the old pack's diagnostic row, the player's row, a hand-written DM_ROMFS
+        man = json.dumps({'package': PKG, 'env_keys': ['DM_LANG', 'DM_VK_DYN_UBO']})   # the pack the device has now
         dev = self.run_on(Device({f'{FILES}/env.txt': len(dev_env), f'{FILES}/{datapack.MANIFEST}': len(man)},
                                  text={f'{FILES}/env.txt': dev_env, f'{FILES}/{datapack.MANIFEST}': man}))
         got = dev.text[f'{FILES}/env.txt']
@@ -256,6 +260,73 @@ class RomfsAt(unittest.TestCase):
         self.assertEqual({k[len(FILES) + 7:] for k in dev.fs if k.startswith(f'{FILES}/RomFS/')}, set(ROM)); self.assertIsNone(install.device_romfs(dev.text[f'{FILES}/env.txt']))
         self.assertNotEqual(dev.step('push_file', 'env.txt'), -1)   # the merged env.txt went on its own: the installer's row dropped
         self.assertNotIn('DM_ROMFS', dev.text[f'{FILES}/env.txt']); self.assertIn(f'{DUMP}/c.bin', dev.fs)   # the folder is left as it is
+
+    def test_sd(self):   # sd: the RomFS pushed into <the SD card>/Android/data/<package>/files/RomFS; no-sd later moves it back and removes it from the card, else changes nothing
+        sd = '/storage/ABCD-1234/Android/data/org.nx2a.test/files/RomFS'
+        dev = self.run_on(Device(access='allow'), romfs_at='sd')
+        self.assertEqual(dev.remote_sizes(sd), ROM); self.assertEqual(install.device_romfs(dev.text[f'{FILES}/env.txt']), sd)
+        again = self.run_on(Device(dict(dev.fs), text=dict(dev.text), access='allow'))   # a plain reinstall keeps the folder on the card
+        self.assertEqual(again.remote_sizes(sd), ROM); self.assertEqual(install.device_romfs(again.text[f'{FILES}/env.txt']), sd)
+        back = self.run_on(Device(dict(dev.fs), text=dict(dev.text), access='allow'), romfs_at='no-sd')
+        self.assertEqual({k[len(FILES) + 7:] for k in back.fs if k.startswith(f'{FILES}/RomFS/')}, set(ROM)); self.assertFalse(back.remote_sizes(sd)); self.assertIsNone(install.device_romfs(back.text[f'{FILES}/env.txt']))
+        env = {f'{FILES}/env.txt': install.env_with_romfs('DM_LANG=en-US\n', DUMP)}
+        with self.assertRaisesRegex(BuildError, 'earlier install'): self.run_on(Device({f'{DUMP}/c.bin': 5}, text=env, access='allow'), romfs_at='no-sd')   # another folder: kept, checked as without --romfs-at
+
+    def test_card_folder(self):   # only the app's own folder on a portable volume, normalised; not internal storage's, another app's, or a folder a user chose
+        sd = '/storage/ABCD-1234/Android/data/org.nx2a.test/files/RomFS'
+        for yes in (sd, sd + '/', '/storage/ABCD-1234/Android/data/org.nx2a.test/files/x/../RomFS'): self.assertTrue(install.card_folder(yes, PKG), yes)
+        for no in (None, '', f'/storage/ABCD-1234/nx2android/{PKG}/RomFS', f'/storage/emulated/0/Android/data/{PKG}/files/RomFS', f'/storage/self/Android/data/{PKG}/files/RomFS',
+                   f'{FILES}/RomFS', '/storage/ABCD-1234/Android/data/org.nx2a.other/files/RomFS', sd + '/Data'):
+            self.assertFalse(install.card_folder(no, PKG), no)
+        self.assertEqual(install.romfs_target(sd, FILES), sd)
+
+    def test_sd_old_form_kept(self):   # a user's folder of the form an early build of --romfs-at sd used is not the installer's: no-sd keeps it and does not remove it
+        old = f'/storage/ABCD-1234/nx2android/{PKG}/RomFS'
+        env = {f'{FILES}/env.txt': install.env_with_romfs('DM_LANG=en-US\n', old)}
+        dev = self.run_on(Device({f'{old}/{r}': n for r, n in ROM.items()}, text=env, access='allow'), romfs_at='no-sd')
+        self.assertEqual(dev.remote_sizes(old), ROM); self.assertEqual(install.device_romfs(dev.text[f'{FILES}/env.txt']), old); self.assertEqual(dev.step('shell', 'rm -rf'), -1)
+
+    def test_sd_replace_signer(self):   # --replace-signer uninstalls first, and Android deletes the card folder with the app: it is listed again and pushed
+        sd = '/storage/ABCD-1234/Android/data/org.nx2a.test/files/RomFS'
+        class Uninstalls(Device):
+            def install(self, apk, package, replace_signer=False):
+                if replace_signer: self.fs = {k: v for k, v in self.fs.items() if not k.startswith(('/storage/ABCD-1234/Android/data/org.nx2a.test/', FILES + '/'))}
+                super().install(apk, package, replace_signer)
+        first = self.run_on(Device(access='allow'), romfs_at='sd')
+        for kw in (dict(romfs_at='sd'), {}):   # the card already holds the RomFS: nothing to push before the install
+            dev = self.run_on(Uninstalls(dict(first.fs), text=dict(first.text), access='allow'), replace_signer=True, **kw)
+            self.assertEqual(dev.remote_sizes(sd), ROM, kw); self.assertEqual(install.device_romfs(dev.text[f'{FILES}/env.txt']), sd)
+
+    def test_sd_update(self):   # a new game version: the card folder is the installer's, so files of another size are pushed and those not in the pack removed
+        sd = '/storage/ABCD-1234/Android/data/org.nx2a.test/files/RomFS'
+        first = self.run_on(Device(access='allow'), romfs_at='sd')
+        fs = dict(first.fs); fs[f'{sd}/c.bin'] = 4; fs[f'{sd}/old.bin'] = 3
+        for kw in ({}, dict(romfs_at='sd')):
+            dev = self.run_on(Device(dict(fs), text=dict(first.text), access='allow'), **kw)
+            self.assertEqual(dev.remote_sizes(sd), ROM, kw); self.assertEqual(install.device_romfs(dev.text[f'{FILES}/env.txt']), sd)
+        with self.assertRaisesRegex(BuildError, 'not the game'):   # a folder the user chose is still never emptied
+            self.run_on(Device({**{f'{DUMP}/{r}': n for r, n in ROM.items()}, f'{DUMP}/old.bin': 3}, access='allow'), romfs_at=DUMP, romfs_push=True)
+
+    def test_sd_card_out(self):   # env.txt names the card folder, but that card is not in the device: refused before anything changes; --romfs-at app still moves the RomFS back
+        sd = '/storage/ABCD-1234/Android/data/org.nx2a.test/files/RomFS'
+        first = self.run_on(Device(access='allow'), romfs_at='sd')
+        out = {k: v for k, v in first.fs.items() if not k.startswith('/storage/ABCD-1234/')}
+        dev = Device(dict(out), text=dict(first.text), access='allow', installed=True); dev.gone = '/storage/ABCD-1234'
+        with self.assertRaisesRegex(BuildError, 'SD card ABCD-1234 that holds the RomFS .* is not in the device: insert it, or install with --romfs-at app'): self.run_on(dev)
+        self.assertEqual(dev.step('install'), -1); self.assertEqual(dev.step('push_tree'), -1); self.assertEqual(dev.step('push_file'), -1)
+        back = Device(dict(out), text=dict(first.text), access='allow', installed=True); back.gone = '/storage/ABCD-1234'
+        back = self.run_on(back, romfs_at='app')
+        self.assertEqual({k[len(FILES) + 7:] for k in back.fs if k.startswith(f'{FILES}/RomFS/')}, set(ROM)); self.assertIsNone(install.device_romfs(back.text[f'{FILES}/env.txt']))
+        self.assertFalse(back.remote_sizes(sd))
+
+    def test_sd_volume(self):   # sm list-volumes: the SD card (block major 179) before a USB drive, whichever is listed first; None without a mounted portable volume
+        class Sm(Adb):
+            def __init__(self, out): super().__init__('adb'); self.out = out
+            def shell(self, script, **kw): return self.out
+        usb, card = 'public:8,1 mounted 1234-5678', 'public:179,1 mounted 0AEF-0B2F'
+        self.assertEqual(Sm(f'private mounted null\nemulated;0 mounted null\n{usb}\n{card}\n').sd_volume(), '/storage/0AEF-0B2F')
+        self.assertEqual(Sm(f'private mounted null\n{usb}\n').sd_volume(), '/storage/1234-5678')
+        self.assertIsNone(Sm('private mounted null\npublic:179,1 unmounted null\n').sd_volume())
 
     def test_romfs_push(self):   # --romfs-push: the missing files and those of another size go into the folder, then it is checked again
         dev = self.run_on(Device({f'{DUMP}/c.bin': 4}), romfs_at=DUMP, romfs_push=True)

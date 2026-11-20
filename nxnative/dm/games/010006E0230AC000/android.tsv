@@ -15,3 +15,5 @@ package	org.nx2a.talesofeternia
 orientation	landscape
 data_bundles	1048576	67108864
 romfs_packs	on
+readme_image	docs/images/tales-of-eternia-remastered.jpg
+readme_tag	v0.1.2

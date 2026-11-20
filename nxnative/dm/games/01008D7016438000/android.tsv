@@ -32,3 +32,5 @@ tested	v0 Retroid Pocket 6 (Snapdragon 8 Gen 2, Adreno 740, Turnip T30, Android 
 package	org.nx2a.thirteensentinelsasia
 orientation	landscape
 requires	bcn
+readme_image	docs/images/13-sentinels-asia.jpg
+readme_tag	v0.4.0

@@ -1,6 +1,7 @@
 // Synthetic modules exercise real relocation and nn::ro calls; no game files or executable guest code required.
 #include "../loader.c"
 #include "../hle_ro.c"
+#include "../dm_pacing.c"   // dm_fps_state_apply asks the pacing policy (loader.c)
 #include <assert.h>
 #include <stddef.h>
 
