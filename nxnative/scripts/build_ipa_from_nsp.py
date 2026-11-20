@@ -891,7 +891,7 @@ def collect_nros(py, repo, romfs, dst, env, logs):
 
 def rewrite(py, repo, exe_dir, out, env, logs, g):
     """patch_nso.py on every code module (each writes its own <module>.* files, all the same build_src.sha256 line), each with its log, as many at once as the Mac has cores.
-    The modules are the profile's and the NROs the game registers (collect_nros; nro.tsv beside them lists those). Reused when the modules, patch_nso.py (with nso_code.py, nso_asm.py
+    The modules are the profile's and the NROs the game registers (collect_nros; nro.tsv beside them lists those). Reused when the modules, patch_nso.py (with nso_code.py, nso_asm.py, the contract number dm/host/rewrite_abi.h
     and the patch files of their builds), its switch and capstone are as at the last successful rewrite (Monster Hunter Rise's main alone takes 5.5 min)"""
     import capstone
     mods = g.words('modules')
@@ -903,7 +903,7 @@ def rewrite(py, repo, exe_dir, out, env, logs, g):
     names = list(src)
     kf = out.with_name(out.name + '.key')
     extra = [Path(p) for p in env.get('DM_PATCHES_EXTRA', '').split(os.pathsep) if p]   # cuts from outside the repository (patch_nso.py DM_PATCHES_EXTRA: an Android port's 60 fps code bytes)
-    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso_code.py', 'nso_asm.py')] + patch_files(repo, exe_dir, mods) + extra + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
+    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso_code.py', 'nso_asm.py')] + [repo / 'dm/host/rewrite_abi.h'] + patch_files(repo, exe_dir, mods) + extra + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
                       {k: env.get(k) for k in ('DM_PATCH_FRONT',)}, *([('variant', env['DM_PATCH_VARIANT'])] if env.get('DM_PATCH_VARIANT') else []))   # a profile's rewrite variant (porter: android.tsv variant); none keeps the key as it was
     if all((out / f'{m}.patched.bin').is_file() for m in names) and reused(kf, key) is not None:
         PROG.end(f'{", ".join(mods)}{f" and {len(nros)} NROs" if nros else ""}, reused (inputs unchanged)'); return

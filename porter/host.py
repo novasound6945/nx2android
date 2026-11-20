@@ -51,23 +51,34 @@ def sdk_patches_fit(modules, title_id, extra, tools=DM / 'tools'):
     return True
 
 
-def stale_sources(record, title_id, tools=DM / 'tools', modules=None):
-    """The rewriter's sources that changed since the port: record is mods/build_src.sha256 ("<sha256>  <path from dm/tools>" per line); another game's patches.py is left out,
-    and so is a file outside the repository (a --fps60 port's patches.py in its build folder). A changed sdk_patches.py is left out too when modules (module_tables() of the
-    port's modules) show it gives them what they were rewritten with (sdk_patches_fit). → [path]"""
-    out = []
+def record_rows(record):
+    """[(sha256, path from dm/tools with '/')] of a mods/build_src.sha256: a pack rewritten on Windows names its files with backslashes (..\\games\\<id>\\patches.py)"""
+    rows = []
     for ln in record.splitlines():
         h, _, rel = ln.strip().partition('  ')
-        if not h or not rel: continue
+        if h and rel: rows.append((h.lower(), rel.strip().replace('\\', '/')))
+    return rows
+
+
+def outside(rel, tools=DM / 'tools'):   # a record's file outside the repository (a --fps60 port's patches.py; a Windows path on another drive, C:/...)
+    return bool(re.match(r'[A-Za-z]:/', rel)) or DM.resolve() not in (tools / rel).resolve().parents
+
+
+def stale_sources(record, title_id, tools=DM / 'tools', modules=None):
+    """The rewriter's sources that changed since the port: record is mods/build_src.sha256 ("<sha256>  <path from dm/tools>" per line, record_rows); another game's patches.py
+    is left out, and so is a file outside the repository (a --fps60 port's patches.py in its build folder). A changed sdk_patches.py is left out too when modules (module_tables() of the
+    port's modules) show it gives them what they were rewritten with (sdk_patches_fit). → [path]"""
+    out, rows = [], record_rows(record)
+    for h, rel in rows:
         p = (tools / rel).resolve()
         if p.name == 'patches.py' and p.parent.parent == (DM / 'games').resolve() and p.parent.name.upper() != title_id.upper(): continue
-        if DM.resolve() not in p.parents: continue
+        if outside(rel, tools): continue
         if not p.is_file() or hashlib.sha256(p.read_bytes()).hexdigest() != h: out.append(rel)
     if 'sdk_patches.py' in out and modules is not None:
-        extra = any(DM.resolve() not in (tools / ln.strip().partition('  ')[2]).resolve().parents for ln in record.splitlines() if ln.strip().partition('  ')[2])
+        extra = any(outside(rel, tools) for _, rel in rows)
         if sdk_patches_fit(modules, title_id, extra, tools): out.remove('sdk_patches.py')
     own = DM / 'games' / title_id / 'patches.py'
-    if own.is_file() and not any(Path(ln.strip().partition('  ')[2]).name == 'patches.py' and title_id.upper() in ln.upper() for ln in record.splitlines()):
+    if own.is_file() and not any(Path(rel).name == 'patches.py' and title_id.upper() in rel.upper() for _, rel in rows):
         out.append(Path(os.path.relpath(own, tools)).as_posix())   # patches registered for the game since the port: its modules on the device lack them
     return out
 
@@ -75,15 +86,17 @@ def stale_sources(record, title_id, tools=DM / 'tools', modules=None):
 TITLE_ID = re.compile(r'[0-9A-Fa-f]{16}')
 
 
-def clean_env():   # the environment without DM_GAMES_DIR / DM_GAMES_FIRST: the host and its profile header come from the repository's profile only
-    return {k: v for k, v in os.environ.items() if k not in ('DM_GAMES_DIR', 'DM_GAMES_FIRST')}
+def clean_env(games_dir=None):   # the environment without DM_GAMES_DIR / DM_GAMES_FIRST: the host and its profile header come from the repository's profile only
+    env = {k: v for k, v in os.environ.items() if k not in ('DM_GAMES_DIR', 'DM_GAMES_FIRST')}   # games_dir: a derived profile's folder, searched first (porter apk-update)
+    if games_dir: env.update(DM_GAMES_DIR=str(games_dir), DM_GAMES_FIRST='1')
+    return env
 
 
-def profile_header(title_id):
-    """the game_profile.h (bytes) the repository's profile of title_id makes (dm/games/game.py header, as dm/android/build.py makes it)"""
+def profile_header(title_id, games_dir=None):
+    """the game_profile.h (bytes) the repository's profile of title_id makes (dm/games/game.py header, as dm/android/build.py makes it); games_dir: a derived profile's folder instead"""
     with tempfile.TemporaryDirectory(prefix='nx2a_profile_') as t:
         h = Path(t) / 'game_profile.h'
-        r = subprocess.run([sys.executable, str(DM / 'games/game.py'), 'header', title_id, str(h)], capture_output=True, text=True, errors='replace', env=clean_env())
+        r = subprocess.run([sys.executable, str(DM / 'games/game.py'), 'header', title_id, str(h)], capture_output=True, text=True, errors='replace', env=clean_env(games_dir))
         if r.returncode or not h.is_file(): raise BuildError(f'{title_id}: the profile header did not build: ' + ((r.stderr.strip() or r.stdout.strip()).splitlines() or ['no output'])[-1])
         return h.read_bytes()
 
@@ -131,6 +144,19 @@ def check_profile(package, manifest, title_id):
                      f'port the game again')
 
 
+def build_host(package, title_id, debug, out, jobs=os.cpu_count() or 8, games_dir=None):
+    """libdmhost.so of title_id built from this checkout's profile into the folder out (dm/android/build.py, as the port's host stage: a debug build for a debuggable app; games_dir:
+    a derived profile's folder, searched first). → its path"""
+    ndk, _ = toolchain.find_ndk()
+    if not ndk: raise BuildError('no Android NDK found: python -m porter tools --download')
+    say(f'{package}: building the host of {title_id} ({"debug" if debug else "release"} build)')
+    r = subprocess.run([sys.executable, str(DM / 'android/build.py'), '--game', title_id, '--ndk', str(ndk), '--out', str(out), '--lib', '--jobs', str(jobs)] + ([] if debug else ['--release']),
+                       capture_output=True, text=True, errors='replace', env=clean_env(games_dir))
+    so = Path(out) / 'libdmhost.so'
+    if r.returncode or not so.is_file(): raise BuildError(f'{package}: the host did not build: ' + ((r.stderr.strip() or r.stdout.strip()).splitlines() or ['no output'])[-1])
+    return so
+
+
 def update(adb, package, jobs=os.cpu_count() or 8):
     """package's libdmhost.so built again from this checkout and installed. → {'package', 'title_id', 'debug', 'host'}"""
     files = datapack.files_folder(package)
@@ -151,14 +177,8 @@ def update(adb, package, jobs=os.cpu_count() or 8):
     stale = stale_sources(record, title_id, modules=modules)
     if stale: raise BuildError(f'{package}: the game\'s code on the device was rewritten with other sources than this checkout\'s ({", ".join(stale)}): port the game again from its files')
     debug = 'DEBUGGABLE' in adb.shell(f'dumpsys package {shlex.quote(package)} | grep -m1 flags=', check=False)
-    ndk, _ = toolchain.find_ndk()
-    if not ndk: raise BuildError('no Android NDK found: python -m porter tools --download')
     with tempfile.TemporaryDirectory(prefix='nx2a_host_') as t:
-        say(f'{package}: building the host of {title_id} ({"debug" if debug else "release"} build)')
-        r = subprocess.run([sys.executable, str(DM / 'android/build.py'), '--game', title_id, '--ndk', str(ndk), '--out', t, '--lib', '--jobs', str(jobs)] + ([] if debug else ['--release']),
-                           capture_output=True, text=True, errors='replace', env=clean_env())
-        so = Path(t) / 'libdmhost.so'
-        if r.returncode or not so.is_file(): raise BuildError(f'{package}: the host did not build: ' + ((r.stderr.strip() or r.stdout.strip()).splitlines() or ['no output'])[-1])
+        so = build_host(package, title_id, debug, t, jobs)
         src, out = Path(t) / 'installed.apk', Path(t) / 'host.apk'
         adb.run('pull', installed_apk(adb, package), src, timeout=600)
         from porter.pipeline import ui_font_assets   # the overlay's font: an APK ported before it came has none, and the new host looks for it

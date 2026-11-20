@@ -2,7 +2,7 @@
 # apkdriver.py: an installed port's APK again with another Vulkan driver library (DM_VK_DRIVER, gfx_vk_core.c vk_init), or with none (the device's own driver), and/or with its
 # host library built again (--host: porter host), without the game's files: every other entry is kept as it is, the ZIP is written and signed again by apksign.py with the
 # player's key (the same signer, so it installs over the app and keeps its saves). --asset NAME=FILE puts FILE in as assets/NAME, replacing an entry of that name (porter host: the
-# overlay's font, which an APK ported before it came lacks).
+# overlay's font, which an APK ported before it came lacks). rebuild(manifest=) is porter apk-update's: a released APK with a new host and a new versionCode (axml.py).
 # The driver is loaded through libadrenotools and its hook libraries, which only an APK ported with a driver carries (porter port --vulkan-driver): one without them is refused.
 # Usage: apkdriver.py <in.apk> <out.apk> <key.json> [--driver <lib.so> | --system] [--host <libdmhost.so>] [--asset NAME=FILE ...]   → prints the driver library's name in the APK ('' with --system)
 import argparse, json, os, sys, zipfile
@@ -22,10 +22,10 @@ def lib_name(path):   # the package manager extracts only lib*.so from lib/<abi>
 KEEP = object()   # rebuild(driver=KEEP): the driver library the APK has stays
 
 
-def rebuild(src, driver=KEEP, host=None, assets=None):
+def rebuild(src, driver=KEEP, host=None, assets=None, manifest=None):
     """src's entries with every driver library dropped and driver (a path, or None for the device's own) added, libdmhost.so replaced by host (a path) when given, and
-    assets ({name: path}) put in as assets/<name>, an entry of that name replaced, the others added after the APK's own:
-    ([(name, data, align)], dropped names, the driver library's name)"""
+    assets ({name: path}) put in as assets/<name>, an entry of that name replaced, the others added after the APK's own, and AndroidManifest.xml replaced by manifest (bytes:
+    porter apk-update's new versionCode) when given: ([(name, data, align)], dropped names, the driver library's name)"""
     z = zipfile.ZipFile(src)
     if any(i.compress_type != zipfile.ZIP_STORED for i in z.infolist()): raise SystemExit(f'{src}: not an APK made by mkapk.py (a compressed entry)')
     libs = {os.path.basename(i.filename) for i in z.infolist() if i.filename.startswith(ABI)}
@@ -40,6 +40,7 @@ def rebuild(src, driver=KEEP, host=None, assets=None):
             else: dropped.append(base); continue
         data = open(host, 'rb').read() if host and i.filename == ABI + 'libdmhost.so' else z.read(i)   # the host library built again (porter host)
         if i.filename.startswith('assets/') and i.filename[7:] in assets: data = open(assets[i.filename[7:]], 'rb').read()
+        if manifest is not None and i.filename == 'AndroidManifest.xml': data = manifest
         entries.append((i.filename, data, 16384 if i.filename.startswith(ABI) else 4))   # libraries page-aligned, as mkapk.py writes them (extracted, or mapped in place)
     have = {e for e, _, _ in entries}
     entries += [(f'assets/{n}', open(f, 'rb').read(), 4) for n, f in assets.items() if f'assets/{n}' not in have]   # stored, as mkapk.py writes them: AAsset reads them in place

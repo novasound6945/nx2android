@@ -911,7 +911,7 @@ class Port:
                              aoc=self.aoc, sysdata=self.sysdata, language=self.lang, package=self.package, env=self.fps_env + font_env + zenv + (['DM_VK_MT_REPLAY=1'] if self.o.mt_replay else [])
                              + ([f'DM_VK_DRIVER={driver_lib_name(self.o.vulkan_driver)}'] if self.o.vulkan_driver else []), settings=TOUCH_SETTINGS if self.o.touch else None,
                              files={**self.fps_files, **font_files}, variants={v: (d, self.ap.variants[v]) for v, d in getattr(self, 'variants', {}).items()}, profile_h=getattr(self, 'profile_h', None),
-                             progress=lambda what: PROG.set(step=f'linking {what}'))
+                             rewrite_abi=self.rewrite_abi(), progress=lambda what: PROG.set(step=f'linking {what}'))
         self.data_path = dst; self.result['data'] = str(dst)
         b, pk = man.get('bundles'), man.get('packs')
         PROG.end(f'{man["files"]:,} files, {man["bytes"] / 2**30:.1f} GB' + (f', variants {", ".join(man["variants"])}' if man.get('variants') else '')
@@ -926,6 +926,16 @@ class Port:
             self.result['files_json'] = str(dst / publish.FILES)
             if self.o.data_url: say(f'upload {dst} as it is to {self.o.data_url} (the app downloads it from there)')
             PROG.end(f'{publish.FILES}: {len(fj["files"]):,} files, {fj["bytes"] / 2**30:.1f} GB' + (f', format {fj["format"]}: {len(fj["bundles"]):,} bundles' if b else ''))
+
+    def rewrite_abi(self):
+        """The contract number the pack's modules were rewritten for (# REWRITE_ABI of their fixups tables: dm/host/rewrite_abi.h), for nx2a-data.json (porter apk-update);
+        None when a table has none or they differ"""
+        import rewrite_abi
+        dirs = [d for d in [getattr(self, 'patched', None), *getattr(self, 'variants', {}).values()] if d]
+        got = {rewrite_abi.from_fixups(f.read_text(encoding='utf-8', errors='replace')) for d in dirs for f in Path(d).glob('*.fixups.tsv')}
+        if len(got) == 1 and None not in got: return got.pop()
+        if got: say(f'[RED] the rewritten modules do not all carry one REWRITE_ABI ({", ".join(sorted(map(str, got)))}): the data pack records none')
+        return None
 
     def button_font(self):
         """The stand-in for the system's Nintendo extension shared font: the controller-button icons in game text (U+E0E0 = A; Super Mario Bros. Wonder's menus showed '?' without it), which

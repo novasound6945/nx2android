@@ -232,10 +232,10 @@ def romfs_sizes(d):   # {path in the RomFS: size} of the pack in d, '/'-separate
     return {p.relative_to(r).as_posix(): p.stat().st_size for p in r.rglob('*') if p.is_file()} if r.is_dir() else {}
 
 
-def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, sysdata=None, language='en-US', package=None, env=(), settings=None, files=None, variants=None, profile_h=None, progress=None):
+def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, sysdata=None, language='en-US', package=None, env=(), settings=None, files=None, variants=None, profile_h=None, rewrite_abi=None, progress=None):
     """Write the pack to dst (replacing it). profile: the AndroidProfile; package: the app's, when not the profile's; env: more env.txt rows, after the profile's; settings: settings.txt values over the profile's;
     files: {name in the pack: source} (the 60 fps memory writes, fpslock.tsv; the button-icon font); variants: {name: (its rewritten modules, [its env rows])}; profile_h: sha256 of the
-    game_profile.h the host was built with (porter host). Returns the manifest"""
+    game_profile.h the host was built with (porter host); rewrite_abi: the contract number its modules were rewritten for (dm/host/rewrite_abi.h; porter apk-update). Returns the manifest"""
     package = package or profile.package
     check_romfs_packs(profile)
     packs_on = bool(getattr(profile, 'romfs_packs', False))   # android.tsv romfs_packs on: the RomFS's small files into packs/, not bundles/
@@ -306,6 +306,7 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
     if bundles: man['bundles'] = bundles   # (no key at all for a pack without: its manifest stays as it was)
     if packs: man['packs'] = packs         # (the same: no key without romfs_packs)
     if profile_h: man['profile_h'] = profile_h
+    if rewrite_abi is not None: man['rewrite_abi'] = rewrite_abi
     (tmp / MANIFEST).write_text(json.dumps(man, indent=2), encoding='utf-8')
     if dst.exists(): shutil.rmtree(dst)
     for i in range(20):   # Windows: a folder just removed can stay delete-pending while another process (an indexer, a virus scan) holds it, and the rename is refused meanwhile

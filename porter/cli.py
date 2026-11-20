@@ -117,6 +117,20 @@ def _parser():
     hs.add_argument('--package', default='', help='the app (default: the only ported game installed)')
     hs.add_argument('--device', default='', help='adb serial (default: the configured device, else the only one)')
     hs.add_argument('--jobs', type=int, default=os.cpu_count() or 8); hs.add_argument('--json', action='store_true')
+    au = sub.add_parser('apk-update', help="a released port's APK again with this version's host and a new build number, without the game files: the data pack on the server "
+                                           "stays (its rewritten code must fit the host: --check says whether it does)")
+    au.add_argument('apk', nargs='?', help='the released APK (a file); with --check it may be left out when --data is given')
+    au.add_argument('--data', default='', metavar='URL|FOLDER',
+                    help="the game's data pack: its folder on the web server (http(s)://…/, as the APK downloads it) or a local copy of it (nx2a-data.json, files.json, mods/); "
+                         "default: the server address in the APK (nx2a/source.bin)")
+    au.add_argument('--data-cred', default=None, metavar='FILE', help="a file of one line, user:password, for the server (default: the APK's own; never printed)")
+    au.add_argument('--build', type=int, default=None, metavar='N',
+                    help="the build number (0-65535), shown after the game's version (1.0.1-8) and added to the versionCode; default: one more than the APK's and this computer's last")
+    au.add_argument('-o', '--out', default=None, metavar='FOLDER', help='where the new APK (and a changed nx2a-data.json with its files.json) go (default: ./apk-update)')
+    au.add_argument('--profile-header', default=None, metavar='FILE',
+                    help="the released host's game_profile.h (its port's build folder, android/host/gen/<title ID>/), for a pack whose profile git does not hold (a derived profile's port)")
+    au.add_argument('--check', action='store_true', help='only judge whether the data pack fits this version\'s host (same / different / unknown, with the reasons): no build, no APK')
+    au.add_argument('--jobs', type=int, default=os.cpu_count() or 8); au.add_argument('--json', action='store_true')
     return ap
 
 
@@ -381,7 +395,41 @@ def cmd_driver(a):   # porter driver and porter host: the installed APK rebuilt 
     return 0
 
 
+def cmd_apk_update(a):   # porter apk-update: the released APK with this checkout's host (porter/apkupdate.py); nothing is uploaded or installed
+    import contextlib
+    from porter import apkupdate, publish
+    from porter.upstream import BuildError
+    try:
+        with contextlib.redirect_stdout(sys.stderr if a.json else sys.stdout):   # with --json, stdout is the one JSON document
+            if not a.apk and not (a.check and a.data): raise BuildError('give the released APK (with --check, --data alone will do)')
+            if a.apk and not Path(a.apk).is_file(): raise BuildError(f'{a.apk}: no such APK file')
+            url, cred = apkupdate.source_of(a.apk) if a.apk else (None, '')
+            where = a.data or url
+            if not where: raise BuildError(f'{a.apk} has no data server address (ported without --data-url): give --data URL|FOLDER')
+            if a.data_cred: cred = publish.read_cred(a.data_cred)
+            elif a.data and url and not a.data.startswith(url): cred = ''   # the APK's credentials only for its own server
+            pack = apkupdate.Pack(where, cred)
+            try: old_header = Path(a.profile_header).read_bytes() if a.profile_header else None
+            except OSError as e: raise BuildError(f'--profile-header: cannot read {a.profile_header} ({e.strerror})') from None
+            if a.check:
+                out = apkupdate.judge(pack, old_header); out.pop('manifest', None)
+                if a.apk:   # the APK's own facts beside the judgment
+                    out['apk'] = {k: v for k, v in apkupdate.axml.apk_info(a.apk).items() if k != 'activity'}
+                    if out['apk']['package'] != out['package']: out.update(ok=False, verdict='different'); out.setdefault('errors', []).append(f'the APK is {out["apk"]["package"]}, the pack {out["package"]}')
+                if not a.json:
+                    for ln in apkupdate.report_lines(out): print(ln)
+                    if out.get('errors'): print('  ' + '; '.join(out['errors']))
+            else:
+                out = apkupdate.update(a.apk, pack, Path(a.out or 'apk-update'), a.build, a.jobs, old_header)
+    except BuildError as e:
+        if a.json: _print_json({'error': str(e)})
+        else: print(e, file=sys.stderr)
+        return 1
+    if a.json: _print_json(out)
+    return 0 if out.get('ok', True) else 3
+
+
 def main(argv):
     if hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8', errors='replace')   # game names and progress bars on a Windows console
     a = _parser().parse_args(argv)
-    return {'doctor': cmd_doctor, 'profiles': cmd_profiles, 'inspect': cmd_inspect, 'port': cmd_port, 'install': cmd_install, 'publish': cmd_publish, 'pointer': cmd_pointer, 'devices': cmd_devices, 'tools': cmd_tools, 'config': cmd_config, 'saves': cmd_saves, 'driver': cmd_driver, 'host': cmd_driver}[a.cmd](a)
+    return {'doctor': cmd_doctor, 'profiles': cmd_profiles, 'inspect': cmd_inspect, 'port': cmd_port, 'install': cmd_install, 'publish': cmd_publish, 'pointer': cmd_pointer, 'devices': cmd_devices, 'tools': cmd_tools, 'config': cmd_config, 'saves': cmd_saves, 'driver': cmd_driver, 'host': cmd_driver, 'apk-update': cmd_apk_update}[a.cmd](a)

@@ -9,6 +9,7 @@
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include "hle.h"
+#include "rewrite_abi.h"
 
 module_t g_mod[MAX_MOD];
 int g_nmod;
@@ -216,8 +217,10 @@ static void read_layout(module_t *m, const char *dir) {
     if (!f) die("open %s", path);
     static const char *kn[KEY_N] = {"K18", "KTLS", "KTLR", "KGATE"};
     char line[256], key[32], target[16] = "apple"; unsigned long v; unsigned seen = 0;   // an output without TARGET predates the Android port: Apple
+    int abi = -1;   // # REWRITE_ABI: the contract the module was rewritten for (rewrite_abi.h); none in a table written before the number was
     while (fgets(line, sizeof line, f)) {
         if (!strncmp(line, "# TARGET", 8)) { sscanf(line + 8, "%15s", target); continue; }
+        if (!strncmp(line, "# REWRITE_ABI", 13)) { abi = atoi(line + 13); continue; }   // (decimal, where the other keys are hexadecimal)
         if (sscanf(line, "# %31s %lx", key, &v) != 2) die("%s: the output comes from an old rewriter; rewrite the modules again with dm/tools/patch_nso.py", path);
         if (!strcmp(key, "PATCH_OFF")) m->patch_off = strtoll(line + 2 + strlen(key), NULL, 16);   // may be negative (patch area before the base)
         else if (!strcmp(key, "IMAGE_SIZE")) m->image_size = v;
@@ -245,6 +248,12 @@ static void read_layout(module_t *m, const char *dir) {
     static const char *const want = "android";
 #endif
     if (strcmp(target, want)) die("%s: the module was rewritten for %s, this host runs on %s: rewrite it with DM_TARGET=%s dm/tools/patch_nso.py", path, target, want, want);
+    if (abi >= 0 && abi != DM_REWRITE_ABI) {
+        LOG("[RED] %s: the module was rewritten for contract %d (REWRITE_ABI), this host implements contract %d: the data does not fit this APK's host. Install the APK that came with "
+            "the data, or port the game again from its files", path, abi, DM_REWRITE_ABI);
+        die("%s: REWRITE_ABI %d, the host's is %d", path, abi, DM_REWRITE_ABI);
+    }
+    if (abi < 0) { static int warned; if (!warned++) LOG("warning: %s has no REWRITE_ABI (rewritten before the number was written): run as contract %d (porter apk-update --check judges such a pack)", path, DM_REWRITE_ABI); }
     if (!m->patch_off || m->key_page_off % 0x4000 || m->key_page_size != 0x4000 || seen != (1u << KEY_N) - 1)
         die("%s: the output comes from an old rewriter; rewrite the modules again with dm/tools/patch_nso.py", path);
     if (m->patch_off < 0 && (!m->image_size || !m->file_image_len || m->file_image_len % 0x4000 || m->patch_off % 0x4000 || m->key_page_off + m->key_page_size > m->image_size))

@@ -229,7 +229,6 @@ def manifest(d, progress=None):
     if not bund:
         out = dict(format=1, id=list_id(files), package=man['package'], version=man['version'], display=man.get('display', ''), variants=man.get('variants', []),
                    bytes=total, made=time.strftime('%Y-%m-%d %H:%M:%S'), files=files)
-        text = json.dumps(out, indent=1, ensure_ascii=False)
     else:
         bundles, members, paths = [], [], {f['path'] for f in files}
         for k, (rel, p, size, mt) in enumerate(tars):
@@ -245,15 +244,32 @@ def manifest(d, progress=None):
         total += sum(m['size'] for m in members)
         out = dict(format=2, id=list_id(members + files), package=man['package'], version=man['version'], display=man.get('display', ''), variants=man.get('variants', []),
                    bytes=total, made=time.strftime('%Y-%m-%d %H:%M:%S'), bundles=bundles, files=members + files)
-        head = {k: v for k, v in out.items() if k not in ('bundles', 'files')}   # one line per bundle and per file: 207,000 files in indented JSON was 40 MB
-        line = lambda x: json.dumps(x, ensure_ascii=False, separators=(',', ':'))
-        text = (json.dumps(head, indent=1, ensure_ascii=False)[:-2] + ',\n "bundles": [\n  ' + ',\n  '.join(map(line, bundles)) + '\n ],\n "files": [\n  '
-                + ',\n  '.join(map(line, out['files'])) + '\n ]\n}')
+    text = dump(out)
     tmp = d / (FILES + '.new')
     tmp.write_text(text, encoding='utf-8', newline='\n'); os.replace(tmp, d / FILES)
     try: shutil.copyfile(d / FILES, cache_file(d))
     except OSError: pass
     return dict(out, hashed=hashed)
+
+
+def dump(out):   # files.json's text: indented for format 1; for format 2 one line per bundle and per file (207,000 files in indented JSON was 40 MB)
+    if out.get('format') != 2: return json.dumps(out, indent=1, ensure_ascii=False)
+    head = {k: v for k, v in out.items() if k not in ('bundles', 'files')}
+    line = lambda x: json.dumps(x, ensure_ascii=False, separators=(',', ':'))
+    return (json.dumps(head, indent=1, ensure_ascii=False)[:-2] + ',\n "bundles": [\n  ' + ',\n  '.join(map(line, out['bundles'])) + '\n ],\n "files": [\n  '
+            + ',\n  '.join(map(line, out['files'])) + '\n ]\n}')
+
+
+def replace_file(fj, rel, data):
+    """files.json fj (a dict) with the loose file rel's entry for data (bytes) instead: its size and SHA-256, the list's id and bytes again (porter apk-update: a new
+    nx2a-data.json in a published pack, the rest of the pack unchanged). BuildError when rel is not a loose file of the list"""
+    out = json.loads(json.dumps(fj))
+    f = next((f for f in out.get('files', []) if f.get('path') == rel and 'bundle' not in f), None)
+    if f is None: raise BuildError(f'{FILES} lists no file {rel}')
+    out['bytes'] = out.get('bytes', 0) - f['size'] + len(data)
+    f.update(size=len(data), sha256=hashlib.sha256(data).hexdigest(), mtime=0)   # (mtime: the hash cache's, of the PC that hashed it; 0 makes the next porter publish hash it again)
+    out['id'] = list_id(out['files']); out['made'] = time.strftime('%Y-%m-%d %H:%M:%S')
+    return out
 
 
 def cache_file(d): return Path(d).with_name(Path(d).name + '.hashes.json')   # <App>-data.hashes.json beside the pack: the hash cache across ports (not to upload)

@@ -13,6 +13,8 @@
 #include "pixel_font.h"
 #include "saves_android.h"
 #include "savecloud.h"
+#include "rewrite_abi.h"
+#include <dirent.h>
 #include <math.h>
 #include <time.h>
 #include <android/asset_manager.h>
@@ -89,6 +91,7 @@ int dm_external_active(void) { return atomic_load(&g_external_active); }
 __attribute__((weak)) void vk_window_lost(void) {}   // the backend lets go of the window's swapchain before the window goes
 void dm_sync_window(ANativeWindow *w); int dm_sync_begin(ANativeActivity *act, const char *root, void (*done)(void));   // datasync_android.c: the data from a server (porter --data-url)
 int dm_prep_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(void));   // datasync_android.c: the shader preparation (gfx_vk_gpl.inc vk_gpl_prepare), on the same screen
+int dm_notice_begin(ANativeActivity *act, ANativeWindow *w, const char *const ko[3], const char *const en[3], const char *detail);   // datasync_android.c: a notice the start stops at
 static void on_window_created(ANativeActivity *a, ANativeWindow *w) { (void)a; pthread_mutex_lock(&g_win_mu); g_win = w; pthread_mutex_unlock(&g_win_mu); dm_sync_window(w); }
 static void on_window_destroyed(ANativeActivity *a, ANativeWindow *w) { (void)a; (void)w; pthread_mutex_lock(&g_win_mu); g_win = NULL; pthread_mutex_unlock(&g_win_mu); dm_sync_window(NULL); vk_window_lost(); }
 JNIEXPORT void JNICALL Java_org_nx2a_ExternalActivity_externalSurface(JNIEnv *env, jclass cls, jobject surface) {
@@ -1376,6 +1379,30 @@ static int romfs_readable(ANativeActivity *act, int sdk) {   // 0: the game cann
     LOG("RomFS: %s, outside the app's files folder (%s granted)", r, what);
     return 1;
 }
+// ---- the rewritten modules' contract with this host (dm/host/rewrite_abi.h): every <module>.fixups.tsv of mods/ and mods-<variant>/ says the REWRITE_ABI it was written
+// for. A pack of another number would crash somewhere in the game's code (an APK whose host was updated alone, porter apk-update, over data that needs a port again): the app
+// says so on the screen and in the log, and the game is not started. A table without the number (a pack from before it) is run as before; loader.c logs it ----
+static int rewrite_abi_fits(char *why, size_t cap) {   // 0: a module of another contract (why: which, for the screen)
+    DIR *top = opendir(g_root); struct dirent *e; int ok = 1;
+    if (!top) return 1;
+    while (ok && (e = readdir(top))) {
+        if (strcmp(e->d_name, "mods") && strncmp(e->d_name, "mods-", 5)) continue;
+        char d[900]; snprintf(d, sizeof d, "%s/%s", g_root, e->d_name);
+        DIR *m = opendir(d); struct dirent *f; if (!m) continue;
+        while (ok && (f = readdir(m))) {
+            size_t n = strlen(f->d_name); if (n < 11 || strcmp(f->d_name + n - 11, ".fixups.tsv")) continue;
+            char p[1200], line[256]; snprintf(p, sizeof p, "%s/%s", d, f->d_name); FILE *t = fopen(p, "r"); if (!t) continue;
+            while (fgets(line, sizeof line, t) && line[0] == '#')
+                if (!strncmp(line, "# REWRITE_ABI", 13) && atoi(line + 13) != DM_REWRITE_ABI) {
+                    snprintf(why, cap, "%s/%s: REWRITE_ABI %d, this app's host %d", e->d_name, f->d_name, atoi(line + 13), DM_REWRITE_ABI); ok = 0; break;
+                }
+            fclose(t);
+        }
+        closedir(m);
+    }
+    closedir(top);
+    return ok;
+}
 static int g_sdk;
 static void game_start(ANativeActivity *act, int late); static void game_start_late(void); static int prep_start(void); static void prep_late(void);
 static void game_run(ANativeActivity *act); static void cloud_done(int quit);
@@ -1431,6 +1458,16 @@ static void game_start(ANativeActivity *act, int late) {   // late: after onCrea
     // the save manager's requests (saves_android.c), before the host mounts the save: an import chosen in the menu or pushed by porter, an export porter asks for
     if (dm_saves_start(g_root)) { LOG("[saves] the request asked the app to end: the game is not started"); g_quit = 1; if (late) act_finish(act); return; }
     if (!romfs_readable(act, sdk)) { g_quit = 1; if (late) act_finish(act); return; }   // after the save manager's requests, which need no RomFS
+    char why[300];
+    if (!rewrite_abi_fits(why, sizeof why)) {   // the notice stays until the player leaves the app; its input goes to on_input_early (g_syncing), which hands the keys back
+        LOG("[RED] the game's rewritten code does not fit this APK's host (%s): the game is not started. Install the APK that came with the data, or port the game again "
+            "from its files (porter apk-update refuses such a pack)", why);
+        static const char *const ko[3] = {"게임을 시작할 수 없습니다", "이 앱과 기기에 있는 게임 데이터가 서로 맞지 않습니다", "데이터와 함께 배포된 앱을 설치하거나 배포한 곳에 알려 주세요"};
+        static const char *const en[3] = {"The game cannot start", "This app and the game data on the device do not fit together", "Install the app that came with the data, or tell where you got it"};
+        atomic_store(&g_syncing, 1);
+        if (!dm_notice_begin(act, phone_window(), ko, en, why)) { atomic_store(&g_syncing, 0); g_quit = 1; if (late) act_finish(act); }
+        return;
+    }
     // the save's cloud sync (savecloud_android.c, sync.txt), still before the host mounts the save: its start screen runs on threads of its own and the game starts from
     // cloud_done on this thread; without sync.txt (or in a trial build) the game starts at once, as before
     atomic_store(&g_syncing, 1);

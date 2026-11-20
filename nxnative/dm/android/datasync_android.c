@@ -42,6 +42,7 @@ static struct {
 } S = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, .status = -1, .pipe = {-1, -1}};
 static struct { int on, done, total, gl_tried; } P;   // the shader preparation (dm_prep_begin), under S.mu: the screen shows it instead of the sync
 static struct { int on, gl_tried; } CL;              // the cloud sync's start (dm_cloud_screen_begin), under S.mu: the screen shows its view
+static struct { int on, gl_tried; char ko[3][200], en[3][200], detail[300]; } NT;   // a notice the start stops at (dm_notice_begin), under S.mu: shown until the app ends
 // the pointer (an asset of version 2): its address, key and the pack's folder under the root; the asset's own server (base, auth) for when neither the pointer nor the
 // cache answers; cache: the file in the app's internal storage the last pointer line read is kept in (as it came, encrypted). fresh: the pointer itself answered this run
 static struct { int on, fresh; char pointer[1024], sub[1024], base[1024], auth[600], cache[600]; uint8_t key[32]; } PT;
@@ -270,6 +271,13 @@ static void draw_prep(canvas *c, int done, int total, double el) {   // el: seco
 }
 // The cloud sync's view (savecloud.h dm_cloud_view): a title, small lines, two cards side by side or a row of buttons, a bar, a hint at the bottom. cl_layout places the cards
 // and buttons, for the drawing and for a touch's hit (dm_cloud_screen_hit) alike
+static void draw_notice(canvas *c) {   // the title, two lines in the app's language, the detail (the log's words) small below
+    int ko = korean(), y = c->h / 2 - 66;
+    fill(c, 0, 0, c->w, c->h, RGB(18, 20, 26));
+    ctext_fit(c, ko ? NT.ko[0] : NT.en[0], y, 3, RGB(255, 150, 120)); y += 44;
+    for (int i = 1; i < 3; i++) { ctext_fit(c, ko ? NT.ko[i] : NT.en[i], y, 2, i == 1 ? RGB(235, 238, 245) : RGB(170, 180, 200)); y += 28; }
+    if (NT.detail[0]) ctext_fit(c, NT.detail, y + 8, 1, RGB(120, 130, 150));
+}
 static int cl_canvas_h(int ww, int wh) { int ch = ww > 0 && wh > 0 ? 640 * wh / ww : 360; return ch < 240 ? 240 : ch; }
 static int cl_layout(int cw, int ch, const dm_cloud_view *v, int r[3][4]) {   // the rectangles (x, y, w, h) of the cards, else of the buttons; their count
     if (v->ncards) { int w = 250, h = 112, gap = 24, x0 = (cw - 2 * w - gap) / 2, y = ch / 2 - 64;
@@ -371,15 +379,16 @@ static void *screen_thread(void *a) {
         }
         // drawn only once the sync takes a moment: a launch with the data up to date shows no screen at all; the preparation once it makes parts (EGL opened then)
         int pd = P.done, pt = P.total; if (P.on && pt && !P.gl_tried) { P.gl_tried = 1; G.ok = !gl_load(); if (!G.ok) LOG("[RED] shaders: no EGL / GLES 2: the preparation runs without its screen"); t0 = t; }
+        if (NT.on && !NT.gl_tried) { NT.gl_tried = 1; G.ok = !gl_load(); if (!G.ok) LOG("[RED] notice: no EGL / GLES 2: the notice is in the log only"); }
         dm_cloud_view cv; int cl_show = 0;
         if (CL.on) { dm_cloud_view_get(&cv); cl_show = cv.urgent || t - t0 > 300;   // (savecloud.h: its lock is never held while this file's is taken)
             if (cl_show && !CL.gl_tried) { CL.gl_tried = 1; G.ok = !gl_load(); if (!G.ok) LOG("[RED] cloud: no EGL / GLES 2: the sync's start runs without its screen"); } }
-        if (w && G.ok && (CL.on ? cl_show : P.on ? pt > 0 : t - t0 > 400)) {
+        if (w && G.ok && (NT.on || (CL.on ? cl_show : P.on ? pt > 0 : t - t0 > 400))) {
             pthread_mutex_unlock(&S.mu);
             int ww = ANativeWindow_getWidth(w), wh = ANativeWindow_getHeight(w), cw = 640, ch = ww > 0 && wh > 0 ? 640 * wh / ww : 360;
             if (ch < 240) ch = 240;
             if (c.w != cw || c.h != ch) { free(c.px); c.px = malloc((size_t)cw * ch * 4); c.w = cw; c.h = ch; }
-            if (c.px) { if (CL.on) draw_cloud(&c, &cv); else if (P.on) draw_prep(&c, pd, pt, (t - t0) / 1000.0); else draw(&c, &p, st, ws, msg, speed); gl_show(&c, w); }
+            if (c.px) { if (NT.on) draw_notice(&c); else if (CL.on) draw_cloud(&c, &cv); else if (P.on) draw_prep(&c, pd, pt, (t - t0) / 1000.0); else draw(&c, &p, st, ws, msg, speed); gl_show(&c, w); }
             pthread_mutex_lock(&S.mu);
         }
         struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 200 * 1000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
@@ -532,6 +541,21 @@ int dm_cloud_screen_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(v
     pthread_mutex_unlock(&S.mu);
     pthread_t t;
     if (pthread_create(&t, NULL, screen_thread, NULL)) { LOG("[RED] cloud: cannot start the screen thread"); ALooper_removeFd(lp, np[0]); close(np[0]); close(np[1]); CL.on = 0; return 0; }
+    pthread_detach(t);
+    return 1;
+}
+// ---- a notice the start stops at (front_android.c: data rewritten for another host contract): this screen until the player leaves the app; the game is not started ----
+// ko, en: the title and two lines in each language; detail: the log's line, small. 0 when the screen cannot start (the caller ends the app)
+int dm_notice_begin(ANativeActivity *act, ANativeWindow *w, const char *const ko[3], const char *const en[3], const char *detail) {
+    pthread_mutex_lock(&S.mu);
+    S.act = act; if (w && !S.win) S.win = w; S.done = NULL; S.finished = 0; S.lost = 0; S.released = 0; P.on = 0; CL.on = 0;
+    NT.on = 1; NT.gl_tried = 0;
+    for (int i = 0; i < 3; i++) { snprintf(NT.ko[i], sizeof NT.ko[i], "%s", ko[i]); snprintf(NT.en[i], sizeof NT.en[i], "%s", en[i]); }
+    snprintf(NT.detail, sizeof NT.detail, "%s", detail ? detail : "");
+    G.ok = 0; G.prog = 0; G.tex = 0; G.surf = NULL; G.on = NULL;   // (an earlier screen's context is gone with it)
+    pthread_mutex_unlock(&S.mu);
+    pthread_t t;
+    if (pthread_create(&t, NULL, screen_thread, NULL)) { LOG("[RED] notice: cannot start the screen thread"); NT.on = 0; return 0; }
     pthread_detach(t);
     return 1;
 }

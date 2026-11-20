@@ -86,6 +86,13 @@ python -m porter host --package org.nx2a.supermario3dworld
 
 It refuses when the game's code on the device was rewritten with other rewriter sources than this checkout's; then port the game again from its files. It also refuses a host built from another profile header than this checkout's (another layout, `--alias-headroom` or a derived profile); a header that differs only by defines added later that are off (`ADDED_DEFINES` in `porter/host.py`) is accepted. The data pack is not changed. How it works: [ARCHITECTURE.md](ARCHITECTURE.md#the-port).
 
+`porter apk-update` makes a released APK file again with this checkout's host and a new build number, without a device or the game's files (docs/ARCHITECTURE.md, The port): the data pack on the server stays, so its rewritten code must fit the host (`REWRITE_ABI`, `dm/host/rewrite_abi.h`; `--check` says whether it does). A change to the contract between the rewriter's output and the host (the slots, the gates, the tables, the `OBS_*` numbers, the state page) raises `DM_REWRITE_ABI` in that header; a commit before the number that changed the rewriter's code goes in `dm/tools/rewrite_abi.py` `COMMITS`.
+
+```
+python -m porter apk-update --check ATrainAllAboardTourism.apk
+python -m porter apk-update ATrainAllAboardTourism.apk --build 8 -o apk-update
+```
+
 ## Layout
 
 - `porter/`: the port pipeline (`python -m porter`).
