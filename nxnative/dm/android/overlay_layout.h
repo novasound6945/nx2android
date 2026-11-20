@@ -191,11 +191,11 @@ enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EX
             // (front_android.c limit_apply: Auto, 60, 40, 30, held through DM_FPS_PIN); OVM_AUDIO: the audio output, a row only where the app has outputs to choose
             // (dm_menu_audio_available: an external-screen port); OVM_CLOUD: the save's cloud sync for this game, a switch with its status in place of ON / OFF;
             // OVM_CLOUD_UP: Upload now while an upload is owed, else how the last one went. Both only with the files folder's sync.txt (savecloud_android.c dm_cloud_available);
-            // OVM_TOUCH: every touch is the game's own touch screen and the gamepad is not drawn (front_android.c g_set_touch, settings.txt touch=); OVM_EXIT: the button
+            // OVM_TOUCH: no row any more (players did not need it): touch passthrough stays (front_android.c g_set_touch: env.txt DM_TOUCH, settings.txt touch=); OVM_EXIT: the button
             // row's Exit game beside Resume (front_android.c menu_do: the app ends as Android ends it - Activity.finish(), never a hard exit)
 #define OVM_TABS 2
 #define OVM_PER_TAB 11
-static const int OVM_TAB_ITEMS[OVM_TABS][OVM_PER_TAB] = {{OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_TOUCH, OVM_PAD, -1, -1, -1, -1, -1},
+static const int OVM_TAB_ITEMS[OVM_TABS][OVM_PER_TAB] = {{OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_PAD, -1, -1, -1, -1, -1, -1},
                                                         {OVM_FPS, OVM_RATE, OVM_RES, OVM_DETAIL, OVM_MODE, OVM_LIMIT, OVM_EXPORT, OVM_IMPORT, OVM_CLOUD, OVM_CLOUD_UP, OVM_AUDIO}};
 // OVM_DETAIL: the detail distance of a game whose culling shader takes the host's factor (front_android.c dm_menu_detail_available): 1x the game's own, 1.5x, 2x
 #define OVM_LIMITS 4   // the frame rate limit's values, as the menu steps through them (front_android.c LIMIT_STEPS): Auto, 60, 40, 30 fps

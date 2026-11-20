@@ -116,7 +116,7 @@ void dm_focus_set(int st); void dm_audio_suspend(int on); void guest_clock_freez
 // ---- settings (the pause menu's), kept in the files folder as KEY=VALUE lines ----
 static char g_root[512], g_mods[600];   // the files folder; the modules folder the host runs (aspect_variant)
 static _Atomic int g_set_overlay = 1, g_set_rumble = 1, g_set_fps;   // the gamepad shown; rumble and tap vibration; the frame rate counter (top left)
-static _Atomic int g_set_touch;   // touch passthrough: every touch is the game's own touch screen and the gamepad is not drawn (the menu's Touch input row, settings.txt touch=)
+static _Atomic int g_set_touch;   // touch passthrough: every touch is the game's own touch screen and the gamepad is not drawn (env.txt DM_TOUCH, settings.txt touch=; the menu has no row for it)
 static _Atomic int g_set_opacity = 60;   // the gamepad's opacity, percent (OV_OPACITY_MIN..MAX: the menu's Opacity slider)
 static _Atomic int g_set_grid;   // the layout editor's Snap to grid
 static _Atomic int g_set_res = -1;      // the Resolution row's step the player chose: 0 low, 1 auto, 2 high (settings.txt res=); -1: env.txt's DM_RENDER_SCALE (res_step)
@@ -749,7 +749,7 @@ static void menu_do(int item) {
     else if (item == OVM_DETAIL) { int s = (atomic_load(&g_set_detail) + 1) % 3; atomic_store(&g_set_detail, s); detail_apply(s); settings_save(); }   // at once: the shader reads it every dispatch
     else if (item == OVM_RES) { int s = (res_step() + 1) % 3; atomic_store(&g_set_res, s); res_apply(s); settings_save(); }   // each press the next step; the host takes it within 30 presents
     else if (item == OVM_RATE) { int t = dm_fps_target_get() >= 60 ? 30 : 60; dm_fps_target_set(t); atomic_store(&g_set_rate, t); settings_save(); }   // at once: the stubs and the present pacing read the state page every frame
-    else if (item == OVM_TOUCH) { int on = !atomic_load(&g_set_touch);   // Touch input and Gamepad are the two input modes: one on turns the other off (dm_overlay_visible 3 hides the gamepad)
+    else if (item == OVM_TOUCH) { int on = !atomic_load(&g_set_touch);   // (no menu row any more, overlay_layout.h OVM_TAB_ITEMS) Touch input and Gamepad are the two input modes: one on turns the other off (dm_overlay_visible 3 hides the gamepad)
         atomic_store(&g_set_touch, on); atomic_store(&g_set_overlay, !on); atomic_store(&g_overlay, 1); settings_save(); }
     else if (item == OVM_TAB) { menu_tab(atomic_load(&g_menu_tab) + 1); return; }
     else if (item == OVM_EDIT) { dm_haptics_android_tap(); ed_open(); return; }
