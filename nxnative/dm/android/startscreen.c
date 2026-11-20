@@ -91,22 +91,24 @@ static inline void blend(uint32_t *p, uint32_t rgb, int a) {   // a 0..255
     *p = 0xff000000u | (uint32_t)db << 16 | (uint32_t)dg << 8 | (uint32_t)dr;
 }
 static float clampf(float v, float a, float b) { return v < a ? a : v > b ? b : v; }
-static void rrect(stv_canvas *c, float x, float y, float w, float h, float r, uint32_t rgb, float alpha) {   // a rounded rectangle, its edges smoothed
-    if (w <= 0 || h <= 0) return;
+// a rounded rectangle, its edges smoothed; drawn only left of xe (a held button's filled part: clipped by the button's own shape)
+static void rrect_clip(stv_canvas *c, float x, float y, float w, float h, float r, uint32_t rgb, float alpha, float xe) {
+    if (w <= 0 || h <= 0 || xe <= x) return;
     if (r > w / 2) r = w / 2;
     if (r > h / 2) r = h / 2;
     int x0 = (int)floorf(x), x1 = (int)ceilf(x + w), y0 = (int)floorf(y), y1 = (int)ceilf(y + h);
-    if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > c->w) x1 = c->w; if (y1 > c->h) y1 = c->h;
+    if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > c->w) x1 = c->w; if (y1 > c->h) y1 = c->h; if (xe < x1) x1 = (int)ceilf(xe);
     float cx = x + w / 2, cy = y + h / 2, hw = w / 2 - r, hh = h / 2 - r;
     for (int j = y0; j < y1; j++) {
         float dy = fabsf(j + 0.5f - cy) - hh; uint32_t *row = c->px + (size_t)j * c->w;
         for (int i = x0; i < x1; i++) {
             float dx = fabsf(i + 0.5f - cx) - hw, ox = dx > 0 ? dx : 0, oy = dy > 0 ? dy : 0;
             float d = sqrtf(ox * ox + oy * oy) + (dx > dy ? (dx < 0 ? dx : 0) : (dy < 0 ? dy : 0)) - r;
-            float cov = clampf(0.5f - d, 0, 1); if (cov > 0) blend(row + i, rgb, (int)(cov * alpha * 255 + 0.5f));
+            float cov = clampf(0.5f - d, 0, 1) * clampf(xe - i, 0, 1); if (cov > 0) blend(row + i, rgb, (int)(cov * alpha * 255 + 0.5f));
         }
     }
 }
+static void rrect(stv_canvas *c, float x, float y, float w, float h, float r, uint32_t rgb, float alpha) { rrect_clip(c, x, y, w, h, r, rgb, alpha, 1e9f); }
 // a stroked polyline in a 24-unit icon box at (ox, oy), k px a unit (the design's SVG icons), round caps and joins
 static void stroke(stv_canvas *c, const float *pts, int n, int closed, float ox, float oy, float k, float width, uint32_t rgb, float alpha) {
     float bx0 = 1e9f, by0 = 1e9f, bx1 = -1e9f, by1 = -1e9f, hw = width * k / 2;
@@ -309,11 +311,25 @@ static void draw_steps(stv_canvas *c, const stv_view *v, double t) {
 }
 
 // ---- a question of the cloud's start (Conflict / Offline / OtherDevice.dc.html): an icon, a title and body, two cards or a row of buttons, a countdown, hints ----
-typedef struct { float y_icon, y_title, y_body, y_main, y_cbar, y_count, y_foot; int body_b, nbody; float card_hgt, head_h[2]; float r[3][4]; int n; } qlay;
+typedef struct { float y_icon, y_title, y_body, y_main, y_cbar, y_count, y_foot, y_card; int body_b, nbody; float card_hgt, head_h[2]; float r[3][4]; int n; } qlay;
 static float card_head(const dm_cloud_card *k) { return k->newer ? LHN * 13 + 8 : LHN * 15; }
 static float card_inner(const dm_cloud_card *k) { return card_head(k) + 10 + LHN * 40 + 10 + LHN * 16 + (k->size[0] ? 10 + 6 + 1 + 14 + LHN * 15 : 0); }
 static qlay q_layout(const dm_cloud_view *q, box b) {   // in design px (the rectangles too); no font needed (a touch is tested on the main thread)
     qlay L; memset(&L, 0, sizeof L);
+    if (q->style == DM_CLOUD_STYLE_LIST || q->style == DM_CLOUD_STYLE_PAIR) {   // AfterTest / ManualPending.dc.html: the title and its line, the card of rows, the buttons, a line; 36 apart
+        int list = q->style == DM_CLOUD_STYLE_LIST, n = list ? (q->nbtn > 3 ? 3 : q->nbtn) : 2, nr = q->nrow > 2 ? 2 : q->nrow;
+        float th = LHN * 30 + (q->line[0][0] ? 10 + LHN * 16 : 0), ch = nr ? 40 + nr * LHN * 15 + (nr - 1) * 12 : 0, bh = list ? (n ? 68 + (n - 1) * 70 : 0) : 64, fh = q->foot[0] ? LHN * 14 : 0;
+        float y = (b.H - (th + (ch ? 36 + ch : 0) + 36 + bh + (fh ? 36 + fh : 0))) / 2;
+        L.y_title = y; L.y_body = y + LHN * 30 + 10; y += th + 36;
+        if (ch) { L.y_card = y; L.card_hgt = ch; y += ch + 36; }
+        L.y_main = y; L.n = n;
+        for (int i = 0; i < n; i++) {
+            if (list) { L.r[i][0] = b.W / 2 - 300; L.r[i][1] = y + (i ? 68 + 10 + (i - 1) * 70 : 0); L.r[i][2] = 600; L.r[i][3] = i ? 60 : 68; }
+            else { L.r[i][0] = b.W / 2 - 300 + i * 308; L.r[i][1] = y; L.r[i][2] = 292; L.r[i][3] = 64; }
+        }
+        L.y_foot = y + bh + 36;
+        return L;
+    }
     L.nbody = !!q->line[0][0] + !!q->line[1][0]; L.body_b = L.nbody == 2;
     float gap = q->ncards ? 40 : 36, hs[8]; int nb = 0; float *ys[8];
     if (q->icon) { hs[nb] = q->icon == DM_CLOUD_ICON_WARN ? 64 : 56; ys[nb++] = &L.y_icon; }
@@ -338,9 +354,42 @@ static void choice_frame(stv_canvas *c, float s, const float *r, float rad, int 
     rrect(c, r[0] * s, r[1] * s, r[2] * s, r[3] * s, rad * s, sel ? ACC : EDGE, 1);
     rrect(c, (r[0] + 2) * s, (r[1] + 2) * s, (r[2] - 4) * s, (r[3] - 4) * s, (rad - 2) * s, sel ? CARD_SEL : CARD, 1);
 }
+static void badge_a(stv_canvas *c, float s, float cx, float cy);
+static void kv_card(stv_canvas *c, float s, float x, float y, float w, float h, int n, const char (*key)[32], const char (*val)[96], const int *col, float pad);
+static void halo(stv_canvas *c, float s, const float *r, float rad, uint32_t rgb, float a);
+static void draw_pick(stv_canvas *c, const dm_cloud_view *q, box b, qlay L) {   // AfterTest / ManualPending.dc.html
+    float s = b.s, cx = b.W / 2; int list = q->style == DM_CLOUD_STYLE_LIST;
+    line(c, q->title, cx * s, L.y_title * s, 0, 1, 30 * s, INK, CENTER, (b.W - 64) * s, 0);
+    line(c, q->line[0], cx * s, L.y_body * s, 0, 0, 16 * s, DIM, CENTER, (b.W - 64) * s, 0);
+    if (L.card_hgt > 0) {   // (the rows' names are 48 bytes here: copied into the card's 32-byte columns would cut them, so drawn the same way by hand)
+        float x = cx - 328, w = 656; rrect(c, x * s, L.y_card * s, w * s, L.card_hgt * s, 16 * s, CARD, 1);   // (width 600 plus its padding: CSS's content box)
+        for (int i = 0; i < q->nrow && i < 2; i++) { float top = L.y_card + 20 + i * (LHN * 15 + 12);
+            float kw = line(c, q->row_k[i], (x + 28) * s, top * s, 0, 0, 15 * s, DIM, LEFT, (w - 56) * 0.45f * s, 0) / s;
+            line(c, q->row_v[i], (x + w - 28) * s, top * s, 0, 0, 15 * s, INK, RIGHT, (w - 56 - kw - 16) * s, 0); }
+    }
+    for (int i = 0; i < L.n; i++) {
+        const float *r = L.r[i]; int sel = list ? q->sel == i : i == 0;
+        if (i == 0) {   // the accent's: its name (dark, bold), A at its right in a list; the soft ring when chosen
+            if (sel) halo(c, s, r, 16, ACC, 0.18f);
+            rrect(c, r[0] * s, r[1] * s, r[2] * s, r[3] * s, 16 * s, ACC, 1);
+            if (list) { line(c, q->btn[0], (r[0] + 28) * s, r[1] * s, r[3] * s, 1, 20 * s, BG, LEFT, (r[2] - 56 - 44) * s, 0); badge_a(c, s, r[0] + r[2] - 28 - 14, r[1] + r[3] / 2); }
+            else line(c, q->btn[0], (r[0] + r[2] / 2) * s, r[1] * s, r[3] * s, 1, 19 * s, BG, CENTER, (r[2] - 24) * s, 0);
+        } else if (list) {
+            if (sel) choice_frame(c, s, r, 14, 1); else rrect(c, r[0] * s, r[1] * s, r[2] * s, r[3] * s, 14 * s, CARD, 0.85f);
+            float lw = line(c, q->btn[i], (r[0] + 28) * s, r[1] * s, r[3] * s, 0, 17 * s, INK, LEFT, (r[2] - 56) * 0.5f * s, 0) / s;
+            line(c, q->bnote[i], (r[0] + r[2] - 28) * s, r[1] * s, r[3] * s, 0, 13 * s, DIM, RIGHT, (r[2] - 56 - lw - 16) * s, 0);
+        } else {
+            rrect(c, r[0] * s, r[1] * s, r[2] * s, r[3] * s, 16 * s, 0x232935u, 1);
+            line(c, q->btn[i], (r[0] + r[2] / 2) * s, r[1] * s, r[3] * s, 0, 19 * s, INK, CENTER, (r[2] - 24) * s, 0);
+        }
+    }
+    if (q->foot[0]) line(c, q->foot, cx * s, L.y_foot * s, 0, 0, 14 * s, DIM2, CENTER, (b.W - 64) * s, 0);
+    if (q->foot2[0]) foot(c, q->foot2, b);
+}
 static void draw_ask(stv_canvas *c, const dm_cloud_view *q) {
     box b = box_of(c->w, c->h); float s = b.s, cx = b.W / 2; qlay L = q_layout(q, b);
     background(c, 0, 0, 0, 0, 0, 0, 0);
+    if (q->style == DM_CLOUD_STYLE_LIST || q->style == DM_CLOUD_STYLE_PAIR) { draw_pick(c, q, b, L); return; }
     if (q->icon == DM_CLOUD_ICON_OFFLINE) { static const float slash[] = {4, 4, 20, 20}; float x = (cx - 28) * s, y = L.y_icon * s, k = 56 * s / 24;
         stroke(c, CLOUD, (int)(sizeof CLOUD / sizeof *CLOUD / 2), 1, x, y, k, 1.6f, DIM, 1); stroke(c, slash, 2, 0, x, y, k, 1.6f, DIM, 1); }
     else if (q->icon == DM_CLOUD_ICON_WARN) { rrect(c, (cx - 32) * s, L.y_icon * s, 64 * s, 64 * s, 32 * s, WARN, 0.16f); icon_warn(c, (cx - 16) * s, (L.y_icon + 16) * s, 32 * s, 2); }
@@ -373,12 +422,236 @@ static void draw_ask(stv_canvas *c, const dm_cloud_view *q) {
     else if (q->foot[0] || q->foot2[0]) line(c, q->foot[0] ? q->foot : q->foot2, cx * s, L.y_foot * s, 0, 0, 14 * s, DIM2, CENTER, (b.W - 64) * s, 0);
 }
 
+// ---- the launcher and its pages (Launcher / LauncherWide / CloudSettings / AppSettings.dc.html): the rectangles in design px from fixed sizes only (a touch is tested
+// with them on the main thread, without a font) ----
+#define BTN 0x232935u      // a plain button
+#define RED_BG 0x231B1Du   // Back to the cloud save: its fill, edge, words and the held part
+#define RED_EDGE 0x5A3A3Au
+#define RED_INK 0xF2B8B5u
+#define RED_DIM 0xC99A97u
+#define RED_HOLD 0xE57373u
+#define TRACK_OFF 0x3A4150u
+#define RADIO_OFF 0x5A6270u
+static uint32_t col_of(int k) { return k == STV_COL_GOOD ? OK_GREEN : k == STV_COL_WARN ? WARN : k == STV_COL_DIM ? DIM : INK; }
+static void edged(stv_canvas *c, float s, const float *r, float rad, float edge_w, uint32_t edge, uint32_t fill) {   // a box with an edge inside its rectangle
+    rrect(c, r[0] * s, r[1] * s, r[2] * s, r[3] * s, rad * s, edge, 1);
+    rrect(c, (r[0] + edge_w) * s, (r[1] + edge_w) * s, (r[2] - 2 * edge_w) * s, (r[3] - 2 * edge_w) * s, (rad - edge_w) * s, fill, 1);
+}
+static void halo(stv_canvas *c, float s, const float *r, float rad, uint32_t rgb, float a) { rrect(c, (r[0] - 6) * s, (r[1] - 6) * s, (r[2] + 12) * s, (r[3] + 12) * s, (rad + 6) * s, rgb, a); }   // box-shadow 0 0 0 6px
+static void disc(stv_canvas *c, float cx, float cy, float r, uint32_t rgb, float a) { rrect(c, cx - r, cy - r, 2 * r, 2 * r, r, rgb, a); }
+static void ring(stv_canvas *c, float cx, float cy, float r, float w, uint32_t rgb) {   // a circle's outline, w wide, centred on radius r (pixels)
+    int x0 = (int)floorf(cx - r - w), x1 = (int)ceilf(cx + r + w), y0 = (int)floorf(cy - r - w), y1 = (int)ceilf(cy + r + w);
+    for (int j = y0 < 0 ? 0 : y0; j < y1 && j < c->h; j++) for (int i = x0 < 0 ? 0 : x0; i < x1 && i < c->w; i++) {
+        float d = hypotf(i + 0.5f - cx, j + 0.5f - cy), cov = clampf(w / 2 - fabsf(d - r) + 0.5f, 0, 1); if (cov > 0) blend(c->px + (size_t)j * c->w + i, rgb, (int)(cov * 255 + 0.5f));
+    }
+}
+static void tri(stv_canvas *c, const float *p, uint32_t rgb) {   // a filled triangle (pixels), its edges smoothed: the play icon (M7 4.5v15l13-7.5z)
+    float x0 = fminf(p[0], fminf(p[2], p[4])), x1 = fmaxf(p[0], fmaxf(p[2], p[4])), y0 = fminf(p[1], fminf(p[3], p[5])), y1 = fmaxf(p[1], fmaxf(p[3], p[5]));
+    float area = (p[2] - p[0]) * (p[5] - p[1]) - (p[4] - p[0]) * (p[3] - p[1]), sg = area < 0 ? -1.0f : 1.0f;
+    for (int j = (int)floorf(y0) < 0 ? 0 : (int)floorf(y0); j <= (int)ceilf(y1) && j < c->h; j++) for (int i = (int)floorf(x0) < 0 ? 0 : (int)floorf(x0); i <= (int)ceilf(x1) && i < c->w; i++) {
+        float px = i + 0.5f, py = j + 0.5f, d = 1e9f;
+        for (int k = 0; k < 3; k++) { const float *a = p + 2 * k, *b = p + 2 * ((k + 1) % 3); float ex = b[0] - a[0], ey = b[1] - a[1], l = hypotf(ex, ey);
+            if (l > 0) d = fminf(d, sg * ((px - a[0]) * ey - (py - a[1]) * ex) / -l); }
+        float cov = clampf(d + 0.5f, 0, 1); if (cov > 0) blend(c->px + (size_t)j * c->w + i, rgb, (int)(cov * 255 + 0.5f));
+    }
+}
+// lines of at most maxw (pixels), broken at the spaces, each lh high from top; returns the lines drawn (at most cap)
+static int para(stv_canvas *c, const char *s, float x, float top, float maxw, float size, float lh, uint32_t rgb, int align, int cap) {
+    char ln[400]; int n = 0; const char *p = s;
+    while (*p && n < cap) {
+        const char *best = NULL, *q = p;
+        for (;;) { const char *e = strchr(q, ' '); size_t k = (size_t)((e ? e : q + strlen(q)) - p); if (k >= sizeof ln) break;
+            memcpy(ln, p, k); ln[k] = 0; if (text_w(ln, 0, size, 0) > maxw && best) break;
+            best = e ? e : q + strlen(q); if (!e) break; q = e + 1; }
+        if (!best) best = p + strlen(p);
+        size_t k = (size_t)(best - p); if (k >= sizeof ln) k = sizeof ln - 1; memcpy(ln, p, k); ln[k] = 0;
+        if (n == cap - 1 && *best) { snprintf(ln, sizeof ln, "%s", p); }   // the last line takes the rest (made to fit)
+        line(c, ln, x, top + n * lh, lh, 0, size, rgb, align, maxw, 0);
+        n++; p = *best ? best + 1 : best;
+    }
+    return n;
+}
+static void head_line(stv_canvas *c, const stv_view *v, box b, float y) {   // the narrow screens' head (Main.dc.html's): the icon 72, the name over the version, centred
+    float s = b.s, cx = b.W / 2; int icon = v->icon && v->icon_w > 0 && v->icon_h > 0;
+    char nm[400]; float nsz = 30 * s, nw = fit(nm, sizeof nm, v->name, 1, &nsz, -0.5f * s, (fminf(b.W - 128, 1000) - 92) * s) / s;
+    float vw = text_w(v->version, 0, 15 * s, 0) / s, tw = fmaxf(nw, vw), x0 = cx - (92 + tw) / 2, ty = y + (72 - (LHN * 30 + 4 + LHN * 15)) / 2;
+    if (icon) image(c, v->icon, v->icon_w, v->icon_h, x0 * s, y * s, 72 * s, 16 * s); else rrect(c, x0 * s, y * s, 72 * s, 72 * s, 16 * s, EDGE, 1);
+    text_at(c, nm, (x0 + 92) * s, (ty + (LHN * 30 - LHN * nsz / s) / 2 + ASC * nsz / s) * s, 1, nsz, INK, -0.5f * s);
+    line(c, v->version, (x0 + 92) * s, (ty + LHN * 30 + 4) * s, 0, 0, 15 * s, DIM, LEFT, tw * s, 0);
+}
+static void foot_at(stv_canvas *c, const char *t, box b, float bottom, float size) { line(c, t, b.W / 2 * b.s, (b.H - bottom - LHN * size) * b.s, 0, 0, size * b.s, DIM2, CENTER, (b.W - 64) * b.s, 0); }
+
+typedef struct { float r[4][4], head_y, status_y, colx; } llay;   // the items (0..2) and Start (3); the narrow head's and statuses' tops; the wide left column's x
+static llay ln_layout(box b, int wide) {
+    llay L; memset(&L, 0, sizeof L);
+    float ih = wide ? 60 : 64, mt = wide ? 24 : 32, list = 3 * ih + 3 * 10 + mt + 72, x, y;
+    if (!wide) { float total = 72 + 36 + LHN * 14 + 36 + list; L.head_y = (b.H - total) / 2; L.status_y = L.head_y + 72 + 36; y = L.status_y + LHN * 14 + 36; x = b.W / 2 - 260; }
+    else { L.colx = (b.W - 916) / 2; x = L.colx + 340 + 56; y = (b.H - list) / 2; }
+    for (int i = 0; i < 3; i++) { L.r[i][0] = x; L.r[i][1] = y + i * (ih + 10); L.r[i][2] = 520; L.r[i][3] = ih; }
+    L.r[3][0] = x; L.r[3][1] = y + 3 * (ih + 10) + mt; L.r[3][2] = 520; L.r[3][3] = 72;
+    return L;
+}
+static void status_at(stv_canvas *c, const stv_status *st, float x, float top, float s, float gap, double t) {   // the icon (16) and the words (14), top: the line's
+    step_icon(c, st->state, x * s, (top + (LHN * 14 - 16) / 2) * s, 16 * s, t);
+    line(c, st->text, (x + 16 + gap) * s, top * s, 0, 0, 14 * s, st->state == STV_RUN ? INK : st->state == STV_FAIL ? WARN : DIM, LEFT, 0, 0);
+}
+static void badge_a(stv_canvas *c, float s, float cx, float cy) { disc(c, cx * s, cy * s, 14 * s, BG, 0.18f); line(c, "A", cx * s, (cy - LHN * 14 / 2) * s, 0, 1, 14 * s, BG, CENTER, 0, 0); }
+static void draw_launcher(stv_canvas *c, const stv_view *v, double t) {
+    box b = box_of(c->w, c->h); float s = b.s; int wide = wide_of(c->w, c->h); const stv_launcher *n = &v->ln; llay L = ln_layout(b, wide);
+    if (!wide) {   // Launcher.dc.html: the head, the three statuses in a row, the items
+        background(c, 1, c->w / 2.0f, (b.H / 2 - 100) * s, 600 * s, 110 * s, 0.16f, v->glow);
+        head_line(c, v, b, L.head_y);
+        float w[STV_NSTEPS], tot = 0;
+        for (int i = 0; i < STV_NSTEPS; i++) { w[i] = 16 + 6 + text_w(n->status[i].text, 0, 14 * s, 0) / s; tot += w[i] + (i ? 22 : 0); }
+        float x = b.W / 2 - tot / 2;
+        for (int i = 0; i < STV_NSTEPS; i++) { status_at(c, &n->status[i], x, L.status_y, s, 6, t); x += w[i] + 22; }
+    } else {   // LauncherWide.dc.html: the icon (88), the name (two lines at most), the version and the statuses in a column of 340 at the left, the items at the right
+        background(c, 1, (L.colx + 108) * s, (b.H / 2 - 10) * s, 460 * s, 100 * s, 0.16f, v->glow);
+        float lw = 340, nl = 1.25f * 28; char l1[400] = "", l2[400] = ""; const char *sp = NULL; float sz = 28 * s;
+        if (text_w(v->name, 1, sz, -0.5f * s) > lw * s) for (const char *q = v->name; *q; q++) if (*q == ' ') { char tmp[400]; size_t k = (size_t)(q - v->name); if (k >= sizeof tmp) break;
+            memcpy(tmp, v->name, k); tmp[k] = 0; if (text_w(tmp, 1, sz, -0.5f * s) <= lw * s) sp = q; else break; }
+        if (sp) { size_t k = (size_t)(sp - v->name); memcpy(l1, v->name, k); l1[k] = 0; snprintf(l2, sizeof l2, "%s", sp + 1); } else snprintf(l1, sizeof l1, "%s", v->name);
+        int lines = l2[0] ? 2 : 1; float h = 88 + 22 + lines * nl + 6 + LHN * 14 + 22 + 3 * LHN * 14 + 2 * 10, y = (b.H - h) / 2, x = L.colx;
+        if (v->icon && v->icon_w > 0 && v->icon_h > 0) image(c, v->icon, v->icon_w, v->icon_h, x * s, y * s, 88 * s, 20 * s); else rrect(c, x * s, y * s, 88 * s, 88 * s, 20 * s, EDGE, 1);
+        y += 88 + 22;
+        line(c, l1, x * s, y * s, nl * s, 1, 28 * s, INK, LEFT, lw * s, -0.5f * s); if (lines > 1) line(c, l2, x * s, (y + nl) * s, nl * s, 1, 28 * s, INK, LEFT, lw * s, -0.5f * s);
+        y += lines * nl + 6; line(c, v->version, x * s, y * s, 0, 0, 14 * s, DIM, LEFT, lw * s, 0); y += LHN * 14 + 22;
+        for (int i = 0; i < STV_NSTEPS; i++) { status_at(c, &n->status[i], x, y, s, 8, t); y += LHN * 14 + 10; }
+    }
+    float ls = wide ? 17 : 18, ns = wide ? 13 : 14;
+    for (int i = 0; i < 3; i++) {
+        const float *r = L.r[i]; int sel = n->sel == i && !n->waiting;
+        if (sel) choice_frame(c, s, r, 14, 1); else rrect(c, r[0] * s, r[1] * s, r[2] * s, r[3] * s, 14 * s, CARD, 0.85f);
+        float lw = line(c, n->item[i], (r[0] + 28) * s, r[1] * s, r[3] * s, 0, ls * s, INK, LEFT, (r[2] - 56) * 0.55f * s, 0) / s;
+        line(c, n->note[i], (r[0] + r[2] - 28) * s, r[1] * s, r[3] * s, 0, ns * s, DIM, RIGHT, (r[2] - 56 - lw - 16) * s, 0);
+    }
+    const float *r = L.r[3]; float k = 22 * s / 24, ix = (r[0] + 28) * s, iy = (r[1] + (r[3] - 22) / 2) * s;
+    if (!n->waiting) {   // Start: the accent's fill, the play icon, the name, A; chosen: the soft ring around it
+        if (n->sel == 3) halo(c, s, r, 16, ACC, 0.18f);
+        rrect(c, r[0] * s, r[1] * s, r[2] * s, r[3] * s, 16 * s, ACC, 1);
+        float p[6] = {ix + 7 * k, iy + 4.5f * k, ix + 7 * k, iy + 19.5f * k, ix + 20 * k, iy + 12 * k}; tri(c, p, BG);
+        line(c, n->start, (r[0] + 28 + 22 + 16) * s, r[1] * s, r[3] * s, 1, 22 * s, BG, LEFT, (r[2] - 28 - 22 - 16 - 28 - 28 - 16) * s, 0);
+        badge_a(c, s, r[0] + r[2] - 28 - 14, r[1] + r[3] / 2);
+    } else {   // pressed before the start was ready (LauncherWide.dc.html): the accent's edge, a spinner, the name over the line that says it starts once ready
+        choice_frame(c, s, r, 16, 1);
+        step_icon(c, STV_RUN, ix, iy, 22 * s, t);
+        float bh = LHN * 20 + 2 + LHN * 13, ty = r[1] + (r[3] - bh) / 2, tx = r[0] + 28 + 22 + 16;
+        line(c, n->start, tx * s, ty * s, 0, 1, 20 * s, INK, LEFT, (r[2] - tx + r[0] - 28) * s, 0);
+        line(c, n->start_sub, tx * s, (ty + LHN * 20 + 2) * s, 0, 0, 13 * s, DIM, LEFT, (r[2] - tx + r[0] - 28) * s, 0);
+    }
+    if (n->keys[0]) foot_at(c, n->keys, b, wide ? 24 : 36, wide ? 13 : 14);
+}
+
+typedef struct { float x0, y0, top, mh, note_y, rx, rw, card_y, card_h, r[5][4]; } clay;   // r: the modes (0..2), Upload now (3), Back to the cloud save (4)
+static clay cp_layout(const stv_cloudpage *p, box b) {
+    clay L; memset(&L, 0, sizeof L);
+    L.x0 = (b.W - 1040) / 2; L.y0 = fmaxf(48, 96 + (b.H - 960) / 2); L.top = L.y0 + 80;
+    float y = L.top + LHN * 14 + 2 + 12; L.mh = 44 + LHN * 19 + 4 + LHN * 14;
+    for (int i = 0; i < 3; i++) { L.r[i][0] = L.x0; L.r[i][1] = y + i * (L.mh + 12); L.r[i][2] = 520; L.r[i][3] = L.mh; }
+    L.note_y = y + 3 * L.mh + 2 * 12 + 12 + 4;
+    L.rx = L.x0 + 560; L.rw = 480; L.card_y = y; int n = p->nrow < 0 ? 0 : p->nrow > 4 ? 4 : p->nrow;
+    L.card_h = 40 + n * LHN * 15 + (n > 1 ? (n - 1) * 12 : 0);
+    float uy = L.card_y + L.card_h + 12;
+    L.r[3][0] = L.rx; L.r[3][1] = uy; L.r[3][2] = L.rw; L.r[3][3] = 56;
+    L.r[4][0] = L.rx; L.r[4][1] = uy + 56 + 12; L.r[4][2] = L.rw; L.r[4][3] = 56;
+    return L;
+}
+static void page_title(stv_canvas *c, const char *title, const char *game, float x0, float w, float y0, float s) {   // the title (30 bold) and the game's name at the right, on one baseline
+    float tw = line(c, title, x0 * s, y0 * s, 0, 1, 30 * s, INK, LEFT, w * 0.6f * s, 0) / s;
+    line(c, game, (x0 + w) * s, (y0 + ASC * (30 - 15)) * s, 0, 0, 15 * s, DIM, RIGHT, (w - tw - 24) * s, 0);
+}
+static void kv_card(stv_canvas *c, float s, float x, float y, float w, float h, int n, const char (*key)[32], const char (*val)[96], const int *col, float pad) {   // a card of rows
+    rrect(c, x * s, y * s, w * s, h * s, 16 * s, CARD, 1);
+    for (int i = 0; i < n; i++) { float top = y + 20 + i * (LHN * 15 + 12);
+        float kw = line(c, key[i], (x + pad) * s, top * s, 0, 0, 15 * s, DIM, LEFT, (w - 2 * pad) * 0.45f * s, 0) / s;
+        line(c, val[i], (x + w - pad) * s, top * s, 0, 0, 15 * s, col_of(col[i]), RIGHT, (w - 2 * pad - kw - 16) * s, 0); }
+}
+static void draw_cloudpage(stv_canvas *c, const stv_view *v) {
+    box b = box_of(c->w, c->h); float s = b.s; const stv_cloudpage *p = &v->cp; clay L = cp_layout(p, b);
+    background(c, 0, 0, 0, 0, 0, 0, 0);
+    page_title(c, p->title, v->name, L.x0, 1040, L.y0, s);
+    line(c, p->label[0], L.x0 * s, L.top * s, 0, 0, 14 * s, DIM, LEFT, 520 * s, 0);
+    for (int i = 0; i < 3; i++) {   // the modes: a radio, the name (19 bold) over what it does (14); the one chosen with the accent's edge
+        const float *r = L.r[i]; int sel = p->sel == i && !p->modes_off, on = p->checked == i;
+        if (sel) edged(c, s, r, 16, 2, ACC, CARD_SEL); else edged(c, s, r, 16, 2, EDGE, CARD);
+        float cx = r[0] + 26 + 11, cy = r[1] + 22 + 2 + 11;
+        ring(c, cx * s, cy * s, 10 * s, 2 * s, on ? ACC : RADIO_OFF); if (on) disc(c, cx * s, cy * s, 5 * s, ACC, 1);
+        float tx = r[0] + 26 + 22 + 16, tw = r[2] - (tx - r[0]) - 26;
+        line(c, p->mode[i], tx * s, (r[1] + 22) * s, 0, 1, 19 * s, p->modes_off && !on ? DIM2 : INK, LEFT, tw * s, 0);
+        line(c, p->desc[i], tx * s, (r[1] + 22 + LHN * 19 + 4) * s, 0, 0, 14 * s, p->modes_off && !on ? DIM2 : BODY, LEFT, tw * s, 0);
+    }
+    if (p->note[0]) para(c, p->note, L.x0 * s, L.note_y * s, 520 * s, 13 * s, 1.5f * 13 * s, DIM2, LEFT, 3);
+    line(c, p->label[1], L.rx * s, L.top * s, 0, 0, 14 * s, DIM, LEFT, L.rw * s, 0);
+    kv_card(c, s, L.rx, L.card_y, L.rw, L.card_h, p->nrow > 4 ? 4 : p->nrow, p->key, p->val, p->col, 24);
+    const float *u = L.r[3];   // Upload now
+    if (p->sel == 3) edged(c, s, u, 14, 2, ACC, CARD_SEL); else rrect(c, u[0] * s, u[1] * s, u[2] * s, u[3] * s, 14 * s, BTN, 1);
+    float uw = line(c, p->up, (u[0] + 24) * s, u[1] * s, u[3] * s, 0, 16 * s, p->up_off ? DIM2 : INK, LEFT, (u[2] - 48) * 0.6f * s, 0) / s;
+    line(c, p->up_note, (u[0] + u[2] - 24) * s, u[1] * s, u[3] * s, 0, 13 * s, DIM, RIGHT, (u[2] - 48 - uw - 16) * s, 0);
+    const float *k = L.r[4];   // Back to the cloud save: red, its held part filling from the left
+    int ks = p->sel == 4;
+    if (p->back_off) rrect(c, k[0] * s, k[1] * s, k[2] * s, k[3] * s, 14 * s, BTN, 1);
+    else edged(c, s, k, 14, ks ? 2 : 1, ks ? RED_HOLD : RED_EDGE, RED_BG);
+    if (!p->back_off && p->hold > 0) { float hw = k[2] * (p->hold > 1000 ? 1000 : p->hold) / 1000.0f; rrect_clip(c, k[0] * s, k[1] * s, k[2] * s, k[3] * s, 14 * s, RED_HOLD, 0.22f, (k[0] + hw) * s); }
+    float bw = line(c, p->back, (k[0] + 24) * s, k[1] * s, k[3] * s, 0, 16 * s, p->back_off ? DIM2 : RED_INK, LEFT, (k[2] - 48) * 0.55f * s, 0) / s;
+    line(c, p->back_note, (k[0] + k[2] - 24) * s, k[1] * s, k[3] * s, 0, 13 * s, p->back_off ? DIM2 : RED_DIM, RIGHT, (k[2] - 48 - bw - 16) * s, 0);
+    if (p->keys[0]) foot_at(c, p->keys, b, 36, 14);
+}
+
+typedef struct { float x0, y0, lab1, lab2, note_y, sw[4], card[4], btn[2][4]; } alay;
+static alay ap_layout(box b) {
+    alay L; memset(&L, 0, sizeof L);
+    L.x0 = (b.W - 720) / 2; L.y0 = fmaxf(56, 120 + (b.H - 960) / 2);
+    float y = L.y0 + LHN * 30 + 28; L.lab1 = y; y += LHN * 14 + 10;
+    float sh = 40 + LHN * 18 + 4 + 2 * 1.5f * 14; L.sw[0] = L.x0; L.sw[1] = y; L.sw[2] = 720; L.sw[3] = sh; y += sh + 28;
+    L.lab2 = y; y += LHN * 14 + 10;
+    float ch = 40 + 3 * LHN * 15 + 2 * 12; L.card[0] = L.x0; L.card[1] = y; L.card[2] = 720; L.card[3] = ch; y += ch + 10;
+    for (int i = 0; i < 2; i++) { L.btn[i][0] = L.x0 + i * 365; L.btn[i][1] = y; L.btn[i][2] = 355; L.btn[i][3] = 56; }
+    L.note_y = y + 56 + 10;
+    return L;
+}
+static void draw_apppage(stv_canvas *c, const stv_view *v) {
+    box b = box_of(c->w, c->h); float s = b.s; const stv_apppage *p = &v->ap; alay L = ap_layout(b);
+    background(c, 0, 0, 0, 0, 0, 0, 0);
+    page_title(c, p->title, v->name, L.x0, 720, L.y0, s);
+    line(c, p->label[0], L.x0 * s, L.lab1 * s, 0, 0, 14 * s, DIM, LEFT, 720 * s, 0);
+    const float *r = L.sw;   // the switch's card: the name (18), two lines (14, 1.5), the switch (56 x 32) at the right
+    if (p->sel == 0) edged(c, s, r, 16, 2, ACC, CARD); else rrect(c, r[0] * s, r[1] * s, r[2] * s, r[3] * s, 16 * s, CARD, 1);
+    line(c, p->quick, (r[0] + 24) * s, (r[1] + 20) * s, 0, 0, 18 * s, INK, LEFT, (r[2] - 48 - 56 - 20) * s, 0);
+    for (int i = 0; i < 2; i++) line(c, p->quick_desc[i], (r[0] + 24) * s, (r[1] + 20 + LHN * 18 + 4 + i * 21) * s, 21 * s, 0, 14 * s, DIM, LEFT, (r[2] - 48 - 56 - 20) * s, 0);
+    float tx = r[0] + r[2] - 24 - 56, ty = r[1] + (r[3] - 32) / 2;
+    rrect(c, tx * s, ty * s, 56 * s, 32 * s, 16 * s, p->quick_on ? ACC : TRACK_OFF, 1);
+    disc(c, (tx + (p->quick_on ? 28 : 4) + 12) * s, (ty + 4 + 12) * s, 12 * s, p->quick_on ? 0xFFFFFFu : BODY, 1);
+    line(c, p->label[1], L.x0 * s, L.lab2 * s, 0, 0, 14 * s, DIM, LEFT, 720 * s, 0);
+    kv_card(c, s, L.card[0], L.card[1], L.card[2], L.card[3], p->nrow > 3 ? 3 : p->nrow, p->key, p->val, p->col, 24);
+    for (int i = 0; i < 2; i++) {
+        const float *k = L.btn[i]; int off = i ? p->clear_off : p->verify_off;
+        if (p->sel == i + 1) edged(c, s, k, 14, 2, ACC, CARD_SEL); else rrect(c, k[0] * s, k[1] * s, k[2] * s, k[3] * s, 14 * s, BTN, 1);
+        line(c, i ? p->clear : p->verify, (k[0] + k[2] / 2) * s, k[1] * s, k[3] * s, 0, 16 * s, off ? DIM2 : INK, CENTER, (k[2] - 32) * s, 0);
+    }
+    if (p->note[0]) para(c, p->note, L.x0 * s, L.note_y * s, 720 * s, 13 * s, 1.5f * 13 * s, DIM2, LEFT, 2);
+    if (p->keys[0]) foot_at(c, p->keys, b, 36, 14);
+}
+int stv_page_hit(const stv_view *v, int w, int h, float x, float y) {
+    box b = box_of(w, h); float X = x / b.s, Y = y / b.s; const float *r[5]; int n = 0;
+    llay ll; clay cl; alay al;
+    if (v->screen == STV_SCREEN_LAUNCHER) { ll = ln_layout(b, wide_of(w, h)); for (int i = 0; i < 4; i++) r[n++] = ll.r[i]; }
+    else if (v->screen == STV_SCREEN_CLOUD) { cl = cp_layout(&v->cp, b); for (int i = 0; i < 5; i++) r[n++] = cl.r[i]; }
+    else if (v->screen == STV_SCREEN_APP) { al = ap_layout(b); r[n++] = al.sw; r[n++] = al.btn[0]; r[n++] = al.btn[1]; }
+    for (int i = 0; i < n; i++) if (X >= r[i][0] && X < r[i][0] + r[i][2] && Y >= r[i][1] && Y < r[i][1] + r[i][3]) return i;
+    return -1;
+}
+
 void stv_draw(stv_canvas *c, const stv_view *v, double t) {
     if (!c || !c->px || c->w <= 0 || c->h <= 0) return;
-    if (v->ask && v->ask->ask) draw_ask(c, v->ask); else draw_steps(c, v, t);
+    if (v->ask && v->ask->ask) draw_ask(c, v->ask);
+    else if (v->screen == STV_SCREEN_LAUNCHER) draw_launcher(c, v, t);
+    else if (v->screen == STV_SCREEN_CLOUD) draw_cloudpage(c, v);
+    else if (v->screen == STV_SCREEN_APP) draw_apppage(c, v);
+    else draw_steps(c, v, t);
 }
 int stv_animated(const stv_view *v) {
     if (v->ask && v->ask->ask) return 0;
+    if (v->screen != STV_SCREEN_STEPS) return v->anim;
     for (int i = 0; i < STV_NSTEPS; i++) if (v->step[i].state == STV_RUN) return 1;
     return 0;
 }
@@ -389,7 +662,7 @@ int stv_hit(const dm_cloud_view *q, int w, int h, float x, float y, int *kind) {
         return -1;
     }
     qlay L = q_layout(q, b);
-    for (int i = 0; i < L.n; i++) if (X >= L.r[i][0] && X < L.r[i][0] + L.r[i][2] && Y >= L.r[i][1] && Y < L.r[i][1] + L.r[i][3]) { *kind = q->ncards ? 1 : 2; return i; }
+    for (int i = 0; i < L.n; i++) if (X >= L.r[i][0] && X < L.r[i][0] + L.r[i][2] && Y >= L.r[i][1] && Y < L.r[i][1] + L.r[i][3]) { *kind = q->ncards && q->style == DM_CLOUD_STYLE_ASK ? 1 : 2; return i; }
     return -1;
 }
 

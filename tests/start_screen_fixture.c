@@ -98,6 +98,79 @@ int main(int argc, char **argv) {
     v.bar = 302; snprintf(v.bar_title, sizeof v.bar_title, "셰이더 준비 중"); snprintf(v.bar_left, sizeof v.bar_left, "1,204 / 3,980"); stv_fmt_eta(v.bar_right, sizeof v.bar_right, 95, 1);
     snprintf(v.hint, sizeof v.hint, "처음 한 번만 해요 · 게임 데이터나 드라이버가 바뀌면 다시 해요");
     stv_draw(&c, &v, 1.1); save(&c, argv[4], "7-offline-shaders");
+    // 12. the launcher, the start ready: Start chosen (A starts the game)
+    stv_launcher *ln = &v.ln;
+    head(&v, icon, "1.4.1 · 빌드 3"); v.screen = STV_SCREEN_LAUNCHER;
+    static const char *const ST[3] = {"게임 데이터 최신", "셰이더 준비 완료", "클라우드 세이브 최신"};
+    for (int i = 0; i < 3; i++) { ln->status[i].state = STV_DONE; snprintf(ln->status[i].text, sizeof ln->status[i].text, "%s", ST[i]); }
+    snprintf(ln->item[0], sizeof ln->item[0], "동기화 없이 플레이"); snprintf(ln->note[0], sizeof ln->note[0], "테스트 · 이번 판은 올리지 않아요");
+    snprintf(ln->item[1], sizeof ln->item[1], "클라우드 세이브"); snprintf(ln->note[1], sizeof ln->note[1], "자동 · nova에서 3분 전");
+    snprintf(ln->item[2], sizeof ln->item[2], "앱 설정"); snprintf(ln->note[2], sizeof ln->note[2], "데이터 6.2 GB · 바로 시작 꺼짐");
+    snprintf(ln->start, sizeof ln->start, "게임 시작"); snprintf(ln->keys, sizeof ln->keys, "↑↓ 고르기 · A 선택"); ln->sel = 3;
+    stv_draw(&c, &v, 0); save(&c, argv[4], "12-launcher");
+    for (int i = 0; i < 4; i++) {   // each item answers a touch at its middle; nothing between Start and the items' last
+        float sc = W / 1280.0f < H / 720.0f ? W / 1280.0f : H / 720.0f, bw = W / sc, bh = H / sc; int wide = W * 2 >= H * 3;
+        float ih = wide ? 60 : 64, list = 3 * ih + 30 + (wide ? 24 : 32) + 72, y0 = wide ? (bh - list) / 2 : (bh - (72 + 36 + 1.448f * 14 + 36 + list)) / 2 + 72 + 36 + 1.448f * 14 + 36;
+        float x = wide ? (bw - 916) / 2 + 396 + 260 : bw / 2, y = i < 3 ? y0 + i * (ih + 10) + ih / 2 : y0 + 3 * (ih + 10) + (wide ? 24 : 32) + 36;
+        assert(stv_page_hit(&v, W, H, x * sc, y * sc) == i);
+        if (i == 3) assert(stv_page_hit(&v, W, H, x * sc, (y - 36 - (wide ? 12 : 16)) * sc) == -1);
+    }
+    assert(stv_page_hit(&v, W, H, 2, 2) == -1);
+    // 13. Start pressed before the shaders were ready: it says it starts once they are (B cancels)
+    ln->status[1].state = STV_RUN; snprintf(ln->status[1].text, sizeof ln->status[1].text, "셰이더 준비 중 · 62%%");
+    ln->waiting = 1; snprintf(ln->start_sub, sizeof ln->start_sub, "준비가 끝나면 바로 시작해요 · B 취소"); v.anim = 1;
+    stv_draw(&c, &v, 0.4); save(&c, argv[4], "13-launcher-waiting"); assert(stv_animated(&v));
+    // 14. the cloud save's page
+    memset(&v.ln, 0, sizeof v.ln); v.anim = 0; v.screen = STV_SCREEN_CLOUD; stv_cloudpage *cp = &v.cp;
+    snprintf(cp->title, sizeof cp->title, "클라우드 세이브"); snprintf(cp->label[0], sizeof cp->label[0], "동기화 방식"); snprintf(cp->label[1], sizeof cp->label[1], "지금 상태");
+    static const char *const MN[3] = {"자동", "수동", "이 기기만"}, *const MD[3] = {"저장하면 바로 올리고, 게임을 끌 때도 올려요", "올리기는 내가 정해요. 시작할 때 올릴지 물어봐요", "받지도 올리지도 않아요. 이 기기 세이브로만 테스트해요"};
+    for (int i = 0; i < 3; i++) { snprintf(cp->mode[i], sizeof cp->mode[i], "%s", MN[i]); snprintf(cp->desc[i], sizeof cp->desc[i], "%s", MD[i]); }
+    snprintf(cp->note, sizeof cp->note, "이 기기만에서 다시 자동·수동으로 바꾸면, 처음 연결할 때처럼 어느 세이브로 할지 물어봐요.");
+    static const char *const CK[4] = {"클라우드", "이 기기", "크기", "계정"}, *const CV[4] = {"nova · 오늘 오전 6:41", "클라우드와 같아요", "6.9 MB · 파일 37개", "기기 이름 rp6"};
+    cp->nrow = 4; for (int i = 0; i < 4; i++) { snprintf(cp->key[i], sizeof cp->key[i], "%s", CK[i]); snprintf(cp->val[i], sizeof cp->val[i], "%s", CV[i]); } cp->col[1] = STV_COL_GOOD;
+    snprintf(cp->up, sizeof cp->up, "지금 올리기"); snprintf(cp->up_note, sizeof cp->up_note, "올릴 진행 없음"); cp->up_off = 1;
+    snprintf(cp->back, sizeof cp->back, "클라우드 세이브로 되돌리기"); snprintf(cp->back_note, sizeof cp->back_note, "A 길게 · 이 기기 세이브는 백업 1칸에"); cp->hold = 380;
+    snprintf(cp->keys, sizeof cp->keys, "↑↓←→ 고르기 · A 선택 · B 돌아가기"); cp->sel = 0; cp->checked = 0;
+    stv_draw(&c, &v, 0); save(&c, argv[4], "14-cloud-settings");
+    { float sc = W / 1280.0f < H / 720.0f ? W / 1280.0f : H / 720.0f, bw = W / sc, bh = H / sc, x0 = (bw - 1040) / 2, y0 = 96 + (bh - 960) / 2; if (y0 < 48) y0 = 48;
+      float top = y0 + 80 + 1.448f * 14 + 14, mh = 44 + 1.448f * 19 + 4 + 1.448f * 14;
+      for (int i = 0; i < 3; i++) assert(stv_page_hit(&v, W, H, (x0 + 260) * sc, (top + i * (mh + 12) + mh / 2) * sc) == i);
+      float uy = top + 40 + 4 * 1.448f * 15 + 36 + 12; assert(stv_page_hit(&v, W, H, (x0 + 800) * sc, (uy + 28) * sc) == 3); assert(stv_page_hit(&v, W, H, (x0 + 800) * sc, (uy + 68 + 28) * sc) == 4); }
+    // 15. the app's settings
+    v.screen = STV_SCREEN_APP; stv_apppage *ap = &v.ap;
+    snprintf(ap->title, sizeof ap->title, "앱 설정"); snprintf(ap->label[0], sizeof ap->label[0], "시작"); snprintf(ap->label[1], sizeof ap->label[1], "게임 데이터");
+    snprintf(ap->quick, sizeof ap->quick, "바로 시작"); snprintf(ap->quick_desc[0], sizeof ap->quick_desc[0], "켜면 이 런처 없이 바로 게임을 시작해요."); snprintf(ap->quick_desc[1], sizeof ap->quick_desc[1], "켤 때 −를 누르고 있으면 런처가 다시 열려요.");
+    static const char *const AK[3] = {"게임 데이터", "셰이더 캐시", "마지막 확인"}, *const AV[3] = {"6.2 GB · 최신", "312 MB", "오늘 오전 6:41"};
+    ap->nrow = 3; for (int i = 0; i < 3; i++) { snprintf(ap->key[i], sizeof ap->key[i], "%s", AK[i]); snprintf(ap->val[i], sizeof ap->val[i], "%s", AV[i]); }
+    snprintf(ap->verify, sizeof ap->verify, "데이터 다시 확인"); snprintf(ap->clear, sizeof ap->clear, "셰이더 캐시 비우기");
+    snprintf(ap->note, sizeof ap->note, "데이터 다시 확인은 파일을 하나씩 검사해 망가진 것만 다시 받아요."); snprintf(ap->keys, sizeof ap->keys, "↑↓ 고르기 · A 선택 · B 돌아가기"); ap->sel = -1;
+    stv_draw(&c, &v, 0); save(&c, argv[4], "15-app-settings");
+    { float sc = W / 1280.0f < H / 720.0f ? W / 1280.0f : H / 720.0f, bw = W / sc, bh = H / sc, x0 = (bw - 720) / 2, y0 = 120 + (bh - 960) / 2; if (y0 < 56) y0 = 56;
+      float sy = y0 + 1.448f * 30 + 28 + 1.448f * 14 + 10, sh = 40 + 1.448f * 18 + 4 + 42, by = sy + sh + 28 + 1.448f * 14 + 10 + 40 + 3 * 1.448f * 15 + 24 + 10;
+      assert(stv_page_hit(&v, W, H, (x0 + 360) * sc, (sy + sh / 2) * sc) == 0); assert(stv_page_hit(&v, W, H, (x0 + 100) * sc, (by + 28) * sc) == 1);
+      assert(stv_page_hit(&v, W, H, (x0 + 620) * sc, (by + 28) * sc) == 2); assert(stv_page_hit(&v, W, H, (x0 + 360) * sc, (by + 28) * sc) == -1); }
+    // 16. the last run was played without the sync
+    memset(&q, 0, sizeof q); q.ask = 1; q.style = DM_CLOUD_STYLE_LIST; q.progress = -1; q.count_permille = -1; q.nbtn = 3; q.sel = 0;
+    snprintf(q.title, sizeof q.title, "지난번에 동기화 없이 한 플레이가 있어요"); snprintf(q.line[0], sizeof q.line[0], "테스트로 하셨다면 클라우드 세이브로 되돌리세요");
+    q.nrow = 2; snprintf(q.row_k[0], sizeof q.row_k[0], "이 기기 (테스트 플레이)"); snprintf(q.row_v[0], sizeof q.row_v[0], "오늘 오전 2:10 · 7.1 MB");
+    snprintf(q.row_k[1], sizeof q.row_k[1], "클라우드"); snprintf(q.row_v[1], sizeof q.row_v[1], "nova · 어제 오후 11:32 · 6.9 MB");
+    snprintf(q.btn[0], sizeof q.btn[0], "클라우드 세이브로 되돌리기"); snprintf(q.btn[1], sizeof q.btn[1], "이 기기 것 올리기"); snprintf(q.btn[2], sizeof q.btn[2], "그대로 두기");
+    snprintf(q.bnote[1], sizeof q.bnote[1], "클라우드 세이브는 백업해 둬요"); snprintf(q.bnote[2], sizeof q.bnote[2], "이번에도 올리지 않고 플레이");
+    snprintf(q.foot, sizeof q.foot, "되돌린 테스트 세이브는 이 기기 백업 1칸에 남아요"); snprintf(q.foot2, sizeof q.foot2, "↑↓ 고르기 · A 선택");
+    head(&v, icon, ""); v.ask = &q; stv_draw(&c, &v, 0); save(&c, argv[4], "16-after-test");
+    { float sc = W / 1280.0f < H / 720.0f ? W / 1280.0f : H / 720.0f; int seen[3] = {0, 0, 0};
+      for (int y = 0; y < H; y += 3) { int k = stv_hit(&q, W, H, W * 0.5f, (float)y, &kind); if (k >= 0) { assert(kind == 2 && k < 3); seen[k]++; } }
+      assert(seen[0] && seen[1] && seen[2] && seen[0] > seen[1] && seen[0] < 68 * sc / 3 + 2); }
+    // 17. manual: progress not uploaded
+    memset(&q, 0, sizeof q); q.ask = 1; q.style = DM_CLOUD_STYLE_PAIR; q.progress = -1; q.count_permille = -1; q.nbtn = 2;
+    snprintf(q.title, sizeof q.title, "이 기기에 안 올린 진행이 있어요"); snprintf(q.line[0], sizeof q.line[0], "수동 모드 · 올릴지 정해 주세요");
+    q.nrow = 2; snprintf(q.row_k[0], sizeof q.row_k[0], "이 기기"); snprintf(q.row_v[0], sizeof q.row_v[0], "오늘 오전 7:05 · 7.0 MB");
+    snprintf(q.row_k[1], sizeof q.row_k[1], "클라우드"); snprintf(q.row_v[1], sizeof q.row_v[1], "이 기기에서 올림 · 오늘 오전 6:41");
+    snprintf(q.btn[0], sizeof q.btn[0], "A · 올리기"); snprintf(q.btn[1], sizeof q.btn[1], "B · 그대로 두기"); snprintf(q.foot, sizeof q.foot, "클라우드 세이브 설정에서 자동으로 바꿀 수 있어요");
+    stv_draw(&c, &v, 0); save(&c, argv[4], "17-manual-pending");
+    { float sc = W / 1280.0f < H / 720.0f ? W / 1280.0f : H / 720.0f; int seen[2] = {0, 0};
+      for (int y = 0; y < H; y += 3) for (int i = 0; i < 2; i++) { int k = stv_hit(&q, W, H, W * 0.5f + (i ? 154 : -154) * sc, (float)y, &kind); if (k >= 0) { assert(k == i && kind == 2); seen[i]++; } }
+      assert(seen[0] && seen[1]); assert(stv_hit(&q, W, H, W * 0.5f, 2, &kind) == -1); }
     // the rate: a steady 10 MB/s reads as 10 MB/s, and the time left as what is left at that speed
     stv_rate r; stv_rate_reset(&r);
     for (int t = 0; t <= 20000; t += 250) stv_rate_feed(&r, t, t * 10485.76, 1e9 - t * 10485.76);

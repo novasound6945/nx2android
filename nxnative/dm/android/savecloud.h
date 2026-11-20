@@ -11,6 +11,9 @@
 // ---- the start screen: what it shows (savecloud_android.c fills it, datasync_android.c and startscreen.c draw it: the drawing is one function of this state, so the screen's
 // design can change without the sync's logic) ----
 enum { DM_CLOUD_ICON_NONE, DM_CLOUD_ICON_OFFLINE, DM_CLOUD_ICON_WARN };
+// a question's layout: ASK an icon, a title, a line or two, a row of buttons or the two cards (Conflict / Offline / OtherDevice.dc.html); LIST a title and a line, a card of
+// rows, a column of buttons, the first the accent's (AfterTest.dc.html); PAIR the same with two buttons side by side, A's and B's (ManualPending.dc.html)
+enum { DM_CLOUD_STYLE_ASK, DM_CLOUD_STYLE_LIST, DM_CLOUD_STYLE_PAIR };
 typedef struct { char head[96], ago[32], date[48], size[64]; int newer; } dm_cloud_card;   // head: "This device · rp6"; size: "1.2 MB · 9 files" ("" not known)
 typedef struct {
     unsigned ver;          // changes with every update
@@ -28,9 +31,36 @@ typedef struct {
     int nbtn; char btn[3][64];   // buttons under it, chosen by sel (when there are no cards); while ask is 0, btn[0] is the bottom line's (B)
     int sel;
     char count[64]; int count_permille;   // the countdown to Play anyway ("Starting by itself in 7 s") and the time gone of it; "" none
-    char foot[160], foot2[160];           // small lines at the bottom (one: the hint; two: a note over the keys' hint)
+    char foot[160], foot2[160];           // small lines at the bottom (one: the hint; two: a note over the keys' hint). LIST, PAIR: foot under the buttons, foot2 the keys
+    int style;                            // DM_CLOUD_STYLE_*
+    int nrow; char row_k[2][48], row_v[2][96];   // LIST, PAIR: the card of rows (a name at the left, its value at the right)
+    char bnote[3][64];                    // LIST: the words at a button's right
 } dm_cloud_view;
-void dm_cloud_view_get(dm_cloud_view *v);   // savecloud_android.c: a copy of the current view
+void dm_cloud_view_get(dm_cloud_view *v);   // savecloud_android.c: a copy of the current view (ask 0 once no check runs)
+
+// ---- the launcher's Cloud save page and its line (datasync_android.c draws them from this; savecloud_android.c fills it) ----
+enum { DM_CLOUD_ACT_NONE, DM_CLOUD_ACT_UPLOAD, DM_CLOUD_ACT_RESTORE, DM_CLOUD_ACT_CHECK };   // what the launcher asked for (Upload now, Back to the cloud save, a check again)
+enum { DM_CLOUD_LOCAL_UNKNOWN, DM_CLOUD_LOCAL_SAME, DM_CLOUD_LOCAL_OWED, DM_CLOUD_LOCAL_ONLY, DM_CLOUD_LOCAL_PLAYED, DM_CLOUD_LOCAL_CONFLICT };   // (savesync.h SS_LOCAL_*)
+typedef struct {
+    int avail;            // sync.txt is there and the start reached the cloud's part (else nothing below is known)
+    int trial;            // a trial build: this device only, not to be changed
+    int mode;             // savesync.h SS_MODE_* (0 automatic, 1 manual, 2 this device only)
+    int checking;         // a check runs (the start's, or one the launcher asked for)
+    int act;              // DM_CLOUD_ACT_* running
+    int progress;         // -1, else 0..1000: the cloud save's download
+    int online;           // this run's check reached the server
+    int offline;          // the check found no network or no answer
+    int skipped;          // this run plays without the sync
+    int auth;             // the server refused the token
+    int local;            // DM_CLOUD_LOCAL_*
+    int can_upload, can_restore;
+    char cloud_dev[64]; int64_t cloud_time;   // the cloud's save: the device it came from and when (time 0: none known)
+    int64_t checked;      // when the server last answered (0: never)
+    uint64_t size; int64_t files;   // this device's save as its archive (files -1: not known)
+    char device[64];      // this device's name (sync.txt device=)
+    char result[96]; int result_bad;   // the last action's outcome ("" none)
+} dm_cloud_info;
+void dm_cloud_info_get(dm_cloud_info *o);
 
 #ifdef __ANDROID__
 // datasync_android.c: the screen (its EGL window picture), shown while the cloud's start runs: 1 when it runs and done() is called on the main thread once it ended
@@ -54,12 +84,20 @@ int dm_cloud_input(const AInputEvent *e);   // an input event before the game (t
 void dm_cloud_pause(void);    // onPause: the pending upload at once (under a wake lock), then the session closed
 void dm_cloud_resume(void);   // onResume: a pending upload tried again now, the session open again
 int dm_cloud_flush(int ms);   // the menu's Exit game: what onPause starts (the owed upload, the session closed), done now and waited for at most ms; 1: not done in time
+void dm_cloud_game_start(void);   // game_run: the upload thread starts (when this run syncs)
+// the launcher (datasync_android.c), on the main thread or the screen's: 0 when done (or started), -1 when it cannot be now
+int dm_cloud_set_mode(int mode);       // this game's SS_MODE_*; back from this device only: a check runs again at once (a first connection's)
+int dm_cloud_act(int what);            // DM_CLOUD_ACT_*, on a thread of its own (dm_cloud_info_get: act, result)
+int dm_cloud_play_unsynced(void);      // Play without the sync: the check that runs ends without it, one still to come is not made, a check done is not followed by uploads
+void dm_cloud_local_refresh(void);     // this device's save archived (its size and hash for the page), once, when not known yet
+void dm_launcher_start_now(int nosync);   // datasync_android.c: the player chose to play (B on a card): the launcher starts the game once the start is ready
 #endif
 
 // the pause menu's Cloud save row (front_android.c, gfx_vk_present.c)
 enum { DM_CLOUD_OFF, DM_CLOUD_DISABLED, DM_CLOUD_TRIAL, DM_CLOUD_SKIPPED, DM_CLOUD_UPTODATE, DM_CLOUD_PENDING, DM_CLOUD_OFFLINE, DM_CLOUD_UPLOADING, DM_CLOUD_CONFLICT, DM_CLOUD_AUTH };
 int dm_cloud_available(void);              // the row is shown: sync.txt is there
 int dm_cloud_status(char *note, int cap);  // DM_CLOUD_*, and a note (when it last went up)
+int dm_cloud_manual(void);                 // this game's mode is manual: the row says Manual (its switch on)
 unsigned dm_cloud_menu_ver(void);          // changes with the status: the menu's panel is drawn again
 void dm_cloud_menu_press(void);            // the row: Upload now when an upload is owed
 void dm_cloud_menu_toggle(void);           // the row's switch: this game's sync on / off (kept in the sync state)

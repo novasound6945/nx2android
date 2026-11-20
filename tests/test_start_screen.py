@@ -1,5 +1,5 @@
 """The Android start screen (dm/android/startscreen.c) drawn on the computer with the committed fonts, at the Retroid Pocket Nova's 1280 x 960 and the Retroid Pocket 6's
-1920 x 1080: each of the design's screens (tests/start_screen_fixture.c), the touch areas, the speed and time-left estimate. NX2A_START_SHOTS=<folder> keeps the PNGs."""
+1920 x 1080: each of the design's screens (tests/start_screen_fixture.c: the start's steps and questions, the launcher and its pages), the touch areas, the speed and time-left estimate. NX2A_START_SHOTS=<folder> keeps the PNGs."""
 import os
 from pathlib import Path
 import shutil
@@ -11,7 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DM = ROOT / 'nxnative/dm'
 NOTO = DM / 'third_party/noto-sans-kr'
 PIXEL = DM / 'third_party/fusion-pixel-font/fusion-pixel-12px-proportional-zh_tw.nxpf'
-SCREENS = ('1-main', '2-download', '3-conflict', '4-offline', '5-other-device', '6-need-network', '7-offline-shaders')
+SCREENS = ('1-main', '2-download', '3-conflict', '4-offline', '5-other-device', '6-need-network', '7-offline-shaders', '12-launcher', '13-launcher-waiting', '14-cloud-settings',
+           '15-app-settings', '16-after-test', '17-manual-pending')
 
 
 class StartScreen(unittest.TestCase):
