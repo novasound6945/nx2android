@@ -94,7 +94,12 @@ __attribute__((weak)) void vk_window_lost(void) {}   // the backend lets go of t
 void dm_sync_window(ANativeWindow *w); int dm_sync_begin(ANativeActivity *act, const char *root, void (*done)(void));   // datasync_android.c: the data from a server (porter --data-url)
 int dm_prep_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(void));   // datasync_android.c: the shader preparation (gfx_vk_gpl.inc vk_gpl_prepare), on the same screen
 int dm_notice_begin(ANativeActivity *act, ANativeWindow *w, const char *const ko[3], const char *const en[3], const char *detail);   // datasync_android.c: a notice the start stops at
-static void on_window_created(ANativeActivity *a, ANativeWindow *w) { (void)a; pthread_mutex_lock(&g_win_mu); g_win = w; pthread_mutex_unlock(&g_win_mu); dm_sync_window(w); }
+// A window made again (back from Home or the lock screen) while the pause menu (or the editor, a text entry, the save picker) holds the game: the game sends no frame,
+// so the new surface stayed black (a few frames a second at most, the menu not drawn) until the menu's state changed (B closed it). The last frame and the menu are
+// presented again at once (and every vsync after while the menu stays: gfx_vk_present.c present_thread)
+void dm_overlay_redraw(void);   // gfx_vk_present.c (weak default below)
+static void on_window_created(ANativeActivity *a, ANativeWindow *w) { (void)a; pthread_mutex_lock(&g_win_mu); g_win = w; pthread_mutex_unlock(&g_win_mu); dm_sync_window(w);
+    if (dm_menu_state() >= 0) dm_overlay_redraw(); }   // (-1 while nothing holds the game, and before it runs)
 static void on_window_destroyed(ANativeActivity *a, ANativeWindow *w) { (void)a; (void)w; pthread_mutex_lock(&g_win_mu); g_win = NULL; pthread_mutex_unlock(&g_win_mu); dm_sync_window(NULL); vk_window_lost(); }
 JNIEXPORT void JNICALL Java_org_nx2a_ExternalActivity_externalSurface(JNIEnv *env, jclass cls, jobject surface) {
     (void)cls;
