@@ -1,7 +1,7 @@
 # porter apk-update without a server, a device or the game's files (porter/apkupdate.py): the judgment of a data pack against this checkout's host (the REWRITE_ABI number,
 # the rewriter's git history for a pack from before it, the profile header's defines), and the APK made again with every entry kept but the host and the manifest's version,
 # signed by the same key (nxnative/dm/android/apk/axml.py, apkdriver.py). The pack is a folder made here; build.py is stood in for (python -m unittest discover tests).
-import hashlib, json, os, shutil, subprocess, sys, tempfile, unittest, zipfile
+import hashlib, json, os, shutil, struct, subprocess, sys, tempfile, unittest, zipfile, zlib
 from pathlib import Path
 from unittest import mock
 
@@ -10,11 +10,12 @@ sys.path.insert(0, str(REPO))
 os.environ.setdefault('NX2A_HOME', tempfile.mkdtemp(prefix='nx2a_test_home_'))
 from porter import apkupdate, host, paths, pipeline, publish   # noqa: E402
 from porter.upstream import BuildError                # noqa: E402
-import axml, rewrite_abi                             # noqa: E402 (dm/android/apk, dm/tools: on sys.path through porter)
+import axml, nacp, rewrite_abi                       # noqa: E402 (dm/android/apk, dm/tools: on sys.path through porter)
 
 APK = REPO / 'nxnative/dm/android/apk'
 TOOLS = REPO / 'nxnative/dm/tools'
 ATRAIN, PKG = '0100A3E010E56000', 'org.nx2a.t0100a3e010e56000'   # a profile without patches.py, version v65536 registered
+KO = 'A열차로 가자: 시작해요 관광지 개발'   # its name_ko (the Korean name in its control data)
 HAS_GIT = subprocess.run(['git', 'rev-parse', '--git-dir'], cwd=TOOLS, capture_output=True).returncode == 0
 
 
@@ -143,6 +144,40 @@ class ApkUpdate(unittest.TestCase):
         self.assertEqual(axml.parse(axml.set_version(m, 7, 'A-Train'))['strings'], axml.parse(m)['strings'])   # a name the pool has: no string added
         with self.assertRaises(ValueError): axml.set_version(m, 0, 'x')
 
+    def test_manifest_label(self):   # the label changed in place, in Korean (UTF-16 in the pool): every other attribute as it was, the version too
+        with zipfile.ZipFile(self.apk) as z: m = z.read('AndroidManifest.xml')
+        a = axml.info(m); n = axml.set_label(m, KO); b = axml.info(n)
+        self.assertEqual((a['label'], b['label']), ('A-Train', KO))
+        self.assertEqual({k: v for k, v in a.items() if k != 'label'}, {k: v for k, v in b.items() if k != 'label'})
+        self.assertEqual(axml.parse(n)['strings'], axml.parse(m)['strings'] + [KO])   # appended: the indexes before it (the resource map's) do not move
+        self.assertEqual(axml.info(axml.set_version(n, 65545, '1.0.1-8'))['label'], KO)   # the version after it keeps it
+        self.assertEqual(axml.set_label(m, 'A-Train'), m)   # the same label: the same bytes
+        self.assertEqual(axml.info(axml.set_label(m, 'A열차 🚃'))['label'], 'A열차 🚃')   # beyond the BMP: two UTF-16 units
+        for bad in ('', 'a\nb'):
+            with self.assertRaises(ValueError): axml.set_label(m, bad)
+        el = axml.parse(m)['elements']; off = next(at['android:label'][0] for tag, at in el if tag == 'application')
+        ref = bytearray(m); struct.pack_into('<IHBBI', ref, off + 8, 0xffffffff, 8, 0, 0x01, 0x7f030000)   # @string/app_name: not one mkapk.py writes
+        with self.assertRaises(ValueError) as e: axml.set_label(bytes(ref), KO)
+        self.assertIn('resource reference', str(e.exception))
+
+    def test_mkapk_korean_label(self):   # mkapk.py's pool: the label's length in UTF-16 units
+        out = self.t / 'ko.apk'
+        subprocess.run([sys.executable, str(APK / 'mkapk.py'), str(self.t / 'libdmhost.so'), str(out), str(paths.signing_key()), '--package', PKG, '--label', 'A열차 🚃',
+                        '--lib', 'dmhost'], check=True, capture_output=True)
+        self.assertEqual(axml.apk_info(out)['label'], 'A열차 🚃')
+
+    def test_nacp_korean_name(self):   # the Korean entry (12) of the title area, plain and compressed; the first name without a language
+        t = bytearray(0x3000)
+        for i, n in ((0, 'A-Train: All Aboard! Tourism'), (2, 'A列車で行こう はじまる観光計画'), (12, KO)): u = n.encode(); t[i * 0x300:i * 0x300 + len(u)] = u
+        plain = bytes(t) + bytes(0x1000)
+        c = zlib.compressobj(9, zlib.DEFLATED, -15); z = c.compress(bytes(t) + bytes(0x3000)) + c.flush()
+        packed = struct.pack('<H', len(z)) + z; packed += bytes(0x4000 - len(packed))
+        for b in (plain, packed):
+            f = self.t / 'control.nacp'; f.write_bytes(b)
+            self.assertEqual((nacp.name(f), nacp.name(f, 'ko'), nacp.name(f, 'ja'), nacp.name(f, 'fr')), ('A-Train: All Aboard! Tourism', KO, 'A列車で行こう はじまる観光計画', ''))
+        self.assertEqual(nacp.name(self.t / 'none.nacp', 'ko'), '')
+        with self.assertRaises(ValueError): nacp.name(f, 'xx')
+
     def test_update_keeps_the_apk(self):
         d = make_pack(self.t / 'pack')
         r = apkupdate.update(self.apk, apkupdate.Pack(d), self.t / 'out', build=8, jobs=1)
@@ -156,10 +191,23 @@ class ApkUpdate(unittest.TestCase):
             self.assertTrue(all(i.compress_type == zipfile.ZIP_STORED for i in b.infolist()))
         oi, ni = axml.apk_info(self.apk), axml.apk_info(new)
         self.assertEqual(ni['signers'], oi['signers']); self.assertEqual(len(ni['signers']), 1)
-        self.assertEqual({k: ni[k] for k in ('package', 'label', 'activity', 'debuggable')}, {k: oi[k] for k in ('package', 'label', 'activity', 'debuggable')})
-        self.assertEqual(r['data_files'], [])   # the profile is this checkout's: nothing for the server
+        self.assertEqual({k: ni[k] for k in ('package', 'activity', 'debuggable')}, {k: oi[k] for k in ('package', 'activity', 'debuggable')})
+        self.assertEqual((oi['label'], ni['label'], r['label']), ('A-Train', KO, KO))   # the profile's name_ko
+        self.assertEqual(apkupdate.profile_label(ATRAIN), KO)
+        self.assertEqual(r['data_files'], [])   # the profile is this checkout's: nothing for the server (name_ko is not in its header)
         self.assertEqual(apkupdate.source_of(new), ('https://example.invalid/pack/', 'u:p'))
         self.assertEqual(json.loads((paths.user_dir() / 'builds.json').read_text())[PKG], 8)
+
+    def test_update_label_kept(self):   # the APK has the profile's name_ko already, or the profile has none: its label as it was
+        d = make_pack(self.t / 'pack')
+        r = apkupdate.update(self.apk, apkupdate.Pack(d), self.t / 'out', build=8, jobs=1)
+        r2 = apkupdate.update(r['apk'], apkupdate.Pack(d), self.t / 'out2', build=9, jobs=1)
+        with zipfile.ZipFile(r['apk']) as a, zipfile.ZipFile(r2['apk']) as b:
+            self.assertEqual(axml.parse(a.read('AndroidManifest.xml'))['strings'] + ['1.0.1-9'], axml.parse(b.read('AndroidManifest.xml'))['strings'])   # the new version name only: no label again
+        self.assertEqual(r2['label'], KO)
+        with mock.patch.object(apkupdate, 'profile_label', return_value=''):
+            r3 = apkupdate.update(self.apk, apkupdate.Pack(d), self.t / 'out3', build=10, jobs=1)
+        self.assertEqual(r3['label'], 'A-Train')
 
     def test_update_refusals(self):
         d = make_pack(self.t / 'pack')

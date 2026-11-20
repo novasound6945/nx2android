@@ -113,7 +113,7 @@ def axml(root):
     # UTF-16 string pool
     offs, data = [], b''
     for x in strings:
-        offs.append(len(data)); u = x.encode('utf-16-le'); data += struct.pack('<H', len(x)) + u + b'\0\0'
+        offs.append(len(data)); u = x.encode('utf-16-le'); data += struct.pack('<H', len(u) // 2) + u + b'\0\0'   # (UTF-16 units: a label beyond the BMP)
     data += b'\0' * (-len(data) % 4)
     hdr = struct.pack('<IIIII', len(strings), 0, 0, 28 + 4 * len(strings), 0)
     pool = chunk(0x0001, 28, hdr + b''.join(struct.pack('<I', o) for o in offs) + data)

@@ -68,7 +68,7 @@ class Options:
     out: Path = None                   # where the APK and the data pack go (default: the game folder)
     version: str = ''                  # v<N> to pack (default: the newest in the folder)
     language: str = ''                 # a code or a name (default: English)
-    app_name: str = ''                 # the launcher label (default: the game's name in its control data)
+    app_name: str = ''                 # the launcher label (default: the profile's name_ko, the game's Korean name in its control data, else its first name there)
     install: bool = False              # install on the device after packing
     device: str = ''                   # adb serial
     replace_signer: bool = False       # uninstall an app of the same package signed with another key
@@ -477,7 +477,11 @@ class Port:
         self.sysdata = self.extract_sysdata(nx)
         self.drop_unpacked()   # everything that reads them has run, and the shader stages that follow need the room
         self.base = next((self.dirs[v] for v in self.versions if picks[v][1] is None), self.dirs[self.versions[0]])
-        self.app_name = o.app_name or nacp.name(self.base / 'control.nacp') or self.g.get('name', self.g.id)
+        # the launcher label (and the start screen's name, which reads it): --app-name, the profile's name_ko, the game's Korean name in its control data (the update's,
+        # then the base game's), else its first name there. The APK and data pack file names keep the name without the Korean ones (stem_name: the profile's ipa first)
+        self.stem_name = o.app_name or nacp.name(self.base / 'control.nacp') or self.g.get('name', self.g.id)
+        self.app_name = (o.app_name or self.g.get('name_ko', '') or nacp.name(self.game / 'control.nacp', 'ko') or nacp.name(self.base / 'control.nacp', 'ko')
+                         or self.stem_name)
         self.display = nacp.version(self.game / 'control.nacp') or nacp.version(self.base / 'control.nacp') or '1.0'
         lang_in = o.language or self.cfg.get('language')
         want = nsp.language_code(lang_in) if lang_in else 'en-US'
@@ -849,7 +853,7 @@ class Port:
     # ---- apk: the host as a NativeActivity app, signed with the player's key ----
     def apk(self):
         PROG.stage('APK')
-        stem = app_stem(self.g, self.app_name)
+        stem = app_stem(self.g, self.stem_name)
         self.apk_path = self.o.out / f'{stem}.apk'; self.o.out.mkdir(parents=True, exist_ok=True)
         icon = self.icon()
         offset = build_number(self.package, self.o.vercode_offset)
@@ -940,7 +944,7 @@ class Port:
         if self.o.romfs_overlay:   # the host looks in it before the RomFS (hle_fs.c rom_overlay_path); the RomFS itself stays as dumped
             font_env = font_env + [f'DM_ROMFS_OVERLAY={datapack.files_folder(self.package)}/overlay']
             font_files = {**font_files, **{'overlay/' + f.relative_to(self.o.romfs_overlay).as_posix(): f for f in sorted(self.o.romfs_overlay.rglob('*')) if f.is_file()}}
-        dst = self.o.out / f'{app_stem(self.g, self.app_name)}-data'
+        dst = self.o.out / f'{app_stem(self.g, self.stem_name)}-data'
         romfs, zenv = self.game / 'RomFS', []
         datapack.check_romfs_packs(self.ap)   # (romfs_packs with romfs zstd: refused before the RomFS is compressed)
         if self.ap.romfs_zstd and romfs.is_dir():   # android.tsv romfs zstd: packed copies of the files that compress, made once into the build folder; the rest stay links to the extraction

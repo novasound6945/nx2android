@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # axml.py: read and change an APK's binary AndroidManifest.xml (AXML, as mkapk.py writes it: one UTF-16 string pool, a resource map, the element tree), and read the signer
 # certificates of its APK Signature Scheme v2 block, with the Python standard library only. porter apk-update (porter/apkupdate.py) gives a released APK a new versionCode and
-# versionName this way: every other byte of the manifest stays as the APK's port wrote it (the package, the label, the activity, the permissions of that port's mkapk.py).
+# versionName (and its label, set_label) this way: every other byte of the manifest stays as the APK's port wrote it (the package, the label, the activity, the permissions of that port's mkapk.py).
 # Usage: axml.py <app.apk>   → prints the manifest's package, versionCode, versionName, debuggable, label and the signer certificates' SHA-256 (JSON)
 import hashlib, json, struct, sys, zipfile
 
@@ -91,23 +91,42 @@ def info(data):
             'debuggable': bool(get(app, 'android:debuggable', False)), 'label': get(app, 'android:label'), 'activity': get(act, 'android:name')}
 
 
+def _with_string(data, m, text):
+    """(data with text in its string pool, the string's index, a function that moves an offset of data to the new bytes): text is appended (indexes of the strings
+    before it, the resource map's among them, do not move) unless the pool has it already"""
+    strings = list(m['strings'])
+    if text in strings: return data, strings.index(text), lambda a: a
+    idx = len(strings); strings.append(text)
+    po, psize = m['pool']; new_pool = pool_chunk(strings); delta = len(new_pool) - psize
+    out = bytearray(data[:po] + new_pool + data[po + psize:])
+    struct.pack_into('<I', out, 4, len(out))
+    return bytes(out), idx, lambda a: a + delta if a > po else a
+
+
 def set_version(data, code, name):
     """data with the manifest's versionCode = code and versionName = name; every other byte as it was. The name is appended to the string pool (indexes of the strings before
     it, the resource map's among them, do not move) unless the pool has it already"""
-    m = parse(data); strings = list(m['strings'])
+    m = parse(data)
     man = next((attrs for tag, attrs in m['elements'] if tag == 'manifest'), None)
     if not man or 'android:versionCode' not in man or 'android:versionName' not in man: raise ValueError('AXML: the manifest has no versionCode / versionName attribute')
     if not 0 < code < 2 ** 31: raise ValueError(f'versionCode {code}: not 1 .. 2^31-1')
-    if name in strings: idx = strings.index(name)
-    else: idx = len(strings); strings.append(name)
-    po, psize = m['pool']; delta = 0
-    new_pool = pool_chunk(strings) if len(strings) != len(m['strings']) else data[po:po + psize]
-    delta = len(new_pool) - psize
-    out = bytearray(data[:po] + new_pool + data[po + psize:])
-    struct.pack_into('<I', out, 4, len(out))
-    def at(a): return a + delta if a > po else a
+    data, idx, at = _with_string(data, m, name); out = bytearray(data)
     a = at(man['android:versionCode'][0]); struct.pack_into('<IHBBI', out, a + 8, 0xffffffff, 8, 0, T_INT_DEC, code)
     a = at(man['android:versionName'][0]); struct.pack_into('<IHBBI', out, a + 8, idx, 8, 0, T_STRING, idx)
+    return bytes(out)
+
+
+def set_label(data, label):
+    """data with the application's android:label = label (the launcher's name of the app, and the start screen's: datasync_android.c app_names), as a string in the
+    manifest like mkapk.py writes it; every other byte as it was (the string appended as in set_version). A label that is a resource reference (@string/...), not one
+    mkapk.py writes, raises ValueError: its text is in resources.arsc"""
+    if not label or not label.isprintable(): raise ValueError(f'label {label!r}: empty or not printable')
+    m = parse(data)
+    app = next((attrs for tag, attrs in m['elements'] if tag == 'application'), None)
+    if not app or 'android:label' not in app: raise ValueError('AXML: the application has no android:label attribute')
+    if app['android:label'][2] != T_STRING: raise ValueError(f'AXML: the application\'s android:label is not a string (type {app["android:label"][2]:#x}: a resource reference)')
+    data, idx, at = _with_string(data, m, label); out = bytearray(data)
+    a = at(app['android:label'][0]); struct.pack_into('<IHBBI', out, a + 8, idx, 8, 0, T_STRING, idx)
     return bytes(out)
 
 

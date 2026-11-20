@@ -1,7 +1,8 @@
 # porter apk-update: a released port's APK again with this checkout's host, without the game's files and without its data pack changing (python -m porter apk-update …).
-# The data pack (mods/, RomFS, shaders.dmsv, ...) stays on the server as it is; the APK keeps every entry it has (the package, the label, the icon, the gamepad theme, the
+# The data pack (mods/, RomFS, shaders.dmsv, ...) stays on the server as it is; the APK keeps every entry it has (the package, the icon, the gamepad theme, the
 # font, the data server's address nx2a/source.bin, the Vulkan driver and its hooks, classes.dex), and gets libdmhost.so built from this checkout's profile, a new versionCode and
-# versionName (the game's version and the build number: 1.0.1-8) in its manifest (axml.py: the rest of the manifest's bytes kept), signed again with the player's key, which must
+# versionName (the game's version and the build number: 1.0.1-8) in its manifest, and the profile's Korean name (game.tsv name_ko) as its label when it has another
+# (the launcher's name and the start screen's; axml.py: the rest of the manifest's bytes kept), signed again with the player's key, which must
 # be the APK's signer (it installs over the released app and keeps its saves). Nothing is uploaded or installed.
 # The pack must fit the new host (judge):
 #   - the rewritten code's contract (dm/host/rewrite_abi.h): a pack's REWRITE_ABI (nx2a-data.json rewrite_abi, each fixups table's # REWRITE_ABI) must be this checkout's. A pack
@@ -329,6 +330,13 @@ def next_build(package, apk_offset):   # the build number by default: one more t
     return max(apk_offset, int(seen.get(package, 0))) + 1
 
 
+def profile_label(title_id):   # the profile's Korean name of the game (game.tsv name_ko), '' without one: the label apk-update gives the APK
+    sys.path.insert(0, str(DM / 'games'))
+    try: import game
+    finally: sys.path.pop(0)
+    return game.load(title_id).get('name_ko', '') or ''
+
+
 def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None):
     """apk (a released port's APK file) with this checkout's host and build number build, judged against its data pack pack, written into the folder out (with a new
     nx2a-data.json and files.json when the profile's hash changed). → {'apk', 'package', 'version_code', 'version_name', 'host', 'data_files', 'judgment'}"""
@@ -358,6 +366,11 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
     cache.mkdir(parents=True, exist_ok=True)
     so = host.build_host(old['package'], r['title_id'], old['debuggable'], cache, jobs, r['profile']['games_dir'])
     with zipfile.ZipFile(apk) as z: have = set(z.namelist()); manifest = z.read('AndroidManifest.xml')
+    label = old['label'] if isinstance(old['label'], str) else None
+    want = profile_label(r['title_id'])
+    if want and want != label:   # the profile's Korean name (name_ko): the launcher's label and the start screen's name (it reads the label)
+        try: manifest = axml.set_label(manifest, want); say(f'label: {old["label"]!r} → {want!r} (the profile\'s name_ko)'); label = want
+        except ValueError as e: say(f'label: {old["label"]!r} kept, not the profile\'s name_ko {want!r}: {e}')
     fonts = {n: f for n, f in pipeline.ui_font_assets().items() if f'assets/{n}' not in have}   # the overlay's font, for an APK released before it came; the APK's own is kept
     icon = host.start_icon_asset(apk, cache, pipeline.start_icon)   # the start screen's icon, for an APK released before it came: from its launcher icon
     if icon: fonts[icon[1].split('=', 1)[0]] = icon[1].split('=', 1)[1]
@@ -366,8 +379,8 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
     z, cd, eocd = apksign.build_zip(entries)
     tmp = dst.with_name(dst.name + '.partial'); tmp.write_bytes(apksign.sign_v2(z, cd, eocd, k, crt))
     new = axml.apk_info(tmp)
-    if (new['package'], new['version_code'], new['version_name'], new['signers']) != (old['package'], code, name, old['signers']):
-        tmp.unlink(); raise BuildError(f'the APK written does not read back as {old["package"]} {code} ({name}) with the same signer')
+    if (new['package'], new['version_code'], new['version_name'], new['signers'], new['label']) != (old['package'], code, name, old['signers'], label if label is not None else old['label']):
+        tmp.unlink(); raise BuildError(f'the APK written does not read back as {old["package"]} {code} ({name}) labelled {label!r} with the same signer')
     os.replace(tmp, dst)
     pipeline.build_number(old['package'], offset)   # remembered: the next port or update counts on from it
     say(f'{dst}: {old["version_name"]} ({old["version_code"]}) → {name} ({code}), host {so.stat().st_size / 2**20:.1f} MB, signer {old["signers"][0][:16]}…')
@@ -384,5 +397,5 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
     if r['profile']['games_dir']:
         say(f'the host was built from the derived profile {derived_dir(r["title_id"])}; its header is {cache / "gen" / r["title_id"] / "game_profile.h"}: a later update on another '
             f'computer needs it (--profile-header)')
-    return {'apk': str(dst), 'package': old['package'], 'version_code': code, 'version_name': name, 'old': {k: old[k] for k in ('version_code', 'version_name')},
+    return {'apk': str(dst), 'package': old['package'], 'version_code': code, 'version_name': name, 'label': new['label'], 'old': {k: old[k] for k in ('version_code', 'version_name', 'label')},
             'host': so.stat().st_size, 'data_files': written, 'judgment': {k: v for k, v in r.items() if k != 'manifest'}}

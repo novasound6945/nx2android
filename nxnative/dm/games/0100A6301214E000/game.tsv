@@ -9,6 +9,7 @@ program_id	0100A6301214E000
 # ---- App ----
 # Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
 name	Fire Emblem Engage
+name_ko	파이어 엠블렘 Engage
 ipa	FEEngage.ipa
 app_category	public.app-category.strategy-games
 

@@ -9,6 +9,7 @@ program_id	010006E0230AC000
 
 # ---- App ----
 name	Tales of Eternia Remastered
+name_ko	테일즈 오브 이터니아 리마스터
 ipa	TalesOfEterniaRemastered.ipa
 app_category	public.app-category.games
 

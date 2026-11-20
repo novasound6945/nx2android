@@ -8,6 +8,7 @@ program_id	01001E9023920000
 
 # ---- App ----
 name	하늘의 궤적 the 1st
+name_ko	하늘의 궤적 the 1st
 ipa	The1st.ipa
 app_category	public.app-category.games
 
