@@ -87,7 +87,7 @@ __attribute__((weak)) int dm_save_rows(ov_srow rows[OVM_ROWS_MAX]) { (void)rows;
 __attribute__((weak)) int dm_cloud_available(void) { return 0; }
 __attribute__((weak)) int dm_cloud_status(char *note, int cap) { if (cap > 0) note[0] = 0; return DM_CLOUD_OFF; }
 __attribute__((weak)) unsigned dm_cloud_menu_ver(void) { return 0; }
-__attribute__((weak)) int dm_cloud_toast(char *text, int cap, unsigned *id) { (void)text; (void)cap; *id = 0; return 0; }
+__attribute__((weak)) int dm_cloud_mark(int64_t *age_ms) { (void)age_ms; return 0; }
 __attribute__((weak)) int dm_overlay_custom(int layout, int ctl, float *x, float *y, float *s) { (void)layout; (void)ctl; (void)x; (void)y; *s = 1; return 0; }
 __attribute__((weak)) int dm_overlay_custom_ver(void) { return 0; }
 __attribute__((weak)) int dm_overlay_hidden(int layout, int ctl) { (void)layout; (void)ctl; return 0; }
@@ -235,7 +235,7 @@ enum { SP_DISC = OV_N, SP_BLACK, SP_WHITE, SP_ACCENT, SP_N };   // (black, white
 #define OV_FPS_CHARS "0123456789 FPS-CBATO"   // (the temperature rows: "SOC 52C", "BAT 38C")
 static struct { VkImage img; VkDeviceMemory mem; VkImageView view; VkSampler samp; VkDescriptorSetLayout dsl; VkPipelineLayout layout; VkDescriptorPool pool; VkDescriptorSet set;
                 VkPipeline pipe; VkFormat pfmt; uint32_t w, h, sh, pw, ph, gh, gs; VkBuffer up; VkDeviceMemory upm; uint8_t *px; int uploaded, panel, lay, cver; float sp[SP_N][4];
-                unsigned cmv, tid; float tw;   // the cloud rows' version the panel was drawn at; the corner note's id and width in its row (below the counter's)
+                unsigned cmv;   // the cloud rows' version the panel was drawn at
                 VkRenderPass rp; VkFramebuffer fb[8]; VkImageView fbview[8]; VkExtent2D fbext[8]; } g_ov;
 static struct { const ov_theme *t; VkImage img; VkDeviceMemory mem; VkImageView view; VkDescriptorSet set; VkBuffer up; VkDeviceMemory upm; uint32_t upk; int ready; } g_tt[2];   // per layout
 // Without dynamic rendering (a Vulkan 1.1 / 1.2 device, V.has_dynrender) the overlay draws in a render pass object over the swapchain image: one pass for the swapchain's
@@ -678,20 +678,65 @@ static void ov_frame(VkCommandBuffer cb, int sp, const float b[4], float t, floa
     float x0 = b[0] - b[2] - t, x1 = b[0] + b[2] + t, y0 = b[1] - b[3] - t, y1 = b[1] + b[3] + t;
     ov_block(cb, sp, x0, y0, x1, y0 + t, alpha); ov_block(cb, sp, x0, y1 - t, x1, y1, alpha); ov_block(cb, sp, x0, y0 + t, x0 + t, y1 - t, alpha); ov_block(cb, sp, x1 - t, y0 + t, x1, y1 - t, alpha);
 }
-// The cloud sync's corner note (savecloud_android.c dm_cloud_toast: "Saved", "Waiting", a trial build's): its text rasterized into its own row under the counter's characters
-// when it changes, and drawn in the top right corner on a dark block while it shows (not under the menu)
-static char g_toast[96]; static unsigned g_toast_id; static int g_toast_on;
-static void ov_toast_glyphs(void) {
-    ov_canvas cv = {g_ov.px, g_ov.w, 0, g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh, g_ov.w, g_ov.gh};
-    memset(g_ov.px + 4 * (size_t)cv.y0 * g_ov.w, 0, (size_t)g_ov.w * g_ov.gh * 4);
-    float w = cv_text_w(g_toast, (int)g_ov.gs) + 2 * g_ov.gs; g_ov.tw = fminf(w, (float)g_ov.w);
-    cv_text(&cv, (float)g_ov.gs, g_ov.gh / 2.0f, g_toast, (int)g_ov.gs, C_WHITE);
+// The cloud sync's corner mark (savecloud_android.c dm_cloud_mark), icons only: rasterized once with the texture into the row under the counter's characters, one cell
+// (the row's height) each on a dark disc: OV_SPIN frames of a turning arc, a check, a cloud struck through, an orange "!". Drawn in the top right corner at 3 % of the
+// window's height while a mark shows (not under the menu); with none, nothing is drawn and the overlay pass is not even begun for it
+#define OV_SPIN 12
+enum { MK_CHECK = OV_SPIN, MK_OFFLINE, MK_WARN, MK_N };
+static int g_mark; static int64_t g_mark_age;
+static void cv_seg(const ov_canvas *cv, float ax, float ay, float bx, float by, float w, const uint8_t c[4]) {   // a stroke with round ends
+    float ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey, r = w / 2;
+    for (int y = (int)(fminf(ay, by) - r) - 1; y <= (int)(fmaxf(ay, by) + r) + 1; y++) for (int x = (int)(fminf(ax, bx) - r) - 1; x <= (int)(fmaxf(ax, bx) + r) + 1; x++) {
+        float px = x + 0.5f - ax, py = y + 0.5f - ay, t = l2 > 0 ? fminf(1, fmaxf(0, (px * ex + py * ey) / l2)) : 0, dx = px - t * ex, dy = py - t * ey;
+        cv_blend(cv, x, y, c, 0.5f - (sqrtf(dx * dx + dy * dy) - r));
+    }
 }
-static void ov_toast(VkCommandBuffer cb) {
-    float k = (float)g_sext.width / g_ov.w, w = g_ov.tw * k, h = (float)g_ov.gh * k, m = (float)g_sext.height * 0.02f, pad = h * 0.25f, x1 = (float)g_sext.width - m, y0 = m;
-    float bx = g_ov.sp[SP_BLACK][0], by = g_ov.sp[SP_BLACK][1], gy = (float)(g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh);
-    ov_rect(cb, x1 - w - 2 * pad, y0, x1, y0 + h + 2 * pad, bx - 2, by - 2, bx + 2, by + 2, 0.45f);
-    ov_rect(cb, x1 - w - pad, y0 + pad, x1 - pad, y0 + pad + h, 0, gy, g_ov.tw, gy + g_ov.gh, 1);
+static void cv_poly(const ov_canvas *cv, const float *p, int n, float ox, float oy, float k, float w, const uint8_t c[4]) {   // a polyline in a 24-unit box (the start screen's SVG icons)
+    // (drawn as one coverage: each texel takes the nearest segment, so the joints are not drawn twice)
+    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f, r = w * k / 2;
+    for (int i = 0; i < n; i++) { float X = ox + p[2 * i] * k, Y = oy + p[2 * i + 1] * k; x0 = fminf(x0, X); x1 = fmaxf(x1, X); y0 = fminf(y0, Y); y1 = fmaxf(y1, Y); }
+    for (int y = (int)(y0 - r) - 1; y <= (int)(y1 + r) + 1; y++) for (int x = (int)(x0 - r) - 1; x <= (int)(x1 + r) + 1; x++) {
+        float best = 1e9f;
+        for (int i = 0; i + 1 < n; i++) {
+            float ax = ox + p[2 * i] * k, ay = oy + p[2 * i + 1] * k, ex = ox + p[2 * i + 2] * k - ax, ey = oy + p[2 * i + 3] * k - ay, l2 = ex * ex + ey * ey;
+            float px = x + 0.5f - ax, py = y + 0.5f - ay, t = l2 > 0 ? fminf(1, fmaxf(0, (px * ex + py * ey) / l2)) : 0, dx = px - t * ex, dy = py - t * ey; best = fminf(best, dx * dx + dy * dy);
+        }
+        cv_blend(cv, x, y, c, 0.5f - (sqrtf(best) - r));
+    }
+}
+static void ov_mark_glyphs(void) {
+    float g = (float)g_ov.gh; if ((uint32_t)(MK_N * g) > g_ov.w) return;   // (a texture too narrow: no marks)
+    ov_canvas cv = {g_ov.px, g_ov.w, 0, g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh, g_ov.w, g_ov.gh};
+    static const uint8_t disc[4] = {15, 17, 21, 150}, ink[4] = {232, 234, 237, 255}, green[4] = {111, 207, 151, 255}, grey[4] = {195, 200, 208, 255}, orange[4] = {224, 164, 88, 255};
+    static const float check[] = {5, 12, 10, 17, 19, 7}, slash[] = {4, 4, 20, 20}, bar[] = {12, 7.5f, 12, 13}, dot[] = {12, 16.5f, 12, 16.6f};
+    static const float cloud[] = {7, 18, 17, 18, 18.17f, 17.83f, 19.24f, 17.32f, 20.11f, 16.52f, 20.72f, 15.5f, 20.99f, 14.35f, 20.92f, 13.17f, 20.51f, 12.06f, 19.79f, 11.12f, 18.82f, 10.43f,
+        17.7f, 10.06f, 17.43f, 9.13f, 17.01f, 8.26f, 16.46f, 7.47f, 15.78f, 6.77f, 15.01f, 6.2f, 14.15f, 5.75f, 13.23f, 5.45f, 12.27f, 5.3f, 11.31f, 5.31f, 10.35f, 5.47f, 9.44f, 5.78f,
+        8.59f, 6.24f, 7.82f, 6.82f, 7.15f, 7.52f, 6.61f, 8.32f, 6.2f, 9.2f, 5.25f, 9.6f, 4.41f, 10.2f, 3.73f, 10.98f, 3.25f, 11.9f, 2.99f, 12.9f, 2.97f, 13.93f, 3.18f, 14.94f, 3.62f, 15.88f,
+        4.25f, 16.69f, 5.06f, 17.33f, 5.99f, 17.78f, 7, 18};   // M7 18h10a4 4 0 0 0 .7-7.94A6 6 0 0 0 6.2 9.2 4.5 4.5 0 0 0 7 18z
+    for (int i = 0; i < MK_N; i++) {
+        float x0 = i * g, k = g * 0.62f / 24, ox = x0 + g * 0.19f, oy = g * 0.19f;   // the icon in the middle 62 % of the disc
+        cv_disc(&cv, x0 + g / 2, g / 2, g / 2 - 0.5f, disc);
+        if (i < OV_SPIN) { float p[2 * 25], a0 = 6.2832f * i / OV_SPIN;   // M12 3a9 9 0 1 0 9 9: three quarters of a circle, turned a step each frame
+            for (int j = 0; j < 25; j++) { float a = a0 - 1.5708f + 4.7124f * j / 24; p[2 * j] = 12 + 8.5f * cosf(a); p[2 * j + 1] = 12 + 8.5f * sinf(a); }
+            cv_poly(&cv, p, 25, ox, oy, k, 2.6f, ink); }
+        else if (i == MK_CHECK) cv_poly(&cv, check, 3, ox, oy, k, 2.8f, green);
+        else if (i == MK_OFFLINE) { cv_poly(&cv, cloud, (int)(sizeof cloud / sizeof *cloud / 2), ox, oy, k, 1.9f, grey); cv_poly(&cv, slash, 2, ox, oy, k, 1.9f, grey); }
+        else { cv_ring(&cv, ox + 12 * k, oy + 12 * k, 9.5f * k, 2.2f * k, orange); cv_poly(&cv, bar, 2, ox, oy, k, 2.4f, orange); cv_poly(&cv, dot, 2, ox, oy, k, 2.6f, orange); }
+    }
+}
+static void ov_mark(VkCommandBuffer cb, int mark, int64_t age) {
+    if ((uint32_t)(MK_N * g_ov.gh) > g_ov.w) return;
+    float H = (float)g_sext.height, sz = H * 0.03f, m = H * 0.02f, cx = (float)g_sext.width - m - sz / 2, cy = m + sz / 2, a = 1, k = 1; int cell;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    if (mark == DM_CLOUD_MARK_BUSY) cell = (int)((ts.tv_sec * 1000 + ts.tv_nsec / 1000000) / 83 % OV_SPIN);   // a turn a second
+    else {
+        int life = mark == DM_CLOUD_MARK_SAVED ? DM_CLOUD_MARK_SAVED_MS : mark == DM_CLOUD_MARK_OFFLINE ? DM_CLOUD_MARK_OFFLINE_MS : DM_CLOUD_MARK_CONFLICT_MS;
+        cell = mark == DM_CLOUD_MARK_SAVED ? MK_CHECK : mark == DM_CLOUD_MARK_OFFLINE ? MK_OFFLINE : MK_WARN;
+        if (age < 200) k = 1 + 0.22f * sinf(3.1416f * age / 200.0f);   // the pop: a little bigger and back, 0.2 s
+        if (age > life - 300) a = fmaxf(0, (life - age) / 300.0f);       // the fade, its last 0.3 s
+    }
+    float g = (float)g_ov.gh, u0 = cell * g, v0 = (float)(g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh), r = sz * k / 2;
+    ov_rect(cb, cx - r, cy - r, cx + r, cy + r, u0, v0, u0 + g, v0 + g, a);
 }
 static void ov_render(VkCommandBuffer cb, int mode, int menu, int fps) {
     float W = (float)g_sext.width, H = (float)g_sext.height, op = dm_overlay_opacity();
@@ -752,7 +797,7 @@ static void ov_render(VkCommandBuffer cb, int mode, int menu, int fps) {
         }
     }
     if (fps && menu < 0) ov_fps(cb, now);
-    if (g_toast_on && menu < 0 && g_ov.tid == g_toast_id) ov_toast(cb);
+    if (g_mark && menu < 0) ov_mark(cb, g_mark, g_mark_age);
 }
 // the theme's atlas for a layout into its texture, once (overlay_theme.c reads it at the first present that shows the gamepad in that layout): copied in this
 // present's command buffer; its staging buffer goes at a later present, once the copy has run (its slot's fence signalled, or the slot came round again)
@@ -838,7 +883,7 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
         g_ov.lay = lay; uint32_t sh = ov_layout_sprites(w, h); float mr[4]; ov_menu_rect((float)g_sext.width, (float)g_sext.height, mr);
         g_ov.pw = (uint32_t)(mr[2] / 2) + 1; g_ov.ph = (uint32_t)(mr[3] / 2) + 1; if (g_ov.pw > w) g_ov.pw = w;
         g_ov.gs = (uint32_t)fmaxf(2, roundf(h * 0.022f / PF_CAP)); g_ov.gh = PF_CAP * g_ov.gs + 4;   // the counter's characters: 2.2% of the window's height
-        uint32_t th = h + sh + g_ov.ph + 2 * g_ov.gh;   // (and a row of the counter's height for the cloud sync's corner note)
+        uint32_t th = h + sh + g_ov.ph + 2 * g_ov.gh;   // (and a row of the counter's height for the cloud sync's corner marks)
         VkImageCreateInfo ic = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0, VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {w, th, 1}, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
         VKCHK(vkCreateImage(V.dev, &ic, NULL, &g_ov.img)); VkMemoryRequirements rq; vkGetImageMemoryRequirements(V.dev, g_ov.img, &rq);
@@ -851,22 +896,21 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
         VkMemoryAllocateInfo bi = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, bq.size, vk_mem_type(bq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0)};
         VKCHK(vkAllocateMemory(V.dev, &bi, NULL, &g_ov.upm)); VKCHK(vkBindBufferMemory(V.dev, g_ov.up, g_ov.upm, 0));
         void *px; VKCHK(vkMapMemory(V.dev, g_ov.upm, 0, VK_WHOLE_SIZE, 0, &px)); g_ov.px = px;
-        g_ov.w = w; g_ov.h = h; g_ov.sh = sh; ov_raster(g_ov.px, w, h, sh); memset(g_ov.px + (size_t)w * (h + sh) * 4, 0, (size_t)w * (g_ov.ph + 2 * g_ov.gh) * 4); ov_fps_glyphs();
+        g_ov.w = w; g_ov.h = h; g_ov.sh = sh; ov_raster(g_ov.px, w, h, sh); memset(g_ov.px + (size_t)w * (h + sh) * 4, 0, (size_t)w * (g_ov.ph + 2 * g_ov.gh) * 4); ov_fps_glyphs(); ov_mark_glyphs();
         VkDescriptorImageInfo ii = {g_ov.samp, g_ov.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkWriteDescriptorSet wr = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_ov.set, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ii};
         vkUpdateDescriptorSets(V.dev, 1, &wr, 0, NULL);
-        g_ov.uploaded = 0; g_ov.panel = -1; g_ov.tid = ~0u;
+        g_ov.uploaded = 0; g_ov.panel = -1;
     }
     uint32_t y0 = 0, rows = g_ov.h + g_ov.sh + g_ov.ph + 2 * g_ov.gh;   // the rows to upload
     unsigned cmv = dm_cloud_menu_ver();
-    int want_panel = menu >= 0 && (menu != g_ov.panel || cmv != g_ov.cmv), want_toast = g_toast_on && g_toast_id != g_ov.tid;   // (the cloud rows change without the menu's state)
-    if (g_ov.uploaded && (want_panel || want_toast)) {   // only the panel and / or the note's row, after the last copy out of the buffer has run
+    int want_panel = menu >= 0 && (menu != g_ov.panel || cmv != g_ov.cmv);   // (the cloud rows change without the menu's state)
+    if (g_ov.uploaded && want_panel) {   // only the panel, after the last copy out of the buffer has run
         VkFence f[8]; uint32_t n = 0; for (uint32_t i = 0; i < 8; i++) if (i != k) f[n++] = g_pfence[i];
         vkWaitForFences(V.dev, n, f, 1, 1000000000ull);
-        y0 = want_panel ? g_ov.h + g_ov.sh : g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh; rows = g_ov.h + g_ov.sh + g_ov.ph + 2 * g_ov.gh - y0; g_ov.uploaded = 0;
+        y0 = g_ov.h + g_ov.sh; rows = g_ov.ph; g_ov.uploaded = 0;
     }
     if (want_panel) { ov_panel(menu); g_ov.panel = menu; g_ov.cmv = cmv; }
-    if (want_toast) { ov_toast_glyphs(); g_ov.tid = g_toast_id; }
     if (!g_ov.uploaded) {
         VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, y0 ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, g_ov.img, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
@@ -962,8 +1006,8 @@ static void present_window(vkimg_t *im, const int crop[4], double period, uint64
     VkImageLayout lay = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     int external = dm_external_active();
     int ovm = external ? 0 : dm_overlay_visible(), menu = external ? -1 : dm_menu_state(), fps = dm_overlay_fps();
-    g_toast_on = !external && dm_cloud_toast(g_toast, sizeof g_toast, &g_toast_id);
-    if ((ovm || menu >= 0 || fps || g_toast_on) && overlay_ready(cb, k, menu) && (V.has_dynrender || ov_fb(idx))) {   // without dynamic rendering, only with the image's framebuffer
+    g_mark = external ? 0 : dm_cloud_mark(&g_mark_age);   // (none: nothing of it is drawn)
+    if ((ovm || menu >= 0 || fps || g_mark) && overlay_ready(cb, k, menu) && (V.has_dynrender || ov_fb(idx))) {   // without dynamic rendering, only with the image's framebuffer
         barrier(cb, tgt, lay, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL); lay = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         VkRenderingAttachmentInfo ca = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, NULL, tview, lay, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE};
         VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO, NULL, 0, {{0, 0}, g_sext}, 1, 0, 1, &ca, NULL, NULL};

@@ -25,8 +25,8 @@
 // read at each poll: no request is made while the device has none) or the app is back in front. A run that started offline opens its session once the network is back.
 // onPause (sleep, HOME, the app's end) uploads what is owed at once under a 15 s partial wake lock, then closes the session with dirty = whether a save is still owed
 // (pending or a conflict). While the game is on screen the upload thread sends a heartbeat every 60 s (alive, dirty the same), and one at once after an upload went up;
-// onResume opens it again. A heartbeat that does not go through is dropped (offline). The corner notes show a change of state only, none of a kind within 5 min
-// (savesync.h ss_note_ok). Every network failure is a log line: the game never waits for the network once it runs.
+// onResume opens it again. A heartbeat that does not go through is dropped (offline). The corner marks show a change of state only, none of a kind within 5 min
+// (savesync.h ss_note_ok), as icons only (dm_cloud_mark). Every network failure is a log line: the game never waits for the network once it runs.
 #include "dm.h"
 #include "savesync.h"
 #include "savecloud.h"
@@ -61,16 +61,13 @@ static struct {
     ss_notes notes;                      // the corner notes shown (savesync.h ss_note_ok: one a change of state, none of a kind within 5 min)
     int64_t next_try;                    // when an owed upload is tried again (monotonic ms)
     unsigned ver;                        // the menu row's version
-    char toast[96]; int64_t toast_until; unsigned toast_id;
+    int mark; int64_t mark_t;            // the corner mark (savecloud.h DM_CLOUD_MARK_*) after an upload, and when it began
     JavaVM *vm; jobject act;             // the NativeActivity (a global reference, ANativeActivity.clazz)
 } C = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, .mode = SS_RUN_NONE};
 static void st_save_locked(void) { if (C.state_path[0] && ss_state_save(C.state_path, &C.st)) LOG("[RED] cloud: cannot write %s (errno %d)", C.state_path, errno); }
 static void changed_locked(void) { C.ver++; }
 static void menu_redraw(void) { if (dm_menu_state() >= 0) dm_overlay_redraw(); }   // (the panel compares dm_cloud_menu_ver)
-static void toast_locked(const char *ko, const char *en, int ms) {
-    int k = korean(); const char *cloud = has_glyph(0x2601) ? "\xe2\x98\x81 " : "";   // ☁ when the font has it
-    snprintf(C.toast, sizeof C.toast, "%s%s", cloud, k ? ko : en); C.toast_until = now_ms() + ms; C.toast_id++;
-}
+static void mark_locked(int kind) { C.mark = kind; C.mark_t = now_ms(); }   // a mark in the game's corner (dm_cloud_mark)
 
 // ---- HTTP: java.net.HttpURLConnection through JNI, as datasync_android.c (the system's DNS, proxy, TLS trust store; no dex of the app's own) ----
 static struct { int ok; jclass cUrl, cConn, cIn, cOut; jmethodID mUrl, mOpen, mConnTo, mReadTo, mProp, mCaches, mMethod, mDoOut, mFixed, mCode, mHeader, mLen, mIn, mErr, mOut,
@@ -225,7 +222,7 @@ static void up_start(void);
 static void finish_locked(int quit, int skip) {   // the start ends: the screen goes, done() on the main thread
     if (W.done) return;
     W.done = 1; W.quit = quit; W.up_after = !quit && !skip;
-    if (skip) { C.skipped = 1; ss_mark_offline_play(&C.st); st_save_locked(); toast_locked("동기화 꺼짐", "Cloud sync off", 2500); changed_locked();
+    if (skip) { C.skipped = 1; ss_mark_offline_play(&C.st); st_save_locked(); changed_locked();
                 LOG("cloud: this run plays without the sync (the next start asks before its save goes up)"); }
 }
 static void skipped_end(void) { dm_start_step(STV_CLOUD, STV_SKIP, korean() ? "건너뜀" : "Skipped"); dm_cloud_screen_end(); }   // B: the start ends without the sync
@@ -526,11 +523,9 @@ static void wake_lock(JNIEnv *E, int on, int ms) {   // a failure (no WAKE_LOCK 
     char why[200] = ""; if (jx(E, why, sizeof why)) LOG("[RED] cloud: the wake lock's %s failed (%s)", on ? "acquire" : "release", why);
 }
 enum { UP_NOTHING, UP_OK, UP_FAIL, UP_CONFLICT, UP_ERR };
-static void note_locked(int kind) {   // a corner note for a change of state (savesync.h ss_note_ok decides whether it shows)
+static void note_locked(int kind) {   // the corner mark for a change of state (savesync.h ss_note_ok decides whether it shows)
     if (!ss_note_ok(&C.notes, kind, now_ms())) return;
-    if (kind == SS_NOTE_SAVED) toast_locked("저장됨", "Saved to the cloud", 2000);
-    else if (kind == SS_NOTE_WAITING) toast_locked("대기 중 · 연결되면 올려요", "Cloud: waiting for a connection", 2500);
-    else if (kind == SS_NOTE_CONFLICT) toast_locked("다른 기기 세이브가 있어요 · 다음 실행 때 고를게요", "Another device's save is newer · choose at the next start", 4000);
+    mark_locked(kind == SS_NOTE_SAVED ? DM_CLOUD_MARK_SAVED : kind == SS_NOTE_WAITING ? DM_CLOUD_MARK_OFFLINE : kind == SS_NOTE_CONFLICT ? DM_CLOUD_MARK_CONFLICT : DM_CLOUD_MARK_NONE);
 }
 static int upload(JNIEnv *E, int64_t deadline) {
     static const int64_t BACKOFF[] = {60000, 120000, 300000, 600000};
@@ -666,10 +661,15 @@ void dm_cloud_menu_toggle(void) {   // this game's sync off (from now on, and at
     }
     pthread_mutex_unlock(&C.mu); menu_redraw();
 }
-int dm_cloud_toast(char *text, int cap, unsigned *id) {
-    pthread_mutex_lock(&C.mu); int on = C.toast_until && now_ms() < C.toast_until;
-    if (on) snprintf(text, (size_t)cap, "%s", C.toast); *id = C.toast_id;
-    pthread_mutex_unlock(&C.mu); return on;
+// The game's corner mark (gfx_vk_present.c ov_mark): a spinner while an upload runs on screen, then the outcome's mark for its time (savesync.h ss_note_ok let it show);
+// NONE: nothing is drawn. *age: ms since the mark began
+int dm_cloud_mark(int64_t *age) {
+    pthread_mutex_lock(&C.mu); int64_t t = now_ms(), a = t - C.mark_t; int k = DM_CLOUD_MARK_NONE;
+    int life = C.mark == DM_CLOUD_MARK_SAVED ? DM_CLOUD_MARK_SAVED_MS : C.mark == DM_CLOUD_MARK_OFFLINE ? DM_CLOUD_MARK_OFFLINE_MS : C.mark == DM_CLOUD_MARK_CONFLICT ? DM_CLOUD_MARK_CONFLICT_MS : 0;
+    if (C.mark && a < life) { k = C.mark; *age = a; }
+    else if (C.uploading && !C.pause_ev) { k = DM_CLOUD_MARK_BUSY; *age = a; }
+    else C.mark = DM_CLOUD_MARK_NONE;
+    pthread_mutex_unlock(&C.mu); return k;
 }
 
 // ---- the start ----
@@ -719,7 +719,6 @@ int dm_cloud_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(int quit
         : ": switched off for this game in the pause menu");
     if (C.mode == SS_RUN_SUPPRESSED) {   // no network at all; the next start with the sync asks before what this run saves goes up
         ss_mark_offline_play(&C.st); st_save_locked();
-        if (C.trial) toast_locked("시험판 — 클라우드 세이브 꺼짐", "Trial build - cloud save off", 3500);
         changed_locked(); pthread_mutex_unlock(&C.mu);
         dm_start_step(STV_CLOUD, STV_SKIP, korean() ? (C.trial ? "시험판" : "꺼짐") : (C.trial ? "Trial build" : "Off")); return 0;
     }
