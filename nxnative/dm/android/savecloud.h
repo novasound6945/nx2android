@@ -62,7 +62,7 @@ int dm_cloud_status(char *note, int cap);  // DM_CLOUD_*, and a note (when it la
 unsigned dm_cloud_menu_ver(void);          // changes with the status: the menu's panel is drawn again
 void dm_cloud_menu_press(void);            // the row: Upload now when an upload is owed
 void dm_cloud_menu_toggle(void);           // the row's switch: this game's sync on / off (kept in the sync state)
-// the game's corner mark (gfx_vk_present.c ov_mark), icons only, on a dark disc in the top right corner: a turning arc while an upload runs; a check that pops (0.2 s) and
+// the game's corner mark (gfx_vk_present.c ov_mark), icons only, on a dark disc in the top right corner: a turning arc while an upload runs; a white check on a green disc that pops (0.2 s) and
 // fades after an upload went up; a cloud struck through while the save waits for a network; an orange "!" when another device's save is newer (the next start asks).
 // NONE: nothing is drawn. *age_ms: since the mark began
 enum { DM_CLOUD_MARK_NONE, DM_CLOUD_MARK_BUSY, DM_CLOUD_MARK_SAVED, DM_CLOUD_MARK_OFFLINE, DM_CLOUD_MARK_CONFLICT };

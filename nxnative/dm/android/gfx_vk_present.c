@@ -230,12 +230,13 @@ static void barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImage
 // glow over a pressed round button (a wider one glows in its own shape); a black block, the dimming behind the menu. sp: each sprite in the strip (centre x, y,
 // half width and height, texels; 0 = none). The panel is rasterized again whenever the menu's state (dm_menu_state) changes. Under the panel, the frame rate
 // counter's characters (OV_FPS_CHARS, gh rows: one cell each), from which the counter is put together on every present, so a changing number needs no upload.
+// Under them the cloud sync's corner marks (ov_mark_glyphs: mrows rows of mcols cells, mg texels square, drawn one texel a window pixel).
 // With a theme in the APK (overlay_theme.c), the gamepad is its sprites instead: an atlas per layout in a texture of its own (g_tt), uploaded once, every
 // control drawn from it on each present; the procedural layer is then only the menu's panel, the dimming and the counter.
 enum { SP_DISC = OV_N, SP_BLACK, SP_WHITE, SP_ACCENT, SP_N };   // (black, white, accent: solid blocks, the dimming and the layout editor's frames)
 #define OV_FPS_CHARS "0123456789 FPS-CBATO"   // (the temperature rows: "SOC 52C", "BAT 38C")
 static struct { VkImage img; VkDeviceMemory mem; VkImageView view; VkSampler samp; VkDescriptorSetLayout dsl; VkPipelineLayout layout; VkDescriptorPool pool; VkDescriptorSet set;
-                VkPipeline pipe; VkFormat pfmt; uint32_t w, h, sh, pw, ph, gh, gs; VkBuffer up; VkDeviceMemory upm; uint8_t *px; void *map; int uploaded, panel, lay, cver; float sp[SP_N][4];
+                VkPipeline pipe; VkFormat pfmt; uint32_t w, h, sh, pw, ph, gh, gs, mg, mcols, mrows; VkBuffer up; VkDeviceMemory upm; uint8_t *px; void *map; int uploaded, panel, lay, cver; float sp[SP_N][4];
                 unsigned cmv;   // the cloud rows' version the panel was drawn at
                 VkRenderPass rp; VkFramebuffer fb[8]; VkImageView fbview[8]; VkExtent2D fbext[8]; } g_ov;
 static struct { const ov_theme *t; VkImage img; VkDeviceMemory mem; VkImageView view; VkDescriptorSet set; VkBuffer up; VkDeviceMemory upm; uint32_t upk; int ready; } g_tt[2];   // per layout
@@ -613,10 +614,11 @@ static void ov_raster(uint8_t *px, uint32_t w, uint32_t h, uint32_t sh) {
         else ov_circle(px, w, h + sh, x, y, r, 2.5f);
     }
 }
+static uint32_t ov_tex_rows(void) { return g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh + g_ov.mrows * g_ov.mg; }   // the texture's height
 typedef struct { float pos[4], uv[4], alpha; } ov_quad;
 static void ov_draw(VkCommandBuffer cb, const ov_quad *q) { vkCmdPushConstants(cb, g_ov.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof *q, q); vkCmdDraw(cb, 6, 1, 0, 0); }
 static void ov_rect(VkCommandBuffer cb, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, float alpha) {   // screen pixels, texels
-    float W = (float)g_sext.width, H = (float)g_sext.height, tw = (float)g_ov.w, th = (float)(g_ov.h + g_ov.sh + g_ov.ph + 2 * g_ov.gh);
+    float W = (float)g_sext.width, H = (float)g_sext.height, tw = (float)g_ov.w, th = (float)ov_tex_rows();
     ov_quad q = {{x0 / W * 2 - 1, y0 / H * 2 - 1, x1 / W * 2 - 1, y1 / H * 2 - 1}, {u0 / tw, v0 / th, u1 / tw, v1 / th}, alpha}; ov_draw(cb, &q);
 }
 static void ov_sprite(VkCommandBuffer cb, int i, float sx, float sy, float r, float alpha) {   // sprite i centred on screen pixel (sx, sy), r screen pixels in half width
@@ -696,9 +698,12 @@ static void ov_frame(VkCommandBuffer cb, int sp, const float b[4], float t, floa
     float x0 = b[0] - b[2] - t, x1 = b[0] + b[2] + t, y0 = b[1] - b[3] - t, y1 = b[1] + b[3] + t;
     ov_block(cb, sp, x0, y0, x1, y0 + t, alpha); ov_block(cb, sp, x0, y1 - t, x1, y1, alpha); ov_block(cb, sp, x0, y0 + t, x0 + t, y1 - t, alpha); ov_block(cb, sp, x1 - t, y0 + t, x1, y1 - t, alpha);
 }
-// The cloud sync's corner mark (savecloud_android.c dm_cloud_mark), icons only: rasterized once with the texture into the row under the counter's characters, one cell
-// (the row's height) each on a dark disc: OV_SPIN frames of a turning arc, a check, a cloud struck through, an orange "!". Drawn in the top right corner at 3 % of the
-// window's height while a mark shows (not under the menu); with none, nothing is drawn and the overlay pass is not even begun for it
+// The cloud sync's corner mark (savecloud_android.c dm_cloud_mark), icons only: rasterized once with the texture into the rows under the counter's characters, at
+// the size they are drawn (OV_MARK_H of the window's height, one texel a window pixel): OV_SPIN frames of a turning arc and the cloud struck through and the orange
+// "!", each on a dark disc, and the check: a white V on a green disc (the disc itself is its background). Drawn in the top right corner, OV_MARK_M of the height from
+// both edges, while a mark shows (not under the menu); with none, nothing is drawn and the overlay pass is not even begun for it
+#define OV_MARK_H 0.045f
+#define OV_MARK_M 0.03f
 #define OV_SPIN 12
 enum { MK_CHECK = OV_SPIN, MK_OFFLINE, MK_WARN, MK_N };
 static int g_mark; static int64_t g_mark_age;
@@ -722,29 +727,31 @@ static void cv_poly(const ov_canvas *cv, const float *p, int n, float ox, float 
         cv_blend(cv, x, y, c, 0.5f - (sqrtf(best) - r));
     }
 }
+static void ov_mark_cell(int i, float *u, float *v) { *u = (float)(i % g_ov.mcols * g_ov.mg); *v = (float)(g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh + i / g_ov.mcols * g_ov.mg); }
 static void ov_mark_glyphs(void) {
-    float g = (float)g_ov.gh; if ((uint32_t)(MK_N * g) > g_ov.w) return;   // (a texture too narrow: no marks)
-    ov_canvas cv = {g_ov.px, g_ov.w, 0, g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh, g_ov.w, g_ov.gh};
-    static const uint8_t disc[4] = {15, 17, 21, 150}, ink[4] = {232, 234, 237, 255}, green[4] = {111, 207, 151, 255}, grey[4] = {195, 200, 208, 255}, orange[4] = {224, 164, 88, 255};
-    static const float check[] = {5, 12, 10, 17, 19, 7}, slash[] = {4, 4, 20, 20}, bar[] = {12, 7.5f, 12, 13}, dot[] = {12, 16.5f, 12, 16.6f};
+    if (!g_ov.mcols) return;   // (a texture too narrow: no marks)
+    float g = (float)g_ov.mg; ov_canvas cv = {g_ov.px, g_ov.w, 0, 0, g_ov.w, ov_tex_rows()};
+    static const uint8_t disc[4] = {15, 17, 21, 150}, ink[4] = {232, 234, 237, 255}, green[4] = {52, 199, 89, 255}, white[4] = {255, 255, 255, 255}, grey[4] = {195, 200, 208, 255},
+                         orange[4] = {224, 164, 88, 255};
+    static const float check[] = {5.6f, 12.4f, 10, 16.8f, 18.6f, 7.6f}, slash[] = {4, 4, 20, 20}, bar[] = {12, 7.5f, 12, 13}, dot[] = {12, 16.5f, 12, 16.6f};
     static const float cloud[] = {7, 18, 17, 18, 18.17f, 17.83f, 19.24f, 17.32f, 20.11f, 16.52f, 20.72f, 15.5f, 20.99f, 14.35f, 20.92f, 13.17f, 20.51f, 12.06f, 19.79f, 11.12f, 18.82f, 10.43f,
         17.7f, 10.06f, 17.43f, 9.13f, 17.01f, 8.26f, 16.46f, 7.47f, 15.78f, 6.77f, 15.01f, 6.2f, 14.15f, 5.75f, 13.23f, 5.45f, 12.27f, 5.3f, 11.31f, 5.31f, 10.35f, 5.47f, 9.44f, 5.78f,
         8.59f, 6.24f, 7.82f, 6.82f, 7.15f, 7.52f, 6.61f, 8.32f, 6.2f, 9.2f, 5.25f, 9.6f, 4.41f, 10.2f, 3.73f, 10.98f, 3.25f, 11.9f, 2.99f, 12.9f, 2.97f, 13.93f, 3.18f, 14.94f, 3.62f, 15.88f,
         4.25f, 16.69f, 5.06f, 17.33f, 5.99f, 17.78f, 7, 18};   // M7 18h10a4 4 0 0 0 .7-7.94A6 6 0 0 0 6.2 9.2 4.5 4.5 0 0 0 7 18z
     for (int i = 0; i < MK_N; i++) {
-        float x0 = i * g, k = g * 0.62f / 24, ox = x0 + g * 0.19f, oy = g * 0.19f;   // the icon in the middle 62 % of the disc
-        cv_disc(&cv, x0 + g / 2, g / 2, g / 2 - 0.5f, disc);
+        float x0, y0; ov_mark_cell(i, &x0, &y0); float k = g * 0.62f / 24, ox = x0 + g * 0.19f, oy = y0 + g * 0.19f;   // the icon in the middle 62 % of the disc
+        cv_disc(&cv, x0 + g / 2, y0 + g / 2, g / 2 - 1, i == MK_CHECK ? green : disc);
         if (i < OV_SPIN) { float p[2 * 25], a0 = 6.2832f * i / OV_SPIN;   // M12 3a9 9 0 1 0 9 9: three quarters of a circle, turned a step each frame
             for (int j = 0; j < 25; j++) { float a = a0 - 1.5708f + 4.7124f * j / 24; p[2 * j] = 12 + 8.5f * cosf(a); p[2 * j + 1] = 12 + 8.5f * sinf(a); }
             cv_poly(&cv, p, 25, ox, oy, k, 2.6f, ink); }
-        else if (i == MK_CHECK) cv_poly(&cv, check, 3, ox, oy, k, 2.8f, green);
+        else if (i == MK_CHECK) cv_poly(&cv, check, 3, ox, oy, k, 3.2f, white);
         else if (i == MK_OFFLINE) { cv_poly(&cv, cloud, (int)(sizeof cloud / sizeof *cloud / 2), ox, oy, k, 1.9f, grey); cv_poly(&cv, slash, 2, ox, oy, k, 1.9f, grey); }
         else { cv_ring(&cv, ox + 12 * k, oy + 12 * k, 9.5f * k, 2.2f * k, orange); cv_poly(&cv, bar, 2, ox, oy, k, 2.4f, orange); cv_poly(&cv, dot, 2, ox, oy, k, 2.6f, orange); }
     }
 }
 static void ov_mark(VkCommandBuffer cb, int mark, int64_t age) {
-    if ((uint32_t)(MK_N * g_ov.gh) > g_ov.w) return;
-    float H = (float)g_sext.height, sz = H * 0.03f, m = H * 0.02f, cx = (float)g_sext.width - m - sz / 2, cy = m + sz / 2, a = 1, k = 1; int cell;
+    if (!g_ov.mcols) return;
+    float H = (float)g_sext.height, sz = H * OV_MARK_H, m = H * OV_MARK_M, cx = (float)g_sext.width - m - sz / 2, cy = m + sz / 2, a = 1, k = 1; int cell;
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     if (mark == DM_CLOUD_MARK_BUSY) cell = (int)((ts.tv_sec * 1000 + ts.tv_nsec / 1000000) / 83 % OV_SPIN);   // a turn a second
     else {
@@ -753,7 +760,7 @@ static void ov_mark(VkCommandBuffer cb, int mark, int64_t age) {
         if (age < 200) k = 1 + 0.22f * sinf(3.1416f * age / 200.0f);   // the pop: a little bigger and back, 0.2 s
         if (age > life - 300) a = fmaxf(0, (life - age) / 300.0f);       // the fade, its last 0.3 s
     }
-    float g = (float)g_ov.gh, u0 = cell * g, v0 = (float)(g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh), r = sz * k / 2;
+    float g = (float)g_ov.mg, u0, v0, r = g * k / 2; ov_mark_cell(cell, &u0, &v0);   // (the cell's size: sz, a texel a pixel)
     ov_rect(cb, cx - r, cy - r, cx + r, cy + r, u0, v0, u0 + g, v0 + g, a);
 }
 static void ov_render(VkCommandBuffer cb, int mode, int menu, int fps) {   // mode (dm_overlay_visible): 0 nothing, 1 the gamepad, 2 and 3 the menu button alone
@@ -903,7 +910,9 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
         g_ov.lay = lay; uint32_t sh = ov_layout_sprites(w, h); float mr[4]; ov_menu_rect((float)g_sext.width, (float)g_sext.height, mr);
         g_ov.pw = (uint32_t)(mr[2] / 2) + 1; g_ov.ph = (uint32_t)(mr[3] / 2) + 1; if (g_ov.pw > w) g_ov.pw = w;
         g_ov.gs = (uint32_t)fmaxf(2, roundf(h * 0.022f / PF_CAP)); g_ov.gh = PF_CAP * g_ov.gs + 4;   // the counter's characters: 2.2% of the window's height
-        uint32_t th = h + sh + g_ov.ph + 2 * g_ov.gh;   // (and a row of the counter's height for the cloud sync's corner marks)
+        g_ov.mg = (uint32_t)ceilf((float)g_sext.height * OV_MARK_H); g_ov.mcols = g_ov.mg ? w / g_ov.mg : 0; if (g_ov.mcols > MK_N) g_ov.mcols = MK_N;   // the corner marks' cells
+        g_ov.mrows = g_ov.mcols ? (MK_N + g_ov.mcols - 1) / g_ov.mcols : 0;
+        uint32_t th = h + sh + g_ov.ph + g_ov.gh + g_ov.mrows * g_ov.mg;
         VkImageCreateInfo ic = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0, VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {w, th, 1}, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
         VKCHK(vkCreateImage(V.dev, &ic, NULL, &g_ov.img)); VkMemoryRequirements rq; vkGetImageMemoryRequirements(V.dev, g_ov.img, &rq);
@@ -919,13 +928,13 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
         // Rasterize into ordinary (cacheable) memory and copy the rows over: writing the pixels straight into the mapped buffer is uncached write-combined, ~550 ms
         // for the menu panel on an Adreno 650 (OPPO Pad), and the raster is what a dragged slider pays for every frame
         g_ov.px = malloc((size_t)w * th * 4); if (!g_ov.px) g_ov.px = px;
-        g_ov.w = w; g_ov.h = h; g_ov.sh = sh; ov_raster(g_ov.px, w, h, sh); memset(g_ov.px + (size_t)w * (h + sh) * 4, 0, (size_t)w * (g_ov.ph + 2 * g_ov.gh) * 4); ov_fps_glyphs(); ov_mark_glyphs();
+        g_ov.w = w; g_ov.h = h; g_ov.sh = sh; ov_raster(g_ov.px, w, h, sh); memset(g_ov.px + (size_t)w * (h + sh) * 4, 0, (size_t)w * (th - h - sh) * 4); ov_fps_glyphs(); ov_mark_glyphs();
         VkDescriptorImageInfo ii = {g_ov.samp, g_ov.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkWriteDescriptorSet wr = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_ov.set, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ii};
         vkUpdateDescriptorSets(V.dev, 1, &wr, 0, NULL);
         g_ov.uploaded = 0; g_ov.panel = -1;
     }
-    uint32_t y0 = 0, rows = g_ov.h + g_ov.sh + g_ov.ph + 2 * g_ov.gh;   // the rows to upload
+    uint32_t y0 = 0, rows = ov_tex_rows();   // the rows to upload
     unsigned cmv = dm_cloud_menu_ver();
     int want_panel = menu >= 0 && (menu != g_ov.panel || cmv != g_ov.cmv);   // (the cloud rows change without the menu's state)
     // (a fence that this device's kgsl holds for ~half a second would freeze the whole menu: wait one frame's worth, and if the copy out of the buffer has not run
