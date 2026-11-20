@@ -181,7 +181,10 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         memcpy((void *)dst, (void *)src, size);   // move semantics: the source region is not accessed while mapped (Horizon makes it inaccessible)
         map_add(dst, size, src, 0x0B /*MappedMemory*/);
         pthread_mutex_unlock(&g_map_lock);
-        if (g_flag.svc) LOG("MapMemory %#llx <- %#llx +%#llx", dst, src, size);
+        if (g_flag.svc) { uint64_t used = 0; int live = 0; pthread_mutex_lock(&g_map_lock);
+            for (int i = 0; i < g_nmap; i++) if (g_map[i].state == 0x0B) { used += g_map[i].size; live++; }
+            pthread_mutex_unlock(&g_map_lock);
+            LOG("MapMemory %#llx <- %#llx +%#llx (stack region: %d mapped, %.1f MB of %.1f MB)", dst, src, size, live, used / 1048576.0, g_stack_cap / 1048576.0); }
         regs[0] = 0; return 0;
     }
     case 0x05: {  // UnmapMemory(dst, src, size): contents are moved back to the source region; a 16K page may be shared with an adjacent mapping, permissions are not revoked
@@ -193,6 +196,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         memcpy((void *)src, (void *)dst, size);
         map_del(k - 1);
         pthread_mutex_unlock(&g_map_lock);
+        if (g_flag.svc) LOG("UnmapMemory %#llx -> %#llx +%#llx", dst, src, size);
         regs[0] = 0; return 0;
     }
     case 0x06: {  // QueryMemory(MemoryInfo* out, PageInfo* pout, addr) → x1 = pageinfo
