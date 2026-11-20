@@ -25,8 +25,9 @@
 // read at each poll: no request is made while the device has none) or the app is back in front. A run that started offline opens its session once the network is back.
 // onPause (sleep, HOME, the app's end) uploads what is owed at once under a 15 s partial wake lock, then closes the session with dirty = whether a save is still owed
 // (pending or a conflict). While the game is on screen the upload thread sends a heartbeat every 60 s (alive, dirty the same), and one at once after an upload went up;
-// onResume opens it again. A heartbeat that does not go through is dropped (offline). The corner marks show a change of state only, none of a kind within 5 min
-// (savesync.h ss_note_ok), as icons only (dm_cloud_mark). Every network failure is a log line: the game never waits for the network once it runs.
+// onResume opens it again. A heartbeat that does not go through is dropped (offline). The corner marks, icons only (dm_cloud_mark): every upload's spinner and,
+// when it went up, its check (uploads less than 3 s apart: one spinner, one check); waiting and a conflict a change of state only, none of a kind within 5 min
+// (savesync.h ss_up_begin, ss_up_end, ss_mark_now). Every network failure is a log line: the game never waits for the network once it runs.
 #include "dm.h"
 #include "savesync.h"
 #include "savecloud.h"
@@ -58,16 +59,16 @@ static struct {
     int skipped;                         // this run plays without the sync (B at the start)
     int uploading, offline, fails, kick, pause_ev, resume_ev, up_started;
     int sess_open;                       // the server took this run's session open (or a heartbeat): a run that started offline opens it once the network is back
-    ss_notes notes;                      // the corner notes shown (savesync.h ss_note_ok: one a change of state, none of a kind within 5 min)
+    ss_notes notes;                      // the corner marks (savesync.h ss_up_begin, ss_up_end, ss_mark_now)
     int64_t next_try;                    // when an owed upload is tried again (monotonic ms)
     unsigned ver;                        // the menu row's version
-    int mark; int64_t mark_t;            // the corner mark (savecloud.h DM_CLOUD_MARK_*) after an upload, and when it began
     JavaVM *vm; jobject act;             // the NativeActivity (a global reference, ANativeActivity.clazz)
 } C = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, .mode = SS_RUN_NONE};
 static void st_save_locked(void) { if (C.state_path[0] && ss_state_save(C.state_path, &C.st)) LOG("[RED] cloud: cannot write %s (errno %d)", C.state_path, errno); }
 static void changed_locked(void) { C.ver++; }
 static void menu_redraw(void) { if (dm_menu_state() >= 0) dm_overlay_redraw(); }   // (the panel compares dm_cloud_menu_ver)
-static void mark_locked(int kind) { C.mark = kind; C.mark_t = now_ms(); }   // a mark in the game's corner (dm_cloud_mark)
+_Static_assert(SS_MARK_BUSY == DM_CLOUD_MARK_BUSY && SS_MARK_SAVED == DM_CLOUD_MARK_SAVED && SS_MARK_WAITING == DM_CLOUD_MARK_OFFLINE && SS_MARK_CONFLICT == DM_CLOUD_MARK_CONFLICT
+               && SS_MARK_SAVED_MS == DM_CLOUD_MARK_SAVED_MS && SS_MARK_WAITING_MS == DM_CLOUD_MARK_OFFLINE_MS && SS_MARK_CONFLICT_MS == DM_CLOUD_MARK_CONFLICT_MS, "the corner marks");
 
 // ---- HTTP: java.net.HttpURLConnection through JNI, as datasync_android.c (the system's DNS, proxy, TLS trust store; no dex of the app's own) ----
 static struct { int ok; jclass cUrl, cConn, cIn, cOut; jmethodID mUrl, mOpen, mConnTo, mReadTo, mProp, mCaches, mMethod, mDoOut, mFixed, mCode, mHeader, mLen, mIn, mErr, mOut,
@@ -526,10 +527,6 @@ static void wake_lock(JNIEnv *E, int on, int ms) {   // a failure (no WAKE_LOCK 
     char why[200] = ""; if (jx(E, why, sizeof why)) LOG("[RED] cloud: the wake lock's %s failed (%s)", on ? "acquire" : "release", why);
 }
 enum { UP_NOTHING, UP_OK, UP_FAIL, UP_CONFLICT, UP_ERR };
-static void note_locked(int kind) {   // the corner mark for a change of state (savesync.h ss_note_ok decides whether it shows)
-    if (!ss_note_ok(&C.notes, kind, now_ms())) return;
-    mark_locked(kind == SS_NOTE_SAVED ? DM_CLOUD_MARK_SAVED : kind == SS_NOTE_WAITING ? DM_CLOUD_MARK_OFFLINE : kind == SS_NOTE_CONFLICT ? DM_CLOUD_MARK_CONFLICT : DM_CLOUD_MARK_NONE);
-}
 static int upload(JNIEnv *E, int64_t deadline) {
     static const int64_t BACKOFF[] = {60000, 120000, 300000, 600000};
     pthread_mutex_lock(&C.mu);
@@ -544,8 +541,8 @@ static int upload(JNIEnv *E, int64_t deadline) {
     }
     if (r) { LOG("[RED] cloud: the save cannot be archived for the upload: %s", err); pthread_mutex_lock(&C.mu); C.st.pending = 1; C.next_try = now_ms() + BACKOFF[3]; changed_locked(); pthread_mutex_unlock(&C.mu); return UP_ERR; }
     int64_t files = ss_tar_files(t.p, t.n);   // (the server keeps it beside the size: another device's conflict card shows both)
-    pthread_mutex_lock(&C.mu); C.st.pending = 1; C.uploading = 1; changed_locked(); pthread_mutex_unlock(&C.mu); menu_redraw();
-    int rc = UP_ERR;
+    pthread_mutex_lock(&C.mu); C.st.pending = 1; C.uploading = 1; ss_up_begin(&C.notes, now_ms()); changed_locked(); pthread_mutex_unlock(&C.mu); menu_redraw();   // the spinner
+    int rc = UP_ERR, note = SS_NOTE_NONE;
     for (int round = 0; round < 2; round++) {
         char u[1700], dev[200], gv[100], bd[100], fc[32] = ""; ss_qenc(dev, sizeof dev, C.cfg.device); ss_qenc(gv, sizeof gv, C.gver); ss_qenc(bd, sizeof bd, C.build);
         if (files >= 0) snprintf(fc, sizeof fc, "&files=%lld", (long long)files);
@@ -555,13 +552,13 @@ static int upload(JNIEnv *E, int64_t deadline) {
         pthread_mutex_lock(&C.mu);
         if (got) {
             int i = C.fails < 3 ? C.fails : 3; C.fails++; C.next_try = now_ms() + BACKOFF[i];
-            note_locked(ss_after_put(&C.st, 0, 0, sha, NULL, 0));
+            note = ss_after_put(&C.st, 0, 0, sha, NULL, 0);
             C.offline = 1; rc = UP_FAIL;
             LOG("cloud: the upload did not go through (%s): tried again in %lld min, or at once when the network comes back", h.why, (long long)(BACKOFF[i] / 60000));
         } else if (h.code == 200) {
             uint64_t seq = !ss_meta_parse((const char *)h.body.p, h.body.n, &m) ? m.seq : h.seq[0] ? strtoull(h.seq, NULL, 10) : 0;
             if (!seq) LOG("[RED] cloud: the upload's answer has no seq: the next start asks the server again");
-            note_locked(ss_after_put(&C.st, 200, seq, sha, NULL, (int64_t)time(NULL)));
+            note = ss_after_put(&C.st, 200, seq, sha, NULL, (int64_t)time(NULL));
             C.fails = 0; C.offline = 0; rc = UP_OK;
             LOG("cloud: the save went up: seq %llu, %zu bytes, %lld files, %.12s", (unsigned long long)seq, t.n, (long long)files, sha);
         } else if (h.code == 409) {
@@ -570,12 +567,12 @@ static int upload(JNIEnv *E, int64_t deadline) {
                 LOG("cloud: the server has no save any more: sent again as the first one"); base = 0; C.st.seq = 0; C.st.force = 0;
                 pthread_mutex_unlock(&C.mu); ss_buf_free(&h.body); continue;
             }
-            note_locked(ss_after_put(&C.st, 409, 0, sha, &m, 0)); C.offline = 0; rc = UP_CONFLICT;   // never overwritten, never asked while the game runs: the next start's cards
+            note = ss_after_put(&C.st, 409, 0, sha, &m, 0); C.offline = 0; rc = UP_CONFLICT;   // never overwritten, never asked while the game runs: the next start's cards
             LOG("[RED] cloud: the server moved on (seq %llu from %s, this device's base %llu): a conflict, the next start asks which save to keep", (unsigned long long)m.seq, m.device[0] ? m.device : "-", (unsigned long long)base);
         } else if (h.code == 401 || h.code == 403) { ss_after_put(&C.st, h.code, 0, sha, NULL, 0); rc = UP_ERR; LOG("[RED] cloud: the server refused the token (sync.txt's token=, %.4s...)", C.cfg.token); }
         else { C.next_try = now_ms() + (h.code == 413 ? 24ll * 3600 * 1000 : BACKOFF[3]); rc = UP_ERR;
                LOG("[RED] cloud: the upload was refused: HTTP %d%s", h.code, h.code == 400 ? " (the hash did not match)" : h.code == 413 ? " (the save is too big for the server)" : ""); }
-        C.uploading = 0; st_save_locked(); changed_locked();
+        C.uploading = 0; ss_up_end(&C.notes, note, now_ms()); st_save_locked(); changed_locked();   // its check (once no upload follows within 3 s), or its note
         pthread_mutex_unlock(&C.mu); ss_buf_free(&h.body);
         break;
     }
@@ -664,15 +661,13 @@ void dm_cloud_menu_toggle(void) {   // this game's sync off (from now on, and at
     }
     pthread_mutex_unlock(&C.mu); menu_redraw();
 }
-// The game's corner mark (gfx_vk_present.c ov_mark): a spinner while an upload runs on screen, then the outcome's mark for its time (savesync.h ss_note_ok let it show);
-// NONE: nothing is drawn. *age: ms since the mark began
+// The game's corner mark (gfx_vk_present.c ov_mark, at each present): the spinner from an upload's start (the upload thread's ss_up_begin) on while uploads follow
+// each other, then the check, or the waiting or conflict note (savesync.h ss_mark_now). None while the app leaves the screen. NONE: nothing is drawn. *age: ms since
+// the mark began
 int dm_cloud_mark(int64_t *age) {
-    pthread_mutex_lock(&C.mu); int64_t t = now_ms(), a = t - C.mark_t; int k = DM_CLOUD_MARK_NONE;
-    int life = C.mark == DM_CLOUD_MARK_SAVED ? DM_CLOUD_MARK_SAVED_MS : C.mark == DM_CLOUD_MARK_OFFLINE ? DM_CLOUD_MARK_OFFLINE_MS : C.mark == DM_CLOUD_MARK_CONFLICT ? DM_CLOUD_MARK_CONFLICT_MS : 0;
-    if (C.mark && a < life) { k = C.mark; *age = a; }
-    else if (C.uploading && !C.pause_ev) { k = DM_CLOUD_MARK_BUSY; *age = a; }
-    else C.mark = DM_CLOUD_MARK_NONE;
-    pthread_mutex_unlock(&C.mu); return k;
+    pthread_mutex_lock(&C.mu); int64_t a = 0; int k = ss_mark_now(&C.notes, now_ms(), &a);
+    if (k == SS_MARK_BUSY && C.pause_ev) k = DM_CLOUD_MARK_NONE;
+    pthread_mutex_unlock(&C.mu); *age = a; return k;
 }
 
 // ---- the start ----

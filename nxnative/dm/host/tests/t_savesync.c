@@ -206,6 +206,48 @@ static void t_decide(void) {
     CHECK(ss_decide(SS_NET_OK, &m, &s, A, &p) == SS_GO_ASK_OFFLINE, "a trial build changed the synced save: the release asks");
 }
 
+// the corner marks, sampled every 50 ms as the presents read them: uploads at the given starts, each answered after `dur` ms with the given notes
+typedef struct { int busy_edges, checks, other, busy_at_end; } marks_seen;
+static marks_seen run_marks(ss_notes *n, const int64_t *start, const int *note, int count, int64_t dur, int64_t until) {
+    marks_seen m = {0}; int prev = SS_MARK_NONE, i = 0, up = 0;
+    for (int64_t t = start[0] - 1000; t <= until; t += 50) {
+        if (up && t >= start[i] + dur) { ss_up_end(n, note[i], t); up = 0; i++; }
+        if (!up && i < count && t >= start[i]) { ss_up_begin(n, t); up = 1; }
+        int64_t age = -1; int k = ss_mark_now(n, t, &age);
+        CHECK(k == SS_MARK_NONE || age >= 0, "a mark's age (%lld at %lld)", (long long)age, (long long)t);
+        if (k != prev) { if (k == SS_MARK_BUSY) m.busy_edges++; else if (k == SS_MARK_SAVED) { m.checks++; CHECK(age < 50, "the check starts with its pop (age %lld)", (long long)age); } else if (k) m.other++; }
+        prev = k;
+    }
+    m.busy_at_end = prev == SS_MARK_BUSY; return m;
+}
+static void t_marks(void) {
+    static const int ok[3] = {SS_NOTE_SAVED, SS_NOTE_SAVED, SS_NOTE_SAVED};
+    ss_notes n = {0}; int64_t apart[3] = {2000, 12000, 22000};   // three uploads 10 s apart (each half a second): three spinners, three checks
+    marks_seen m = run_marks(&n, apart, ok, 3, 500, 40000);
+    CHECK(m.busy_edges == 3 && m.checks == 3 && !m.other && !m.busy_at_end, "three uploads: three spinners and three checks (%d, %d)", m.busy_edges, m.checks);
+    ss_notes n3 = {0}; int64_t gap3[3] = {2000, 6000, 10000};   // the next starts 3.5 s after the last went up: not joined
+    m = run_marks(&n3, gap3, ok, 3, 500, 30000);
+    CHECK(m.busy_edges == 3 && m.checks == 3, "uploads 3.5 s apart: a check each (%d, %d)", m.busy_edges, m.checks);
+    ss_notes n1 = {0}; int64_t close[3] = {2000, 3000, 4000};   // a save every second: one spinner turning through, one check after the last
+    m = run_marks(&n1, close, ok, 3, 300, 20000);
+    CHECK(m.busy_edges == 1 && m.checks == 1 && !m.other, "uploads 1 s apart: one spinner, one check (%d, %d)", m.busy_edges, m.checks);
+    ss_notes nb = {0}; int64_t age; ss_up_begin(&nb, 1000); ss_up_end(&nb, SS_NOTE_SAVED, 1400);
+    CHECK(ss_mark_now(&nb, 1400 + SS_JOIN_MS - 1, &age) == SS_MARK_BUSY && age == SS_JOIN_MS - 1 + 400, "the spinner turns on after it went up, its age from the upload's start");
+    CHECK(ss_mark_now(&nb, 1400 + SS_JOIN_MS + 100, &age) == SS_MARK_SAVED && age == 100, "then the check");
+    CHECK(ss_mark_now(&nb, 1400 + SS_JOIN_MS + SS_MARK_SAVED_MS, &age) == SS_MARK_NONE, "for its time, then nothing");
+    // waiting and a conflict keep their rule: a change of state, none of a kind within 5 min
+    static const int lost[3] = {SS_NOTE_WAITING, SS_NOTE_WAITING, SS_NOTE_SAVED};
+    ss_notes nw = {0}; int64_t retry[3] = {2000, 62000, 122000};
+    m = run_marks(&nw, retry, lost, 3, 500, 140000);
+    CHECK(m.other == 1 && m.checks == 1 && m.busy_edges == 3, "no network twice, then up: one waiting note, one check (%d, %d)", m.other, m.checks);
+    static const int after[2] = {SS_NOTE_WAITING, SS_NOTE_WAITING};
+    int64_t again[2] = {150000, 250000}; m = run_marks(&nw, again, after, 2, 500, 260000);
+    CHECK(m.other == 0, "lost again after a check, but within 5 min of the last waiting note: none (%d)", m.other);
+    ss_notes nc = {0}; static const int conf[2] = {SS_NOTE_CONFLICT, SS_NOTE_NONE}; int64_t cs[2] = {2000, 10000};
+    m = run_marks(&nc, cs, conf, 2, 500, 20000);
+    CHECK(m.other == 1 && !m.checks && m.busy_edges == 2, "a conflict: its note once; a refused upload (401, 5xx): the spinner and no mark");
+}
+
 // while the game runs: a start without the network, the network back, the upload going up or meeting another device's newer save
 static void t_ingame(void) {
     ss_state s = st_of(1, 4, B), s2; ss_meta m = meta_of(4, B); int p;
@@ -223,15 +265,15 @@ static void t_ingame(void) {
     ss_notes n = {0};
     // the upload goes up
     CHECK(ss_after_put(&s, 200, 5, A, NULL, 1795176000) == SS_NOTE_SAVED && !s.pending && s.seq == 5 && !strcmp(s.sha, A) && s.last_up == 1795176000, "200: saved, nothing owed");
-    CHECK(ss_note_ok(&n, SS_NOTE_SAVED, 100000), "the first saved note shows");
-    CHECK(!ss_note_ok(&n, SS_NOTE_SAVED, 160000), "the next save's note does not (the same state)");
     CHECK(ss_note_ok(&n, SS_NOTE_WAITING, 170000), "the network lost: waiting shows");
-    CHECK(!ss_note_ok(&n, SS_NOTE_SAVED, 180000) && !ss_note_ok(&n, SS_NOTE_WAITING, 190000), "a network that comes and goes: no note within 5 min of its kind");
-    CHECK(ss_note_ok(&n, SS_NOTE_SAVED, 100000 + SS_NOTE_GAP_MS), "saved again after 5 min");
+    CHECK(!ss_note_ok(&n, SS_NOTE_WAITING, 190000), "a network that comes and goes: no waiting note within 5 min of the last");
+    CHECK(!ss_note_ok(&n, SS_NOTE_WAITING, 170000 + SS_NOTE_GAP_MS), "never the same note twice in a row");
+    ss_up_end(&n, SS_NOTE_SAVED, 200000); CHECK(ss_note_ok(&n, SS_NOTE_WAITING, 170000 + SS_NOTE_GAP_MS), "after a check, waiting again 5 min on");
     // or another device's newer save is there: kept for the next start, no retry, one note
     ss_meta cur = meta_of(6, C); snprintf(cur.device, sizeof cur.device, "nova"); cur.time = 1795170000;
     CHECK(ss_after_put(&s2, 409, 0, A, &cur, 0) == SS_NOTE_CONFLICT && s2.conflict && s2.pending && s2.cseq == 6 && !strcmp(s2.cdevice, "nova"), "409: a conflict, kept");
     ss_notes n2 = {0}; CHECK(ss_note_ok(&n2, SS_NOTE_CONFLICT, 1000) && !ss_note_ok(&n2, SS_NOTE_CONFLICT, 400000), "the conflict's note once");
+    t_marks();
     t.conflict = 1; t.owed = 1; t.committed = 1; t.now = 900000; CHECK(!(ss_tick(&t) & SS_DO_UPLOAD), "with a conflict nothing goes up by itself");
     m = meta_of(6, C); CHECK(ss_decide(SS_NET_OK, &m, &s2, A, &p) == SS_GO_CONFLICT, "the next start: the cards");
     CHECK(ss_after_put(&s2, 0, 0, A, NULL, 0) == SS_NOTE_WAITING && s2.pending, "no answer: waiting, owed");

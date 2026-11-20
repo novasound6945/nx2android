@@ -482,7 +482,7 @@ static int ss_tick(const ss_tick_in *t) {
     else if (t->now - t->last_hb >= 60000) act |= SS_DO_ALIVE;
     return act;
 }
-// An upload's answer (code: HTTP, 0 no answer) into the state; returns the note it calls for (SS_NOTE_*), the caller shows it if ss_note_ok lets it
+// An upload's answer (code: HTTP, 0 no answer) into the state; returns the note it calls for (SS_NOTE_*), the caller passes it to ss_up_end
 enum { SS_NOTE_NONE, SS_NOTE_SAVED, SS_NOTE_WAITING, SS_NOTE_CONFLICT, SS_NOTE_OFF, SS_NOTE_TRIAL, SS_NOTE_N };
 static int ss_after_put(ss_state *st, int code, uint64_t seq, const char *sha, const ss_meta *cur, int64_t now_s) {
     if (code == 200) { if (seq) st->seq = seq; snprintf(st->sha, sizeof st->sha, "%s", sha); st->pending = st->force = 0; st->last_up = now_s; return SS_NOTE_SAVED; }
@@ -493,12 +493,48 @@ static int ss_after_put(ss_state *st, int code, uint64_t seq, const char *sha, c
     if (code == 401 || code == 403) { st->auth = 1; return SS_NOTE_NONE; }
     st->pending = 1; return code ? SS_NOTE_NONE : SS_NOTE_WAITING;
 }
-// The corner notes: one when the state changes (saved -> waiting, waiting -> saved, a conflict), never the same kind twice in a row nor within 5 minutes of the last one
-// of its kind (a network that comes and goes, a retry, every save of a game that saves often: one note)
+// The corner marks (savecloud_android.c dm_cloud_mark, drawn by gfx_vk_present.c ov_mark). Every upload shows: the spinner from its start, and each one that went up
+// (200) its check. An upload that starts less than SS_JOIN_MS after the last one went up keeps the spinner turning (it never stops and starts again), and the check
+// shows once SS_JOIN_MS passed with no new upload: a game that saves every second shows one spinner and one check, and no check is shown that the next upload's
+// spinner would cut. Waiting (no answer: no network) and a conflict are notes of a change of state: never the same kind twice in a row nor within 5 minutes of the
+// last one of its kind (a network that comes and goes, a retry: one note); a check in between is a change of state
 #define SS_NOTE_GAP_MS (5 * 60 * 1000)
-typedef struct { int last; int64_t at[SS_NOTE_N]; } ss_notes;
-static int ss_note_ok(ss_notes *n, int kind, int64_t now_ms) {
+#define SS_JOIN_MS 3000
+enum { SS_MARK_NONE, SS_MARK_BUSY, SS_MARK_SAVED, SS_MARK_WAITING, SS_MARK_CONFLICT };   // (savecloud.h DM_CLOUD_MARK_* in the same order)
+#define SS_MARK_SAVED_MS 1500      // how long each outcome's mark shows (savecloud.h DM_CLOUD_MARK_*_MS, the drawing's fade)
+#define SS_MARK_WAITING_MS 1500
+#define SS_MARK_CONFLICT_MS 2500
+typedef struct {
+    int last; int64_t at[SS_NOTE_N];   // the last note's kind, when each kind last showed (monotonic ms)
+    int busy; int64_t spin_t, ok_t;    // an upload runs; when the spinner began; when the last upload went up (0: no check owed)
+    int mark; int64_t mark_t;          // a waiting or conflict note showing (SS_MARK_*), and since when
+} ss_notes;
+static int ss_note_ok(ss_notes *n, int kind, int64_t now_ms) {   // a waiting or conflict note: whether it shows
     if (kind <= SS_NOTE_NONE || kind >= SS_NOTE_N) return 0;
     if (kind == n->last || (n->at[kind] && now_ms - n->at[kind] < SS_NOTE_GAP_MS)) return 0;
     n->last = kind; n->at[kind] = now_ms ? now_ms : 1; return 1;
+}
+static void ss_up_begin(ss_notes *n, int64_t now_ms) {   // an upload starts: the spinner, or the one still turning after the last went up
+    if (!(n->ok_t && now_ms - n->ok_t < SS_JOIN_MS)) n->spin_t = now_ms;
+    n->ok_t = 0; n->busy = 1; n->mark = SS_MARK_NONE;
+}
+static void ss_up_end(ss_notes *n, int note, int64_t now_ms) {   // its answer's note (ss_after_put's SS_NOTE_*): a check owed, or a note when ss_note_ok lets it show
+    n->busy = 0; n->ok_t = 0;
+    if (note == SS_NOTE_SAVED) { n->ok_t = now_ms ? now_ms : 1; n->last = SS_NOTE_SAVED; n->at[SS_NOTE_SAVED] = n->ok_t; return; }
+    if ((note == SS_NOTE_WAITING || note == SS_NOTE_CONFLICT) && ss_note_ok(n, note, now_ms)) { n->mark = note == SS_NOTE_WAITING ? SS_MARK_WAITING : SS_MARK_CONFLICT; n->mark_t = now_ms; }
+}
+static int ss_mark_now(ss_notes *n, int64_t now_ms, int64_t *age) {   // the mark to draw now (SS_MARK_*), *age: ms since it began
+    if (n->busy) { *age = now_ms - n->spin_t; return SS_MARK_BUSY; }
+    if (n->ok_t) {
+        int64_t d = now_ms - n->ok_t;
+        if (d < SS_JOIN_MS) { *age = now_ms - n->spin_t; return SS_MARK_BUSY; }   // (the spinner turns on, in case another upload follows)
+        if (d - SS_JOIN_MS < SS_MARK_SAVED_MS) { *age = d - SS_JOIN_MS; return SS_MARK_SAVED; }
+        n->ok_t = 0;
+    }
+    if (n->mark) {
+        int64_t a = now_ms - n->mark_t;
+        if (a < (n->mark == SS_MARK_WAITING ? SS_MARK_WAITING_MS : SS_MARK_CONFLICT_MS)) { *age = a; return n->mark; }
+        n->mark = SS_MARK_NONE;
+    }
+    return SS_MARK_NONE;
 }
