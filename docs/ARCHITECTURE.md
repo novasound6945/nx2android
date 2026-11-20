@@ -131,6 +131,14 @@ checked before pointer formation. These checks do not change the decoder choice
 or timestamp/queue policy. The manual [AVC probe](../probes/avc_frame_layout.md)
 checks synthetic planes and padding; physical-device qualification is separate.
 
+Stopping a started guest AudioOut returns all pending buffers in queue order,
+including any partly played buffer, and wakes the guest's release event even if
+the pending queue is empty. Capacity covers all buffers accepted and yet to be
+reclaimed. A stop on an already stopped output preserves buffers queued for its
+next start. The front end's suspend path still hands playback to the silent sink.
+Backend state is atomic because the device callback and silent sink read it
+without the lock that serializes lifecycle changes.
+
 The shader translator's existing native-perspective compensation rule accepts either outer operand order in `(input * FragCoord.w) * (1 / FragCoord.w)`. Both alpha depth and material variants must reach the same native interpolated input; leaving the multiply/divide round trip in only one variant can change alpha coverage and retain old HDR colour. The FP32, input-load, FragCoord.w and constant-one guards remain in place.
 
 ## Descriptor cache hashing
