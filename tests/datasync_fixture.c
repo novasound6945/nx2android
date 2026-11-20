@@ -82,12 +82,18 @@ int main(int argc, char **argv) {
 #endif
     if (argc < 4) { fprintf(stderr, "usage: datasync_fixture <server|-|none> <root> <package> [--break N] [--free N]\n"); return 2; }
     int none = !strcmp(argv[1], "none");
-    srv s = {strcmp(argv[1], "-") && !none ? argv[1] : NULL, -1, 0, 0}; uint64_t fr = 0; int use_free = 0;
+    srv s = {strcmp(argv[1], "-") && !none ? argv[1] : NULL, -1, 0, 0}; uint64_t fr = 0; int use_free = 0, verify = 0;
     for (int i = 4; i < argc; i++) {
-        if (!strcmp(argv[i], "--break") && i + 1 < argc) s.brk = atoll(argv[++i]);
+        if (!strcmp(argv[i], "--verify")) verify = 1;
+        else if (!strcmp(argv[i], "--break") && i + 1 < argc) s.brk = atoll(argv[++i]);
         else if (!strcmp(argv[i], "--free") && i + 1 < argc) { fr = (uint64_t)atoll(argv[++i]); use_free = 1; }
     }
     ds_ctx c = {.root = argv[2], .package = argv[3], .fetch = none ? NULL : fetch, .fu = &s, .free_bytes = use_free ? freeb : NULL, .bu = &fr, .log = logf_};
+#ifdef DS_VERIFY
+    c.verify = verify;
+#else
+    (void)verify;
+#endif
     int rc = ds_sync(&c);
     unsigned long long need = 0, fr0 = 0;
 #ifdef DS_FORMAT   // (a datasync.h from before these: 0)

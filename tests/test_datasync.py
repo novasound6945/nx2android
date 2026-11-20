@@ -193,6 +193,17 @@ class Sync(unittest.TestCase):
         self.assertLessEqual(set(x['fetched'][2:]), {datapack.MANIFEST}, x['text'])   # (the manifest says when the pack was made)
         self.assertEqual((r / rel).read_bytes(), blob(len(self.files[rel]), 'new')); self.assertFalse((r / 'bundles').exists())
 
+    def test_verify_finds_damaged_files(self):   # files damaged at their size (a sample cannot see that): a usual sync takes the folder as whole; the launcher's Check the data
+        # again hashes every file and downloads only what is damaged (its bundle for a bundled one), then the folder is whole again
+        r = self.root('verify'); self.assertEqual(sync(self.server, r)['result'], 'DONE')
+        small = next(f['path'] for f in self.fj['files'] if 'bundle' in f); big = 'RomFS/Data/big.bin'
+        for rel in (small, big): b = (r / rel).read_bytes(); (r / rel).write_bytes(bytes(x ^ 0x5A for x in b))
+        x = sync(self.server, r); self.assertEqual(x['result'], 'UPTODATE', x['text'])
+        x = sync(self.server, r, '--verify'); self.assertEqual(x['result'], 'DONE', x['text']); self.whole(r)
+        k = next(f['bundle'] for f in self.fj['files'] if f['path'] == small)
+        self.assertEqual(set(x['fetched']) - {publish.FILES, datapack.MANIFEST}, {big, self.fj['bundles'][k]['path']}, x['text'])
+        x = sync(self.server, r, '--verify'); self.assertEqual(x['result'], 'UPTODATE', x['text']); self.assertEqual(x['fetched'], [publish.FILES], x['text'])
+
     def test_pushed_no_server(self):   # porter install's folder, an APK without a server: the bundles unpacked from the folder, the game starts; later starts need nothing
         r = self.pushed('pushed'); x = sync('none', r)
         self.assertEqual(x['result'], 'OFFLINE', x['text']); self.whole(r); self.assertEqual(x['files'], 0)

@@ -424,7 +424,10 @@ typedef struct {
     ds_progress pr; char err[256];
     uint64_t space_need, space_free;   // DS_ERR_SPACE: the bytes more that are needed, and the bytes free (the screen says them in the app's language; err is the log's)
     int unreached;                     // the last ds_sync: the server was not reached at all (no network, DNS, a connection or a timeout; not an HTTP error)
+    int verify;                        // every file's SHA-256 checked against the server's list (the launcher's Check the data again): the list asked for whole, no sample
+    int fixed;                         // the last ds_sync: the files it wrote (downloaded or taken out of a bundle) to make the folder the list's
 } ds_ctx;
+#define DS_VERIFY 1   // (ds_ctx.verify and .fixed: tests/datasync_fixture.c's --verify)
 #define DS_LOG(c, ...) do { if ((c)->log) { char _m[512]; snprintf(_m, sizeof _m, __VA_ARGS__); (c)->log((c)->lu, _m); } } while (0)
 static void ds_note(ds_ctx *c) { if (c->note) c->note(c->nu, &c->pr); }
 static void ds_path(char *out, size_t cap, const ds_ctx *c, const char *rel) { snprintf(out, cap, "%s/%s", c->root, rel); }
@@ -910,7 +913,7 @@ out:
 // c->err (DS_ERR_NET: try again later; a part already downloaded is kept). c->fetch NULL: no server at all (an APK without --data-url whose files folder has bundles to
 // unpack: front_android.c runs the sync then only): DS_OFFLINE once they are, DS_ERR_LOCAL when the folder still lacks files
 static int ds_sync(ds_ctx *c) {
-    memset(&c->pr, 0, sizeof c->pr); c->err[0] = 0; c->space_need = c->space_free = 0; c->unreached = 0; c->pr.phase = DS_PH_CONNECT; ds_note(c);
+    memset(&c->pr, 0, sizeof c->pr); c->err[0] = 0; c->space_need = c->space_free = 0; c->unreached = 0; c->fixed = 0; c->pr.phase = DS_PH_CONNECT; ds_note(c);
     ds_list local, prev, srv; char *lraw = NULL; size_t lrn = 0; int looked = 0;
     int have_local = !ds_list_load(c, DS_LIST, &local, &lraw, &lrn), have_prev = !ds_list_load(c, DS_PREV, &prev, NULL, NULL);
     int pending = have_local && ds_pending(c, &local);   // bundles in the folder (porter install's, or an unpack that stopped): their files are taken out before the game starts
@@ -919,7 +922,7 @@ static int ds_sync(ds_ctx *c) {
     // a server's list (below), which the files are then made right by, decides what the folder holds
     int stray = !pending && ds_bundles_dir_any(c->root);
     ds_val cond, got; memset(&cond, 0, sizeof cond); memset(&got, 0, sizeof got);
-    int ask = have_local && ds_val_load(c, local.id, &cond);   // the list only if it is no longer the folder's
+    int ask = !c->verify && have_local && ds_val_load(c, local.id, &cond);   // the list only if it is no longer the folder's (a verify: the list whole)
     ds_mem m = {NULL, 0, 0, 256u << 20}; uint64_t st = 0; int64_t tot = -1; int http = 0;
     int rc = c->fetch ? c->fetch(c->fu, DS_LIST, 0, &st, &tot, &http, ask ? &cond : NULL, &got, ds_mem_sink, &m) : DS_ERR_NET;
     if (rc || st) {
@@ -968,14 +971,15 @@ static int ds_sync(ds_ctx *c) {
     if (ds_parse(m.b ? m.b : "", m.n, &srv)) { snprintf(c->err, sizeof c->err, "the server's " DS_LIST " is not a data pack's list"); rc = DS_ERR_SERVER; goto out0; }   // (m.b is freed at out0)
     if (srv.format > DS_FORMAT) { snprintf(c->err, sizeof c->err, "the server's " DS_LIST " is format %d; this app reads up to format %d: install the APK ported with that pack", srv.format, DS_FORMAT); rc = DS_ERR_SERVER; goto out1; }
     if (strcmp(srv.package, c->package)) { snprintf(c->err, sizeof c->err, "the server's data is for %.100s, not this app (%.100s)", srv.package, c->package); rc = DS_ERR_PACKAGE; goto out1; }
-    if (!same && have_local && !pending && !stray && !strcmp(local.id, srv.id) && ds_sample(c, &srv, &looked)) {   // the server's pack is the folder's
+    if (!same && !c->verify && have_local && !pending && !stray && !strcmp(local.id, srv.id) && ds_sample(c, &srv, &looked)) {   // the server's pack is the folder's
         DS_LOG(c, "data: the server's " DS_LIST " lists the folder's pack; %d of its %d files looked at", looked, srv.n);
         ds_val_save(c, srv.id, &got, ask ? &cond : NULL); rc = DS_UPTODATE; goto out1;   // its validators: the next sync asks for the list only if it changed
     }
     // which files to download: not there at the list's size, or there at that size with another hash (the earlier list's, else the file's own)
-    const ds_list *known = have_local ? &local : have_prev ? &prev : NULL;
+    const ds_list *known = c->verify ? NULL : have_local ? &local : have_prev ? &prev : NULL;   // (a verify: every file at the list's size hashed)
     int nneed = 0; char p[1100];
     if ((rc = ds_apply(c, &srv, known, have_local ? local.id : NULL, 1, &nneed))) goto out1;
+    c->fixed = nneed;
     c->pr.phase = DS_PH_FINISH; ds_note(c);
     ds_path(p, sizeof p, c, DS_LIST);
     if (ds_write(p, m.b, m.n)) { snprintf(c->err, sizeof c->err, "cannot write " DS_LIST " (errno %d)", errno); rc = DS_ERR_DISK; goto out1; }
