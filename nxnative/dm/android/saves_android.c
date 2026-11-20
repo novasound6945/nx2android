@@ -155,13 +155,21 @@ int dm_saves_request_import(const char *name) {
     LOG("[saves] %s will be imported at the next start", name); return 0;
 }
 
-static int import_apply(const char *name, const char *req) {   // 0 when the folder is the save now
+// 0 when the folder is the save now. slot: the backup of the save it replaces goes to saves/<slot> (and <slot>.device), the one before it there removed: one place that
+// is overwritten each time (the launcher's Back to the cloud save), not a new <stamp>-before-import each time
+static int import_apply(const char *name, const char *req, const char *slot) {
     char src[700], srcd[720], err[600] = "", bk[96] = ""; snprintf(src, sizeof src, "%s/%s", g_dir, name); snprintf(srcd, sizeof srcd, "%s.device", src);
     if (!name[0] || strchr(name, '/') || name[0] == '.' || !is_dir(src)) { result(req, "result=error\nerror=no save folder %s in %s", name, g_dir); return -1; }
     if (!has_entries(src) && !is_dir(srcd)) { result(req, "result=error\nerror=%s is empty", name); return -1; }
     int r = dm_saves_export("-before-import", bk, sizeof bk, err, sizeof err);   // the current save first, so an import can be taken back
     if (r && r != -ENOENT) { result(req, "result=error\nerror=the current save could not be backed up first (%s): nothing was imported", err); return -1; }
     if (r) bk[0] = 0;
+    if (bk[0] && slot) {   // the backup into the slot
+        char a[700], b[700], ad[720], bd[720]; snprintf(a, sizeof a, "%s/%s", g_dir, bk); snprintf(b, sizeof b, "%s/%s", g_dir, slot); snprintf(ad, sizeof ad, "%s.device", a); snprintf(bd, sizeof bd, "%s.device", b);
+        rm_tree(b); rm_tree(bd);
+        if (rename(a, b) || (is_dir(ad) && rename(ad, bd))) LOG("[RED] [saves] the backup %s could not become %s (errno %d): it stays as it is", bk, slot, errno);
+        else snprintf(bk, sizeof bk, "%s", slot);
+    }
     const char *from[2] = {src, srcd}, *to[2] = {g_save, g_dev}; char tmp[2][640]; long files = 0; long long bytes = 0;
     for (int k = 0; k < 2; k++) {   // both copies first, then both swaps
         snprintf(tmp[k], sizeof tmp[k], "%s.import", to[k]); rm_tree(tmp[k]);
@@ -178,7 +186,7 @@ static int import_apply(const char *name, const char *req) {   // 0 when the fol
 // host mounts the save, as dm_saves_start does: the same backup first, the same swap)
 const char *dm_saves_save_path(void) { return g_save; }
 const char *dm_saves_device_path(void) { return g_dev; }
-int dm_saves_import_now(const char *name) { return import_apply(name, "cloud"); }
+int dm_saves_import_now(const char *name, const char *slot) { return import_apply(name, "cloud", slot); }
 static int read_request(const char *file, char *first, int fcap, char *req, int rcap, int *quit) {   // saves/<file>: its first line, its request= token; removed
     char p[640], line[256]; snprintf(p, sizeof p, "%s/%s", g_dir, file);
     FILE *f = fopen(p, "r"); if (!f) return 0;
@@ -194,7 +202,7 @@ static int read_request(const char *file, char *first, int fcap, char *req, int 
 int dm_saves_start(const char *files_root) {
     dm_saves_paths(files_root);
     char name[256], req[96]; int quit = 0, q;
-    if (read_request("import.txt", name, sizeof name, req, sizeof req, &q)) { quit |= q; import_apply(name, req); }
+    if (read_request("import.txt", name, sizeof name, req, sizeof req, &q)) { quit |= q; import_apply(name, req, NULL); }
     if (read_request("export.txt", name, sizeof name, req, sizeof req, &q)) {
         quit |= q; char out[96], err[600]; int r = dm_saves_export("", out, sizeof out, err, sizeof err);
         if (r) result(req, "result=error\nerror=%s", err); else result(req, "result=ok\nname=%s", out);

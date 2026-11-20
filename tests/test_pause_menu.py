@@ -226,6 +226,7 @@ int dm_menu_rate_available(void) { return 0; } int dm_menu_res_available(void) {
 #include "savecloud.h"   // the Cloud save row (savecloud_android.c): an app without sync.txt
 int dm_cloud_available(void) { return 0; }
 int dm_cloud_status(char *note, int cap) { if (cap > 0) note[0] = 0; return DM_CLOUD_OFF; }
+int dm_cloud_manual(void) { return 0; }
 static int exit_state; static float exit_f;   // front_android.c: Exit game's hold (overlay_layout.h OV_EXIT_*)
 int dm_menu_exit(float *f, int *chosen) { *f = exit_f; *chosen = 0; return exit_state; }
 ''' + canvas + colours + r'''

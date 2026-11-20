@@ -28,6 +28,12 @@
 // onResume opens it again. A heartbeat that does not go through is dropped (offline). The corner marks, icons only (dm_cloud_mark): every upload's spinner and,
 // when it went up, its check (uploads less than 3 s apart: one spinner, one check); waiting and a conflict a change of state only, none of a kind within 5 min
 // (savesync.h ss_up_begin, ss_up_end, ss_mark_now). Every network failure is a log line: the game never waits for the network once it runs.
+//
+// The mode (savesync.h SS_MODE_*, the game's own, in its state): automatic as above; manual sends only what the player asks for (the menu's Upload now, the launcher's,
+// a card of the start), a burst of commits is only hashed (owed or not: the struck-through cloud stays in the corner while a save is owed), and the next start asks
+// about it (ManualPending.dc.html) unless the cloud moved too (the conflict's cards); this device only asks and sends nothing (no network at all), and leaving it makes
+// the next check a first connection. The launcher (datasync_android.c) reads this file's state (dm_cloud_info_get) and asks it for Upload now, Back to the cloud save
+// (the cloud's save in, this device's into the backup slot saves/device-backup) and a check again, each on a thread of its own before the game starts.
 #include "dm.h"
 #include "savesync.h"
 #include "savecloud.h"
@@ -53,7 +59,7 @@ static int korean(void) { return has_glyph(0xAC00); }   // the APK's font has Ha
 // ---- the state (C.mu guards all of it) ----
 static struct {
     pthread_mutex_t mu; pthread_cond_t cv;
-    int mode, trial;                     // savesync.h SS_RUN_*; a trial build
+    int mode, trial, began, skip_req;    // savesync.h SS_RUN_*; a trial build; dm_cloud_begin read sync.txt; the launcher's Play without the sync before the check
     ss_cfg cfg; char pkg[256], build[64], gver[64], state_path[700], base[900];   // base: <url>/api/saves/g/<package>
     ss_state st;
     int skipped;                         // this run plays without the sync (B at the start)
@@ -63,6 +69,9 @@ static struct {
     int64_t next_try;                    // when an owed upload is tried again (monotonic ms)
     unsigned ver;                        // the menu row's version
     JavaVM *vm; jobject act;             // the NativeActivity (a global reference, ANativeActivity.clazz)
+    ss_meta meta; int meta_ok;           // the server's meta as this run's check (or a launcher's) last read it
+    int lknown; char lsha[65]; uint64_t lsize; int64_t lfiles, lt;   // this device's save as its archive, before the game (the launcher's page)
+    int busy, prog; char result[96]; int result_bad;   // the launcher's action (DM_CLOUD_ACT_*) and its download's progress; its outcome
 } C = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, .mode = SS_RUN_NONE};
 static void st_save_locked(void) { if (C.state_path[0] && ss_state_save(C.state_path, &C.st)) LOG("[RED] cloud: cannot write %s (errno %d)", C.state_path, errno); }
 static void changed_locked(void) { C.ver++; }
@@ -217,25 +226,36 @@ enum { WV_WAIT, WV_ASK };   // a step that only waits (its button and B skip the
 static struct {
     dm_cloud_view v; int kind, done, quit, applying, choice, auto_ms; int64_t last_input;
     void (*done_cb)(int quit); int up_after;
+    int active, recheck;   // a check runs (its view and input are the screen's); recheck: one the launcher asked for (no done_cb: the launcher goes on)
 } W;
-void dm_cloud_view_get(dm_cloud_view *v) { pthread_mutex_lock(&C.mu); *v = W.v; pthread_mutex_unlock(&C.mu); }
+void dm_cloud_view_get(dm_cloud_view *v) { pthread_mutex_lock(&C.mu); *v = W.v; if (!W.active) { v->ask = 0; v->urgent = 0; } pthread_mutex_unlock(&C.mu); }
 static void up_start(void);
+enum { UP_NOTHING, UP_OK, UP_FAIL, UP_CONFLICT, UP_ERR };
+static int upload(JNIEnv *E, int64_t deadline);
 static void finish_locked(int quit, int skip) {   // the start ends: the screen goes, done() on the main thread
     if (W.done) return;
-    W.done = 1; W.quit = quit; W.up_after = !quit && !skip;
+    W.done = 1; W.active = 0; W.quit = quit; W.up_after = !quit && !skip;
     if (skip) { C.skipped = 1; ss_mark_offline_play(&C.st); st_save_locked(); changed_locked();
                 LOG("cloud: this run plays without the sync (the next start asks before its save goes up)"); }
 }
-static void skipped_end(void) { dm_start_step(STV_CLOUD, STV_SKIP, korean() ? "건너뜀" : "Skipped"); dm_cloud_screen_end(); }   // B: the start ends without the sync
-static void finish(int quit, int skip) {
-    pthread_mutex_lock(&C.mu); int was = W.done; finish_locked(quit, skip); int off = C.offline; pthread_mutex_unlock(&C.mu);
-    if (!was) dm_start_step(STV_CLOUD, skip ? STV_SKIP : off ? STV_SKIP : STV_DONE, skip ? (korean() ? "건너뜀" : "Skipped") : off ? (korean() ? "오프라인" : "Offline") : (korean() ? "완료" : "Done"));
+// The start's check ended (C.mu not held): its step, the screen's phase (a check the launcher asked for has none), and when the player chose to play without the sync
+// (asked: B, a card's Keep it), the launcher starts the game at once
+static void ended_now(int quit, int skip, int asked) {
+    pthread_mutex_lock(&C.mu); int off = C.offline; pthread_mutex_unlock(&C.mu);
+    dm_start_step(STV_CLOUD, skip ? STV_SKIP : off ? STV_SKIP : STV_DONE, skip ? (korean() ? "건너뜀" : "Skipped") : off ? (korean() ? "오프라인" : "Offline") : (korean() ? "완료" : "Done"));
     dm_cloud_screen_end();
+    if (asked && skip && !quit) dm_launcher_start_now(1);
+    dm_cloud_screen_poke();
 }
-static void screen_done(void) {   // the main thread, once the screen let the window go
-    if (W.up_after) up_start();
+static void skipped_end(void) { ended_now(0, 1, 1); }   // B: the start ends without the sync
+static void finish(int quit, int skip, int asked) {
+    pthread_mutex_lock(&C.mu); int was = W.done; finish_locked(quit, skip); pthread_mutex_unlock(&C.mu);
+    if (!was) ended_now(quit, skip, asked); else dm_cloud_screen_end();
+}
+static void screen_done(void) {   // the main thread, once the screen let the window go (the upload thread starts with the game: dm_cloud_game_start)
     void (*d)(int) = W.done_cb; W.done_cb = NULL; if (d) d(W.quit);
 }
+void dm_cloud_game_start(void) { pthread_mutex_lock(&C.mu); int go = W.up_after; pthread_mutex_unlock(&C.mu); if (go) up_start(); }
 // The view, under C.mu. A step that only waits is the cloud's row in the start's steps (its note; B's line under them is its one button); a question is a screen of its
 // own: an icon, a title, one or two lines, buttons (sel: the first) or the cards, the hint lines at the bottom
 static void blank_locked(int kind) {
@@ -275,25 +295,21 @@ static int ask(int auto_ms, const char *count_ko, const char *count_en) {   // t
 static int ended(void) { pthread_mutex_lock(&C.mu); int d = W.done; pthread_mutex_unlock(&C.mu); return d; }
 static void dl_prog(uint64_t done, int64_t total) {
     static int64_t last; int64_t t = now_ms(); if (t - last < 100) return; last = t;
-    pthread_mutex_lock(&C.mu); if (total > 0) W.v.progress = (int)(done * 1000 / (uint64_t)total); W.v.ver++; pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke();
+    pthread_mutex_lock(&C.mu); if (total > 0) { W.v.progress = (int)(done * 1000 / (uint64_t)total); C.prog = W.v.progress; } W.v.ver++; pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke();
 }
 static void size_line(char *o, size_t n, uint64_t size, int64_t files, int ko) {   // "1.2 MB · 파일 9개"; the size only when the count is not known
     char sz[32]; ss_fmt_size(sz, sizeof sz, size);
     if (files < 0) snprintf(o, n, "%s", sz); else if (ko) snprintf(o, n, "%s · 파일 %lld개", sz, (long long)files); else snprintf(o, n, "%s · %lld file%s", sz, (long long)files, files == 1 ? "" : "s");
 }
 // the two cards: this device's (0) and the server's (1), the newer one chosen first. local_size, local_files: this device's archive (its tar, as it would go up)
-static void cards_view(const ss_meta *m, int64_t local_t, uint64_t local_size, int64_t local_files, int offline_play) {
+static void cards_view(const ss_meta *m, int64_t local_t, uint64_t local_size, int64_t local_files) {
     int ko = korean(); int64_t now = (int64_t)time(NULL); const char *md = m->device[0] ? m->device : "-";
     pthread_mutex_lock(&C.mu);
-    ask_locked(DM_CLOUD_ICON_NONE, offline_play ? (ko ? "동기화 없이 플레이한 기록이 있어요" : "This device played without the sync") : (ko ? "어느 세이브로 할까요?" : "Which save do you want to keep?"),
-               offline_play ? (ko ? "이 기기에서 동기화 없이 플레이한 진행을 어떻게 할까요?" : "What should happen to the progress played without the sync?")
-                            : (ko ? "이 기기와 클라우드에 서로 다른 진행이 있어요" : "This device and the cloud have different progress"), NULL, 0, NULL, NULL,
+    ask_locked(DM_CLOUD_ICON_NONE, ko ? "어느 세이브로 할까요?" : "Which save do you want to keep?", ko ? "이 기기와 클라우드에 서로 다른 진행이 있어요" : "This device and the cloud have different progress", NULL, 0, NULL, NULL,
                ko ? "고르지 않은 쪽도 백업해 둬요" : "The one you do not choose is kept as a backup", ko ? "← → 고르기 · A 확정 · B 동기화 없이 플레이" : "← → choose · A confirm · B play without the sync");
     dm_cloud_view *v = &W.v; v->ncards = 2;
-    if (offline_play) { snprintf(v->card[0].head, sizeof v->card[0].head, ko ? "이 기록 올리기 · %s" : "Upload this play · %s", C.cfg.device);
-                        snprintf(v->card[1].head, sizeof v->card[1].head, ko ? "클라우드로 되돌리기 · %s" : "Back to the cloud save · %s", md); }
-    else { snprintf(v->card[0].head, sizeof v->card[0].head, ko ? "이 기기 · %s" : "This device · %s", C.cfg.device);
-           snprintf(v->card[1].head, sizeof v->card[1].head, ko ? "클라우드 · %s에서 올림" : "Cloud · from %s", md); }
+    snprintf(v->card[0].head, sizeof v->card[0].head, ko ? "이 기기 · %s" : "This device · %s", C.cfg.device);
+    snprintf(v->card[1].head, sizeof v->card[1].head, ko ? "클라우드 · %s에서 올림" : "Cloud · from %s", md);
     ss_fmt_date(v->card[0].date, sizeof v->card[0].date, local_t, ko); ss_fmt_ago(v->card[0].ago, sizeof v->card[0].ago, local_t, now, ko);
     ss_fmt_date(v->card[1].date, sizeof v->card[1].date, m->time, ko); ss_fmt_ago(v->card[1].ago, sizeof v->card[1].ago, m->time, now, ko);
     size_line(v->card[0].size, sizeof v->card[0].size, local_size, local_files, ko);
@@ -302,17 +318,53 @@ static void cards_view(const ss_meta *m, int64_t local_t, uint64_t local_size, i
     int newer = m->time > local_t ? 1 : 0; v->card[newer].newer = 1; v->sel = newer;
     pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke();
 }
-// The server's save: downloaded, checked, unpacked into saves/<stamp>-cloud and imported (saves_android.c: the current save backed up first). 0, -1 (why), -2 the start ended
-static int download_apply(JNIEnv *E, const ss_meta *m, char *why, size_t wcap) {
-    int ko = korean(); char u[1400], sha[65], err[600], name[64], dir[800], dird[820], part[820], partd[840];
-    pthread_mutex_lock(&C.mu); wait_locked("받는 중…", "Downloading…"); W.v.progress = 0; pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke();
+static void when_size(char *o, size_t n, int64_t t, uint64_t size, int ko) {   // "오늘 오전 2:10 · 7.1 MB"
+    char w[64], z[32]; ss_fmt_when(w, sizeof w, t, (int64_t)time(NULL), ko); ss_fmt_size(z, sizeof z, size);
+    if (size) snprintf(o, n, "%s · %s", w, z); else snprintf(o, n, "%s", w);
+}
+// AfterTest.dc.html: a run without the sync (the launcher's, B on a card) changed this device's save and the cloud did not move: back to the cloud's (this device's to
+// the backup slot), this device's up (the cloud's previous one stays in the server's history), or kept (this run without the sync too)
+static void after_test_view(const ss_meta *m, int64_t local_t, uint64_t local_size) {
+    int ko = korean(); char cv[96];
+    pthread_mutex_lock(&C.mu);
+    ask_locked(DM_CLOUD_ICON_NONE, ko ? "지난번에 동기화 없이 한 플레이가 있어요" : "You played without the sync last time", ko ? "테스트로 하셨다면 클라우드 세이브로 되돌리세요" : "If it was a test, go back to the cloud save", NULL,
+               2, ko ? "클라우드 세이브로 되돌리기" : "Back to the cloud save", ko ? "이 기기 것 올리기" : "Upload this device's",
+               ko ? "되돌린 테스트 세이브는 이 기기 백업 1칸에 남아요" : "The test save stays in this device's backup slot", ko ? "↑↓ 고르기 · A 선택" : "↑↓ choose · A select");
+    dm_cloud_view *v = &W.v; v->style = DM_CLOUD_STYLE_LIST; v->nbtn = 3; snprintf(v->btn[2], sizeof v->btn[2], "%s", ko ? "그대로 두기" : "Keep it");
+    snprintf(v->bnote[1], sizeof v->bnote[1], "%s", ko ? "클라우드 세이브는 백업해 둬요" : "The cloud's is kept as a backup");
+    snprintf(v->bnote[2], sizeof v->bnote[2], "%s", ko ? "이번에도 올리지 않고 플레이" : "Play without uploading again");
+    v->nrow = 2; snprintf(v->row_k[0], sizeof v->row_k[0], "%s", ko ? "이 기기 (테스트 플레이)" : "This device (test play)"); when_size(v->row_v[0], sizeof v->row_v[0], local_t, local_size, ko);
+    snprintf(v->row_k[1], sizeof v->row_k[1], "%s", ko ? "클라우드" : "Cloud"); when_size(cv, sizeof cv, m->time, m->size, ko);
+    snprintf(v->row_v[1], sizeof v->row_v[1], "%s · %s", m->device[0] ? m->device : "-", cv);
+    pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke();
+}
+// ManualPending.dc.html: manual mode, this device's save changed since it last went up and the cloud did not move: A uploads it now, B keeps it (owed, the corner's mark)
+static void manual_view(const ss_meta *m, int64_t local_t, uint64_t local_size) {
+    int ko = korean(); char w[64];
+    pthread_mutex_lock(&C.mu);
+    ask_locked(DM_CLOUD_ICON_NONE, ko ? "이 기기에 안 올린 진행이 있어요" : "This device has progress not uploaded", ko ? "수동 모드 · 올릴지 정해 주세요" : "Manual mode · choose whether it goes up", NULL,
+               2, ko ? "A · 올리기" : "A · Upload", ko ? "B · 그대로 두기" : "B · Keep it", ko ? "클라우드 세이브 설정에서 자동으로 바꿀 수 있어요" : "The cloud save settings can make it automatic", NULL);
+    dm_cloud_view *v = &W.v; v->style = DM_CLOUD_STYLE_PAIR; v->nrow = 2;
+    snprintf(v->row_k[0], sizeof v->row_k[0], "%s", ko ? "이 기기" : "This device"); when_size(v->row_v[0], sizeof v->row_v[0], local_t, local_size, ko);
+    snprintf(v->row_k[1], sizeof v->row_k[1], "%s", ko ? "클라우드" : "Cloud"); ss_fmt_when(w, sizeof w, m->time, (int64_t)time(NULL), ko);
+    if (!m->seq) snprintf(v->row_v[1], sizeof v->row_v[1], "%s", ko ? "아직 없음" : "None yet");
+    else if (!strcmp(m->device, C.cfg.device)) snprintf(v->row_v[1], sizeof v->row_v[1], ko ? "이 기기에서 올림 · %s" : "From this device · %s", w);
+    else snprintf(v->row_v[1], sizeof v->row_v[1], ko ? "%s에서 올림 · %s" : "From %s · %s", m->device[0] ? m->device : "-", w);
+    pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke();
+}
+#define BACKUP_SLOT "device-backup"   // saves/<this>: Back to the cloud save's backup of this device's save, one place overwritten each time
+// The server's save: downloaded, checked, unpacked into saves/<stamp>-cloud and imported (saves_android.c: the current save backed up first, into saves/<slot> when slot
+// is given). 0, -1 (why), -2 the start ended. act: the launcher's Back to the cloud save (no start to end, no button on its view)
+static int download_apply(JNIEnv *E, const ss_meta *m, char *why, size_t wcap, const char *slot, int act) {
+    char u[1400], sha[65], err[600], name[64], dir[800], dird[820], part[820], partd[840];
+    pthread_mutex_lock(&C.mu); wait_locked("받는 중…", "Downloading…"); W.v.progress = 0; C.prog = 0; if (act) W.v.nbtn = 0; pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke();
     url_of(u, sizeof u, "data"); hres r;
-    if (http_do(E, "GET", u, NULL, 0, NULL, 3000, now_ms() + 60000, SS_MAX_BODY, &r, dl_prog)) { snprintf(why, wcap, "%s", r.why); return ended() ? -2 : -1; }
+    if (http_do(E, "GET", u, NULL, 0, NULL, 3000, now_ms() + 60000, SS_MAX_BODY, &r, dl_prog)) { snprintf(why, wcap, "%s", r.why); return !act && ended() ? -2 : -1; }
     if (r.code != 200) { snprintf(why, wcap, "HTTP %d", r.code); ss_buf_free(&r.body); return -1; }
     ss_sha256(r.body.p, r.body.n, sha); for (char *q = r.sha; *q; q++) if (*q >= 'A' && *q <= 'F') *q += 32;
     if ((r.sha[0] && strcmp(r.sha, sha)) || (!r.sha[0] && strcmp(sha, m->sha))) { snprintf(why, wcap, "the download does not match its SHA-256 (damaged on the way)"); ss_buf_free(&r.body); return -1; }
     uint64_t seq = r.seq[0] ? strtoull(r.seq, NULL, 10) : m->seq; if (!seq) seq = m->seq;
-    pthread_mutex_lock(&C.mu); int d = W.done; if (!d) { W.applying = 1; wait_locked("적용하는 중…", "Putting it in place…"); W.v.nbtn = 0; W.v.urgent = 1; }   // (B cannot stop it now: no button)
+    pthread_mutex_lock(&C.mu); int d = !act && W.done; if (!d) { W.applying = 1; C.prog = -1; wait_locked("적용하는 중…", "Putting it in place…"); W.v.nbtn = 0; W.v.urgent = 1; }   // (B cannot stop it now: no button)
     pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke();
     if (d) { ss_buf_free(&r.body); return -2; }   // (the player skipped: nothing is changed)
     time_t t = time(NULL); struct tm tm; localtime_r(&t, &tm); strftime(name, sizeof name, "%Y%m%d-%H%M%S-cloud", &tm);
@@ -323,38 +375,40 @@ static int download_apply(JNIEnv *E, const ss_meta *m, char *why, size_t wcap) {
     if (ss_untar(r.body.p, r.body.n, part, partd, err, sizeof err)) snprintf(why, wcap, "%s", err);
     else if (!stat(partd, &st) && rename(partd, dird)) snprintf(why, wcap, "%s cannot be renamed (errno %d)", partd, errno);
     else if (rename(part, dir)) snprintf(why, wcap, "%s cannot be renamed (errno %d)", part, errno);
-    else if (dm_saves_import_now(name)) snprintf(why, wcap, "the import failed (saves/result.txt says why)");
+    else if (dm_saves_import_now(name, slot)) snprintf(why, wcap, "the import failed (saves/result.txt says why)");
     else rc = 0;
-    ss_buf_free(&r.body); ss_rm_tree(part); ss_rm_tree(partd); ss_rm_tree(dir); ss_rm_tree(dird);   // (the save before it stays: saves/<stamp>-before-import)
+    ss_buf_free(&r.body); ss_rm_tree(part); ss_rm_tree(partd); ss_rm_tree(dir); ss_rm_tree(dird);   // (the save before it stays: saves/<stamp>-before-import, or the slot)
     if (rc) { pthread_mutex_lock(&C.mu); W.applying = 0; pthread_mutex_unlock(&C.mu); return -1; }
-    ss_buf now_t; char now_sha[65] = ""; int64_t nw;
-    if (!snap(&now_t, now_sha, &nw, err, sizeof err)) ss_buf_free(&now_t);
+    ss_buf now_t; char now_sha[65] = ""; int64_t nw = 0; uint64_t nsize = 0; int64_t nfiles = 0;
+    if (!snap(&now_t, now_sha, &nw, err, sizeof err)) { nsize = now_t.n; nfiles = ss_tar_files(now_t.p, now_t.n); ss_buf_free(&now_t); }
     if (strcmp(now_sha, sha)) LOG("[RED] cloud: the save imported is archived to %.12s, not the server's %.12s (a device save kept from before?): it goes up as it is now", now_sha, sha);
     pthread_mutex_lock(&C.mu);
-    C.st.seq = seq; snprintf(C.st.sha, sizeof C.st.sha, "%s", now_sha); C.st.pending = strcmp(now_sha, sha) != 0; C.st.conflict = C.st.force = C.st.offline_play = 0; C.st.have = 1;
-    st_save_locked(); W.applying = 0; changed_locked();
+    ss_after_restore(&C.st, seq, now_sha, sha); st_save_locked(); W.applying = 0;
+    C.lknown = 1; snprintf(C.lsha, sizeof C.lsha, "%s", now_sha); C.lsize = nsize; C.lfiles = nfiles; C.lt = nw; changed_locked();
     pthread_mutex_unlock(&C.mu);
-    LOG("cloud: the server's save (seq %llu, %zu bytes, from %s) is the save now", (unsigned long long)seq, (size_t)m->size, m->device[0] ? m->device : "-");
+    LOG("cloud: the server's save (seq %llu, %zu bytes, from %s) is the save now%s%s", (unsigned long long)seq, (size_t)m->size, m->device[0] ? m->device : "-",
+        slot ? "; this device's is in saves/" : "", slot ? slot : "");
     return 0;
 }
-static void *start_thread(void *a) {
-    (void)a; pthread_setname_np(pthread_self(), "cloudstart");
-    JNIEnv *E = jattach(); int ko = korean();
-    if (!E) { LOG("[RED] cloud: no Java for the sync: this run plays without it"); finish(0, 1); return NULL; }
+// The start's check, on the start thread (or one the launcher asked for: recheck): this device's save against the server's meta, the questions, the download, the
+// session. Every way out ends the check (finish): the start goes on, or the launcher does
+static void start_check(JNIEnv *E, int recheck) {
+    int ko = korean();
     ss_buf t; char local[65], err[600], why[300]; int64_t local_t = 0, local_files = -1; uint64_t local_size = 0;
     int lr = snap(&t, local, &local_t, err, sizeof err); if (!lr) { local_size = t.n; local_files = ss_tar_files(t.p, t.n); ss_buf_free(&t); }
-    if (lr < 0) { LOG("[RED] cloud: this device's save cannot be archived (%s): this run plays without the sync", err); finish(0, 1); goto out; }
+    if (lr < 0) { LOG("[RED] cloud: this device's save cannot be archived (%s): this run plays without the sync", err); finish(0, 1, 0); return; }
     const char *loc = lr ? NULL : local;
-    LOG("cloud: this device's save: %s", loc ? loc : "none");
-    int dev_net = dm_net_state(E, C.act), data_unreached = dm_data_unreached();
+    pthread_mutex_lock(&C.mu); C.lknown = 1; snprintf(C.lsha, sizeof C.lsha, "%s", loc ? loc : ""); C.lsize = loc ? local_size : 0; C.lfiles = loc ? local_files : 0; C.lt = local_t; pthread_mutex_unlock(&C.mu);
+    LOG("cloud: this device's save: %s%s", loc ? loc : "none", recheck ? " (a check the launcher asked for)" : "");
+    int dev_net = dm_net_state(E, C.act), data_unreached = recheck ? 0 : dm_data_unreached();
     if (ss_start_offline(dev_net, data_unreached)) {   // no network on the device at all (a console without Wi-Fi), or the data's server was not reached just now: no
         // question, no request that can only time out; the game starts with this device's save at once ("Offline" in the steps), and the upload thread opens the
         // session and sends what is owed once the network is back
         ss_meta m; memset(&m, 0, sizeof m);
-        pthread_mutex_lock(&C.mu); int p; ss_decide(SS_NET_FAIL, &m, &C.st, loc, &p); if (p) C.st.pending = 1; C.offline = 1; st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
+        pthread_mutex_lock(&C.mu); int p; ss_decide(SS_NET_FAIL, &m, &C.st, loc, &p); if (p) C.st.pending = 1; C.offline = 1; C.meta_ok = 0; st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
         LOG("cloud: %s: the game starts with this device's save%s; the sync goes on once it is back", dev_net == 0 ? "the device has no network" : "the data's server was not reached",
             p ? " (owed: it goes up then)" : "");
-        finish(0, 0); goto out;
+        finish(0, 0, 0); return;
     }
     for (;;) {
         wait_view("맞추는 중…", "Syncing…");
@@ -368,22 +422,23 @@ static void *start_thread(void *a) {
         // (a 404 still carries the session, {"error":"none","session":…}: a game another device runs before its first upload is seen too)
         ss_buf_free(&r.body);
         if (net == SS_NET_FAIL || net == SS_NET_UNAUTH) {
-            pthread_mutex_lock(&C.mu); C.st.auth = net == SS_NET_UNAUTH; int p; ss_decide(net, &m, &C.st, loc, &p); if (p) C.st.pending = 1; C.offline = net == SS_NET_FAIL; st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
+            pthread_mutex_lock(&C.mu); C.st.auth = net == SS_NET_UNAUTH; int p; ss_decide(net, &m, &C.st, loc, &p); if (p) C.st.pending = 1; C.offline = net == SS_NET_FAIL; C.meta_ok = 0; st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
             if (net == SS_NET_UNAUTH) {
                 LOG("[RED] cloud: the server refused the token (sync.txt's token=, %.4s...)", C.cfg.token);
                 ask_view(DM_CLOUD_ICON_WARN, ko ? "기기 연결이 끊겼어요 (토큰)" : "This device is no longer linked (token)", ko ? "sync.txt의 토큰을 확인해 주세요. 이 기기 세이브로 시작해요." : "Check the token in sync.txt. The game starts with this device's save.", NULL,
                          1, ko ? "그래도 플레이" : "Play anyway", NULL, NULL, NULL);
-                if (ask(10000, "%d초 뒤 자동으로 시작해요", "Starting by itself in %d s") >= 0) finish(0, 0);
+                if (ask(10000, "%d초 뒤 자동으로 시작해요", "Starting by itself in %d s") >= 0) finish(0, 0, 0);
                 break;
             }
             ask_view(DM_CLOUD_ICON_OFFLINE, ko ? "클라우드에 연결할 수 없어요" : "The cloud cannot be reached", ko ? "이 기기 세이브로 시작해요. 연결되면 나중에 올려요." : "The game starts with this device's save; it goes up once there is a connection.", NULL,
                      2, ko ? "그래도 플레이" : "Play anyway", ko ? "다시 시도" : "Retry", NULL, NULL);
             int c = ask(10000, "%d초 뒤 자동으로 시작해요", "Starting by itself in %d s");
             if (c == 1) continue;
-            if (c >= 0) finish(0, 0);
+            if (c >= 0) finish(0, 0, 0);
             break;
         }
-        pthread_mutex_lock(&C.mu); C.st.auth = 0; C.offline = 0; pthread_mutex_unlock(&C.mu);
+        pthread_mutex_lock(&C.mu); C.st.auth = 0; C.offline = 0; C.meta = m; C.meta_ok = 1; C.st.checked = (int64_t)time(NULL);   // (the launcher's Cloud row, also offline later)
+        snprintf(C.st.m_device, sizeof C.st.m_device, "%s", m.seq ? m.device : ""); C.st.m_time = m.seq ? m.time : 0; changed_locked(); pthread_mutex_unlock(&C.mu);
         int other = net == SS_NET_OK || net == SS_NET_NOTFOUND ? ss_other_device(&m, C.cfg.device, (int64_t)time(NULL)) : SS_OTHER_NONE;
         if (other == SS_OTHER_UNSYNCED) {   // that device saved and the save did not go up: what the cloud has may be behind it
             char l0[200], when[64]; ss_fmt_date(when, sizeof when, m.s_updated, ko);
@@ -391,11 +446,11 @@ static void *start_thread(void *a) {
             LOG("cloud: %s has a save not yet uploaded (its last signal %s): the player is warned", m.s_device, when);
             ask_view(DM_CLOUD_ICON_WARN, ko ? "다른 기기에 아직 안 올라온 진행이 있어요" : "Another device has progress not uploaded yet", l0,
                      ko ? "그 기기를 인터넷에 연결해 켜면 올라가요." : "It goes up once that device is on and connected.",
-                     2, ko ? "그래도 시작" : "Start anyway", ko ? "취소 (앱 종료)" : "Cancel (close the app)",
+                     2, ko ? "그래도 시작" : "Start anyway", recheck ? (ko ? "취소" : "Cancel") : (ko ? "취소 (앱 종료)" : "Cancel (close the app)"),
                      ko ? "그래도 시작하면 나중에 두 세이브 중 하나를 고르게 돼요 · B 동기화 없이 플레이" : "Start anyway, and later you choose one of the two saves · B play without the sync", NULL);
             int c = ask(0, NULL, NULL);
             if (c < 0) break;
-            if (c == 1) { LOG("cloud: the player cancelled the start (%s has a save not yet uploaded)", m.s_device); finish(1, 0); break; }
+            if (c == 1) { LOG("cloud: the player cancelled the %s (%s has a save not yet uploaded)", recheck ? "check" : "start", m.s_device); finish(!recheck, 0, 0); break; }
         } else if (other == SS_OTHER_RUNNING) {   // running there now, its saves up: a note under the steps, no choice
             pthread_mutex_lock(&C.mu); wait_locked("맞추는 중…", "Syncing…");
             snprintf(W.v.hint, sizeof W.v.hint, ko ? "%s에서 지금 실행 중이에요 · 그 기기의 진행은 저장할 때마다 올라가요" : "Running on %s right now · its progress goes up each time it saves", m.s_device);
@@ -409,21 +464,42 @@ static void *start_thread(void *a) {
             if (ended()) break;
         }
         pthread_mutex_lock(&C.mu); int pend = 0, go = ss_decide(net, &m, &C.st, loc, &pend); pthread_mutex_unlock(&C.mu);
-        static const char *const GO[] = {"up to date", "this device's save goes up", "no save on either", "the server's save is newer: download", "conflict", "offline", "token refused", "played without the sync: ask"};
-        LOG("cloud: server seq %llu (%.12s, from %s), last synced seq %llu: %s", (unsigned long long)m.seq, m.seq ? m.sha : "-", m.device[0] ? m.device : "-", (unsigned long long)C.st.seq, GO[go]);
-        int retry = 0;
-        if (go == SS_GO_CONFLICT || go == SS_GO_ASK_OFFLINE) {
-            cards_view(&m, local_t, local_size, local_files, go == SS_GO_ASK_OFFLINE);
+        static const char *const GO[] = {"up to date", "this device's save goes up", "no save on either", "the server's save is newer: download", "conflict", "offline", "token refused",
+                                         "played without the sync: ask", "manual, a save not sent: ask"};
+        LOG("cloud: server seq %llu (%.12s, from %s), last synced seq %llu%s: %s", (unsigned long long)m.seq, m.seq ? m.sha : "-", m.device[0] ? m.device : "-", (unsigned long long)C.st.seq,
+            C.st.relink ? " (back from this device only: a first connection)" : "", GO[go]);
+        int retry = 0, up_now = 0; const char *slot = NULL;
+        if (go == SS_GO_CONFLICT) {
+            cards_view(&m, local_t, local_size, local_files);
             int c = ask(0, NULL, NULL);
             if (c < 0) break;
             if (c == 0) {   // this device's: the game starts with it and it goes up at once, over the server's (whose previous save stays in its history)
                 LOG("cloud: the player chose this device's save over the server's seq %llu", (unsigned long long)m.seq);
                 pthread_mutex_lock(&C.mu); if (W.done) { pthread_mutex_unlock(&C.mu); break; }
-                C.st.force = 1; C.st.fbase = m.seq; C.st.pending = 1; C.st.conflict = C.st.offline_play = 0; C.st.have = 1; C.kick = 1; st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
+                C.st.force = 1; C.st.fbase = m.seq; C.st.pending = 1; C.st.conflict = C.st.offline_play = C.st.relink = 0; C.st.have = 1; C.kick = 1; st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
             } else go = SS_GO_DOWNLOAD;
+        } else if (go == SS_GO_ASK_OFFLINE) {   // AfterTest.dc.html
+            after_test_view(&m, local_t, local_size);
+            int c = ask(0, NULL, NULL);
+            if (c < 0) break;
+            if (c == 2) { LOG("cloud: the player keeps the save played without the sync: this run without the sync too"); finish(0, 1, 1); break; }
+            if (c == 0) { LOG("cloud: back to the cloud's save (this device's to saves/" BACKUP_SLOT ")"); go = SS_GO_DOWNLOAD; slot = BACKUP_SLOT; }
+            else {
+                LOG("cloud: the player uploads the save played without the sync (the server's seq %llu stays in its history)", (unsigned long long)m.seq);
+                pthread_mutex_lock(&C.mu); if (W.done) { pthread_mutex_unlock(&C.mu); break; }
+                C.st.force = 1; C.st.fbase = m.seq; C.st.pending = 1; C.st.conflict = C.st.offline_play = C.st.relink = 0; C.st.have = 1; st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
+                up_now = 1;
+            }
+        } else if (go == SS_GO_ASK_MANUAL) {   // ManualPending.dc.html
+            manual_view(&m, local_t, local_size);
+            int c = ask(0, NULL, NULL);
+            if (c < 0) break;
+            pthread_mutex_lock(&C.mu); if (W.done) { pthread_mutex_unlock(&C.mu); break; }
+            C.st.pending = 1; C.st.conflict = 0; C.st.have = 1; st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
+            if (c == 0) up_now = 1; else LOG("cloud: manual: the player keeps the save not sent (owed: Upload now sends it)");
         }
         if (go == SS_GO_DOWNLOAD) {
-            int d = download_apply(E, &m, why, sizeof why);
+            int d = download_apply(E, &m, why, sizeof why, slot, 0);
             if (d == -2) break;
             if (d) {
                 LOG("[RED] cloud: the server's save could not be taken: %s", why);
@@ -431,22 +507,33 @@ static void *start_thread(void *a) {
                          2, ko ? "그래도 플레이" : "Play anyway", ko ? "다시 시도" : "Retry", NULL, NULL);
                 int c = ask(10000, "%d초 뒤 자동으로 시작해요", "Starting by itself in %d s");
                 if (c == 1) retry = 1;
-                else { if (c >= 0) finish(0, 0); break; }
+                else { if (c >= 0) finish(0, 0, 0); break; }
             }
-        } else if (go != SS_GO_CONFLICT && go != SS_GO_ASK_OFFLINE) {
+        } else if (go != SS_GO_CONFLICT && go != SS_GO_ASK_OFFLINE && go != SS_GO_ASK_MANUAL) {
             pthread_mutex_lock(&C.mu); if (W.done) { pthread_mutex_unlock(&C.mu); break; }
             if (go == SS_GO_UPTODATE) { C.st.seq = m.seq; snprintf(C.st.sha, sizeof C.st.sha, "%s", loc ? loc : ""); C.st.pending = 0; C.st.conflict = C.st.force = 0; }
             else if (go == SS_GO_PENDING) { if (net == SS_NET_NOTFOUND) { C.st.seq = 0; C.st.force = 0; } C.st.pending = 1; C.st.conflict = 0; C.kick = 1; }
             else if (go == SS_GO_NOTHING) { C.st.seq = 0; C.st.sha[0] = 0; C.st.pending = C.st.conflict = C.st.force = 0; }
-            C.st.offline_play = 0; C.st.have = 1; st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
+            C.st.offline_play = C.st.relink = 0; C.st.have = 1; st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
+        }
+        if (up_now) {   // the player's choice goes up now, before the game; a 409 (the cloud moved meanwhile) asks again, with the conflict's cards
+            wait_view("올리는 중…", "Uploading…"); pthread_mutex_lock(&C.mu); W.v.nbtn = 0; pthread_mutex_unlock(&C.mu);
+            int up = upload(E, now_ms() + 30000);
+            if (up == UP_CONFLICT) { LOG("cloud: the cloud moved meanwhile: the player chooses again"); continue; }
+            if (up != UP_OK) LOG("cloud: the player's upload did not go through: it stays owed");
         }
         if (retry) continue;
         if (ended()) break;
         if (!session_post(E, SESS_OPEN, 0, now_ms() + 3000)) { pthread_mutex_lock(&C.mu); C.sess_open = 1; pthread_mutex_unlock(&C.mu); }   // (just synced: clean. A failure: the upload thread opens it)
-        finish(0, 0);
+        finish(0, 0, 0);
         break;
     }
-out:
+}
+static void *start_thread(void *a) {
+    (void)a; pthread_setname_np(pthread_self(), "cloudstart");
+    JNIEnv *E = jattach();
+    if (!E) { LOG("[RED] cloud: no Java for the sync: this run plays without it"); finish(0, 1, 0); return NULL; }
+    start_check(E, 0);
     (*C.vm)->DetachCurrentThread(C.vm);
     return NULL;
 }
@@ -471,18 +558,20 @@ static void input_back(void) {
     pthread_mutex_lock(&C.mu); int ok = !W.done && !W.applying; if (ok) finish_locked(0, 1); pthread_mutex_unlock(&C.mu);
     if (ok) skipped_end();
 }
+// The question's layout decides B: a list's is its last button (Keep it), a pair's its second (B · Keep it), else play without the sync; a pair's A is its first
 int dm_cloud_input(const AInputEvent *e) {
-    pthread_mutex_lock(&C.mu); int on = W.done_cb != NULL && !W.done; pthread_mutex_unlock(&C.mu);
+    pthread_mutex_lock(&C.mu); int on = W.active && !W.done, style = W.v.style; pthread_mutex_unlock(&C.mu);
     if (!on) return 0;
     if (AInputEvent_getType(e) == AINPUT_EVENT_TYPE_KEY) {
         int k = AKeyEvent_getKeyCode(e), act = AKeyEvent_getAction(e);
         if (k == AKEYCODE_VOLUME_UP || k == AKEYCODE_VOLUME_DOWN || k == AKEYCODE_VOLUME_MUTE) return 0;
         if (act != AKEY_EVENT_ACTION_DOWN || AKeyEvent_getRepeatCount(e)) return 1;
-        if (k == AKEYCODE_DPAD_LEFT || k == AKEYCODE_DPAD_UP) input_move(-1);
-        else if (k == AKEYCODE_DPAD_RIGHT || k == AKEYCODE_DPAD_DOWN) input_move(1);
+        if (k == AKEYCODE_DPAD_LEFT || k == AKEYCODE_DPAD_UP) { if (style != DM_CLOUD_STYLE_PAIR) input_move(-1); }
+        else if (k == AKEYCODE_DPAD_RIGHT || k == AKEYCODE_DPAD_DOWN) { if (style != DM_CLOUD_STYLE_PAIR) input_move(1); }
         else if (k == AKEYCODE_BUTTON_A || k == AKEYCODE_DPAD_CENTER || k == AKEYCODE_ENTER || k == AKEYCODE_NUMPAD_ENTER || k == AKEYCODE_BUTTON_START) {
-            pthread_mutex_lock(&C.mu); int s = W.v.sel; pthread_mutex_unlock(&C.mu); input_choose(s); }
-        else if (k == AKEYCODE_BUTTON_B || k == AKEYCODE_BACK || k == AKEYCODE_ESCAPE) input_back();
+            pthread_mutex_lock(&C.mu); int s = style == DM_CLOUD_STYLE_PAIR ? 0 : W.v.sel; pthread_mutex_unlock(&C.mu); input_choose(s); }
+        else if (k == AKEYCODE_BUTTON_B || k == AKEYCODE_BACK || k == AKEYCODE_ESCAPE) {
+            if (style == DM_CLOUD_STYLE_LIST) input_choose(2); else if (style == DM_CLOUD_STYLE_PAIR) input_choose(1); else input_back(); }
         return 1;
     }
     if (AInputEvent_getType(e) != AINPUT_EVENT_TYPE_MOTION) return 1;
@@ -491,7 +580,7 @@ int dm_cloud_input(const AInputEvent *e) {
         static int held; float x = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_HAT_X, 0), y = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_HAT_Y, 0);
         float sx = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_X, 0); if (fabsf(x) < 0.5f && fabsf(y) < 0.5f && fabsf(sx) > 0.7f) x = sx;
         int d = x < -0.5f || y < -0.5f ? -1 : x > 0.5f || y > 0.5f ? 1 : 0;
-        if (d && d != held) input_move(d);
+        if (d && d != held && style != DM_CLOUD_STYLE_PAIR) input_move(d);
         held = d; return 1;
     }
     if (act == AMOTION_EVENT_ACTION_UP) {
@@ -526,11 +615,10 @@ static void wake_lock(JNIEnv *E, int on, int ms) {   // a failure (no WAKE_LOCK 
     if (cW) (*E)->DeleteLocalRef(E, cW);
     char why[200] = ""; if (jx(E, why, sizeof why)) LOG("[RED] cloud: the wake lock's %s failed (%s)", on ? "acquire" : "release", why);
 }
-enum { UP_NOTHING, UP_OK, UP_FAIL, UP_CONFLICT, UP_ERR };
 static int upload(JNIEnv *E, int64_t deadline) {
     static const int64_t BACKOFF[] = {60000, 120000, 300000, 600000};
     pthread_mutex_lock(&C.mu);
-    int skip = C.mode != SS_RUN_SYNC || C.skipped || C.st.off || C.st.conflict || C.st.auth || C.st.offline_play, force = C.st.force; uint64_t base = force ? C.st.fbase : C.st.seq; char last[65];
+    int skip = C.mode != SS_RUN_SYNC || C.skipped || C.st.mode == SS_MODE_LOCAL || C.st.conflict || C.st.auth || C.st.offline_play, force = C.st.force; uint64_t base = force ? C.st.fbase : C.st.seq; char last[65];
     snprintf(last, sizeof last, "%s", C.st.sha); pthread_mutex_unlock(&C.mu);
     if (skip) return UP_NOTHING;
     ss_buf t; char sha[65], err[600]; int64_t nw;
@@ -560,6 +648,10 @@ static int upload(JNIEnv *E, int64_t deadline) {
             if (!seq) LOG("[RED] cloud: the upload's answer has no seq: the next start asks the server again");
             note = ss_after_put(&C.st, 200, seq, sha, NULL, (int64_t)time(NULL));
             C.fails = 0; C.offline = 0; rc = UP_OK;
+            snprintf(C.st.m_device, sizeof C.st.m_device, "%s", C.cfg.device); C.st.m_time = C.st.last_up;   // (the launcher's Cloud row)
+            C.lknown = 1; snprintf(C.lsha, sizeof C.lsha, "%s", sha); C.lsize = t.n; C.lfiles = files;
+            if (C.meta_ok) { C.meta.seq = seq ? seq : C.meta.seq; snprintf(C.meta.sha, sizeof C.meta.sha, "%s", sha); snprintf(C.meta.device, sizeof C.meta.device, "%s", C.cfg.device);
+                             C.meta.time = C.st.last_up; C.meta.size = t.n; C.meta.files = files; }
             LOG("cloud: the save went up: seq %llu, %zu bytes, %lld files, %.12s", (unsigned long long)seq, t.n, (long long)files, sha);
         } else if (h.code == 409) {
             int k = ss_conflict_parse((const char *)h.body.p, h.body.n, &m);
@@ -581,16 +673,28 @@ static int upload(JNIEnv *E, int64_t deadline) {
     return rc;
 }
 // The app leaves the screen: what is owed goes up now, then the session closes with what is still owed; under a 15 s wake lock
+static void check_owed(void);
 static void pause_flush(JNIEnv *E, int *dirty, int syncs, const ss_tick_in *ti) {
+    int self = ss_uploads(ti->mode, SS_EV_LEAVE);
+    if (syncs && !self && *dirty) { *dirty = 0; check_owed(); }   // manual: what the game saved is only looked at (the session closes dirty when it is owed)
     int64_t dl = now_ms() + 15000;
     if ((!syncs && !ti->sess_open) || dm_net_state(E, C.act) == 0) { if (syncs) LOG("cloud: the app leaves the screen without a network: what is owed goes up once it is back"); return; }
     wake_lock(E, 1, 15000);
-    if (*dirty || ti->owed) { *dirty = 0; upload(E, dl - 1000); }
+    if (self && (*dirty || ti->owed)) { *dirty = 0; upload(E, dl - 1000); }
     int owed = owed_now();
     if (owed) LOG("cloud: a save is still owed (it could not go up): the session closes dirty, another device warns before it starts");
     session_post(E, SESS_CLOSED, owed, dl);   // (no answer: the session's last signal stands, and stops being "running" within 3 min)
     pthread_mutex_lock(&C.mu); C.sess_open = 0; pthread_mutex_unlock(&C.mu);
     wake_lock(E, 0, 0);
+}
+// manual: whether the save the game committed is the one the cloud has (owed or not), for the menu's row and the corner's mark: archived and hashed, nothing sent
+static void check_owed(void) {
+    ss_buf t; char sha[65], err[600]; int64_t nw; int r = snap(&t, sha, &nw, err, sizeof err); if (!r) ss_buf_free(&t);
+    if (r < 0) { LOG("[RED] cloud: the save cannot be archived to compare (%s)", err); return; }
+    pthread_mutex_lock(&C.mu);
+    int owed = C.st.conflict || C.st.force || (r == 0 ? strcmp(sha, C.st.sha) != 0 : C.st.sha[0] != 0);
+    if (owed != C.st.pending) { C.st.pending = owed; st_save_locked(); changed_locked(); LOG("cloud: manual: %s", owed ? "a save not sent (Upload now sends it)" : "the save is the cloud's again"); }
+    pthread_mutex_unlock(&C.mu); menu_redraw();
 }
 // The upload thread: the commit count polled every 1.5 s; a burst of commits goes up once a poll saw none (about 3 s after the game saved). Each tick asks savesync.h
 // ss_tick what to do: with no network on the device nothing is tried; when it comes back an owed save goes up at once (its backoff forgotten) and a session that never
@@ -605,8 +709,8 @@ static void *up_thread(void *a) {
         if (!C.kick && !C.pause_ev && !C.resume_ev) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 500 * 1000000; ts.tv_sec += 1; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
             pthread_cond_timedwait(&C.cv, &C.mu, &ts); }   // 1.5 s
         int kick = C.kick, pause = C.pause_ev, resume = C.resume_ev; C.kick = C.pause_ev = C.resume_ev = 0;
-        int syncs = C.mode == SS_RUN_SYNC && !C.skipped && !C.st.off && !C.st.auth && !C.st.offline_play;
-        ss_tick_in ti = {.syncs = syncs, .sess_open = C.sess_open, .owed = C.st.pending, .conflict = C.st.conflict, .next_try = C.next_try};
+        int syncs = C.mode == SS_RUN_SYNC && !C.skipped && C.st.mode != SS_MODE_LOCAL && !C.st.auth && !C.st.offline_play;
+        ss_tick_in ti = {.syncs = syncs, .mode = C.st.mode, .sess_open = C.sess_open, .owed = C.st.pending, .conflict = C.st.conflict, .next_try = C.next_try};
         pthread_mutex_unlock(&C.mu);
         uint64_t c = dm_fs_commit_count(); int64_t t = now_ms();
         if (c != lastc) { lastc = c; dirty = 1; changed_t = t; }
@@ -617,16 +721,18 @@ static void *up_thread(void *a) {
         }
         if (resume) paused = 0;
         if (paused) continue;
-        ti.committed = kick || (dirty && t - changed_t >= 1500); ti.now = t; ti.last_hb = last_hb;
+        ti.kick = kick; ti.committed = dirty && t - changed_t >= 1500; ti.now = t; ti.last_hb = last_hb;
         // the device's network is read only when this tick may send something or it was down (a game that saves rarely, online, with its session open asks Java nothing
-        // between its heartbeats)
-        int ask_net = syncs && (ti.committed || ti.owed || !ti.sess_open || resume || was_net == 0 || t - last_hb >= 60000);
+        // between its heartbeats; manual sends only what is asked for)
+        int self = ss_uploads(ti.mode, SS_EV_SAVE);
+        int ask_net = syncs && (kick || (self && (ti.committed || ti.owed)) || !ti.sess_open || resume || was_net == 0 || t - last_hb >= 60000);
         ti.net = ask_net ? dm_net_state(E, C.act) : syncs ? was_net : -1; ti.was_net = was_net; if (ask_net) was_net = ti.net;
         if (resume && ti.net != 0) { ti.owed = ti.owed || dirty; ti.next_try = 0; }   // back in front: what is owed is tried now
         int act = ss_tick(&ti);
         if (act & SS_DO_RETRY_NOW) { LOG("cloud: the network is back%s", ti.owed || dirty ? ": what is owed goes up now" : ""); pthread_mutex_lock(&C.mu); C.next_try = 0; C.fails = 0; pthread_mutex_unlock(&C.mu); }
         int up = UP_NOTHING;
         if (act & SS_DO_UPLOAD) { dirty = 0; up = upload(E, now_ms() + 60000); }
+        else if (act & SS_DO_CHECK) { dirty = 0; check_owed(); }
         if ((act & SS_DO_OPEN) || resume) {   // an offline start, or the app back in front: the session opens (dirty while a save is owed)
             if (syncs && ti.net != 0 && !session_post(E, SESS_OPEN, owed_now(), now_ms() + 5000)) { pthread_mutex_lock(&C.mu); C.sess_open = 1; pthread_mutex_unlock(&C.mu); }
             last_hb = now_ms();
@@ -658,33 +764,38 @@ void dm_cloud_resume(void) { pthread_mutex_lock(&C.mu); if (C.up_started) { C.re
 int dm_cloud_available(void) { return C.mode != SS_RUN_NONE; }
 int dm_cloud_status(char *note, int cap) {
     pthread_mutex_lock(&C.mu); note[0] = 0;
-    int s = C.mode == SS_RUN_NONE ? DM_CLOUD_OFF : C.st.off ? DM_CLOUD_DISABLED : C.mode == SS_RUN_SUPPRESSED ? (C.trial ? DM_CLOUD_TRIAL : DM_CLOUD_DISABLED) : C.skipped || C.st.offline_play ? DM_CLOUD_SKIPPED
+    int s = C.mode == SS_RUN_NONE ? DM_CLOUD_OFF : C.st.mode == SS_MODE_LOCAL ? DM_CLOUD_DISABLED : C.mode == SS_RUN_SUPPRESSED ? (C.trial ? DM_CLOUD_TRIAL : DM_CLOUD_DISABLED) : C.skipped || C.st.offline_play ? DM_CLOUD_SKIPPED
           : C.uploading ? DM_CLOUD_UPLOADING : C.st.auth ? DM_CLOUD_AUTH : C.st.conflict ? DM_CLOUD_CONFLICT : C.st.pending ? (C.offline ? DM_CLOUD_OFFLINE : DM_CLOUD_PENDING) : DM_CLOUD_UPTODATE;
     if (C.st.last_up > 0) { time_t t = (time_t)C.st.last_up; struct tm tm; localtime_r(&t, &tm); strftime(note, (size_t)cap, "%H:%M", &tm); }
-    if (s == DM_CLOUD_DISABLED && !C.st.off) snprintf(note, (size_t)cap, "on at next start");
+    if (s == DM_CLOUD_DISABLED && C.st.mode != SS_MODE_LOCAL) snprintf(note, (size_t)cap, "on at next start");
     pthread_mutex_unlock(&C.mu); return s;
 }
 unsigned dm_cloud_menu_ver(void) { pthread_mutex_lock(&C.mu); unsigned v = C.ver; pthread_mutex_unlock(&C.mu); return v; }
 void dm_cloud_menu_press(void) {
-    pthread_mutex_lock(&C.mu); int ok = C.up_started && C.st.pending && !C.st.conflict && !C.uploading && !C.st.off;
+    pthread_mutex_lock(&C.mu); int ok = C.up_started && C.st.pending && !C.st.conflict && !C.uploading && C.st.mode != SS_MODE_LOCAL;
     if (ok) { C.kick = 1; C.next_try = 0; pthread_cond_broadcast(&C.cv); LOG("[menu] cloud save: upload now"); }
     pthread_mutex_unlock(&C.mu);
 }
-void dm_cloud_menu_toggle(void) {   // this game's sync off (from now on, and at each start until it is on again) or on (at the next start)
+// the menu's switch: on (automatic or manual) to this device only, from now on; off (this device only) to automatic at the next start, whose check is a first connection's.
+// A trial build stays this device only
+void dm_cloud_menu_toggle(void) {
     pthread_mutex_lock(&C.mu);
-    if (C.mode != SS_RUN_NONE) {
-        C.st.off = !C.st.off; if (C.st.off) ss_mark_offline_play(&C.st);
+    if (C.mode != SS_RUN_NONE && !C.trial) {
+        int to = C.st.mode == SS_MODE_LOCAL ? SS_MODE_AUTO : SS_MODE_LOCAL; ss_set_mode(&C.st, to);
         st_save_locked(); changed_locked();
-        LOG("[menu] cloud save %s", C.st.off ? "switched off for this game" : "switched on for this game (from the next start)");
+        LOG("[menu] cloud save %s", to == SS_MODE_LOCAL ? "switched to this device only for this game" : "switched to automatic for this game (from the next start, its check a first connection's)");
     }
     pthread_mutex_unlock(&C.mu); menu_redraw();
 }
+int dm_cloud_manual(void) { pthread_mutex_lock(&C.mu); int m = C.mode != SS_RUN_NONE && C.st.mode == SS_MODE_MANUAL; pthread_mutex_unlock(&C.mu); return m; }
 // The game's corner mark (gfx_vk_present.c ov_mark, at each present): the spinner from an upload's start (the upload thread's ss_up_begin) on while uploads follow
 // each other, then the check, or the waiting or conflict note (savesync.h ss_mark_now). None while the app leaves the screen. NONE: nothing is drawn. *age: ms since
 // the mark began
 int dm_cloud_mark(int64_t *age) {
     pthread_mutex_lock(&C.mu); int64_t a = 0; int k = ss_mark_now(&C.notes, now_ms(), &a);
     if (k == SS_MARK_BUSY && C.pause_ev) k = DM_CLOUD_MARK_NONE;
+    if (k == DM_CLOUD_MARK_NONE && C.up_started && !C.pause_ev && C.st.mode == SS_MODE_MANUAL && C.st.pending) { k = DM_CLOUD_MARK_OFFLINE; a = 250; }   // manual, a save not sent: the
+    // struck-through cloud stays (an age past its pop and before its fade)
     pthread_mutex_unlock(&C.mu); *age = a; return k;
 }
 
@@ -728,17 +839,22 @@ int dm_cloud_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(int quit
     snprintf(C.state_path, sizeof C.state_path, "%s/sync-state.txt", dm_saves_dir());
     char pk[600]; ss_qenc(pk, sizeof pk, C.pkg); snprintf(C.base, sizeof C.base, "%s/api/saves/g/%s", C.cfg.url, pk);
     pthread_mutex_lock(&C.mu);
-    ss_state_load(C.state_path, &C.st);
-    C.mode = ss_run_mode(1, C.trial, C.st.off);
+    ss_state_load(C.state_path, &C.st); C.began = 1;
+    C.mode = ss_run_mode(1, C.trial, C.st.mode == SS_MODE_LOCAL);
     LOG("cloud: %s, device %s, token %.4s... (%s), package %s, build %s%s", C.cfg.url, C.cfg.device, C.cfg.token, C.st.have ? "state kept" : "first setup", C.pkg, C.build,
         C.mode == SS_RUN_SYNC ? "" : C.trial ? (!as ? ": a trial build (no data server): no sync this run" : dbg ? ": a trial build (debuggable): no sync this run" : ": DM_SAVESYNC=off: no sync this run")
-        : ": switched off for this game in the pause menu");
+        : ": this device only (the game's mode)");
     if (C.mode == SS_RUN_SUPPRESSED) {   // no network at all; the next start with the sync asks before what this run saves goes up
         ss_mark_offline_play(&C.st); st_save_locked();
         changed_locked(); pthread_mutex_unlock(&C.mu);
-        dm_start_step(STV_CLOUD, STV_SKIP, korean() ? (C.trial ? "시험판" : "꺼짐") : (C.trial ? "Trial build" : "Off")); return 0;
+        dm_start_step(STV_CLOUD, STV_SKIP, korean() ? (C.trial ? "시험판" : "이 기기만") : (C.trial ? "Trial build" : "This device only")); return 0;
     }
-    memset(&W, 0, sizeof W); W.choice = -1; W.done_cb = done;
+    if (C.skip_req) {   // the launcher's Play without the sync, pressed before the check: none is made
+        C.skipped = 1; ss_mark_offline_play(&C.st); st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
+        LOG("cloud: this run plays without the sync (the launcher's choice; the next start asks before its save goes up)");
+        dm_start_step(STV_CLOUD, STV_SKIP, korean() ? "건너뜀" : "Skipped"); return 0;
+    }
+    memset(&W, 0, sizeof W); W.choice = -1; W.done_cb = done; W.active = 1;
     wait_locked("맞추는 중…", "Syncing…");
     pthread_mutex_unlock(&C.mu);
     if (!dm_cloud_screen_begin(act, w, screen_done)) {   // no screen to ask on: this run without the sync (never a start that waits on nothing)
@@ -746,7 +862,118 @@ int dm_cloud_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(int quit
         pthread_mutex_lock(&C.mu); W.done_cb = NULL; finish_locked(0, 1); pthread_mutex_unlock(&C.mu); return 0;
     }
     pthread_t t;
-    if (pthread_create(&t, NULL, start_thread, NULL)) { LOG("[RED] cloud: cannot start the sync thread: this run plays without it"); finish(0, 1); }
+    if (pthread_create(&t, NULL, start_thread, NULL)) { LOG("[RED] cloud: cannot start the sync thread: this run plays without it"); finish(0, 1, 0); }
     else pthread_detach(t);
     return 1;
+}
+
+// ---- the launcher (datasync_android.c): its Cloud save page reads this state, and asks for a mode, Upload now, Back to the cloud save, a check again ----
+_Static_assert(SS_LOCAL_UNKNOWN == DM_CLOUD_LOCAL_UNKNOWN && SS_LOCAL_SAME == DM_CLOUD_LOCAL_SAME && SS_LOCAL_OWED == DM_CLOUD_LOCAL_OWED && SS_LOCAL_ONLY == DM_CLOUD_LOCAL_ONLY
+               && SS_LOCAL_PLAYED == DM_CLOUD_LOCAL_PLAYED && SS_LOCAL_CONFLICT == DM_CLOUD_LOCAL_CONFLICT, "the launcher's This device row");
+void dm_cloud_info_get(dm_cloud_info *o) {
+    memset(o, 0, sizeof *o); o->progress = -1; o->files = -1;
+    pthread_mutex_lock(&C.mu);
+    o->avail = C.began; o->trial = C.trial; o->mode = C.trial ? SS_MODE_LOCAL : C.st.mode;
+    o->checking = W.active; o->act = C.busy; o->progress = (C.busy || W.active) && C.prog >= 0 ? C.prog : -1;
+    o->online = C.meta_ok; o->offline = C.offline; o->skipped = C.skipped || C.skip_req; o->auth = C.st.auth;
+    o->local = C.began ? ss_local_state(&C.st, C.lknown ? C.lsha : NULL) : SS_LOCAL_UNKNOWN;
+    if (C.trial) o->local = SS_LOCAL_ONLY;
+    if (C.meta_ok) { snprintf(o->cloud_dev, sizeof o->cloud_dev, "%s", C.meta.seq ? C.meta.device : ""); o->cloud_time = C.meta.seq ? C.meta.time : 0; }
+    else { snprintf(o->cloud_dev, sizeof o->cloud_dev, "%s", C.st.m_device); o->cloud_time = C.st.m_time; }
+    o->checked = C.st.checked; o->size = C.lknown ? C.lsize : 0; o->files = C.lknown ? C.lfiles : -1; snprintf(o->device, sizeof o->device, "%s", C.cfg.device);
+    int free_ = C.began && !C.trial && C.st.mode != SS_MODE_LOCAL && C.meta_ok && !C.busy && !W.active && !C.st.auth;
+    o->can_upload = free_ && (o->local == SS_LOCAL_OWED || o->local == SS_LOCAL_PLAYED);
+    o->can_restore = free_ && C.meta.seq != 0;
+    snprintf(o->result, sizeof o->result, "%s", C.result); o->result_bad = C.result_bad;
+    pthread_mutex_unlock(&C.mu);
+}
+static void local_now(void) {   // this device's save archived again, for the page (before the game: nothing commits)
+    ss_buf t; char sha[65], err[600]; int64_t nw = 0; int r = snap(&t, sha, &nw, err, sizeof err);
+    pthread_mutex_lock(&C.mu);
+    if (r >= 0) { C.lknown = 1; snprintf(C.lsha, sizeof C.lsha, "%s", r ? "" : sha); C.lsize = r ? 0 : t.n; C.lfiles = r ? 0 : ss_tar_files(t.p, t.n); C.lt = nw; changed_locked(); }
+    pthread_mutex_unlock(&C.mu);
+    if (!r) ss_buf_free(&t);
+}
+void dm_cloud_local_refresh(void) { pthread_mutex_lock(&C.mu); int go = C.began && !C.lknown && !C.busy && !W.active; pthread_mutex_unlock(&C.mu); if (go) local_now(); }
+static void act_result(const char *ko, const char *en, int bad) {
+    pthread_mutex_lock(&C.mu); snprintf(C.result, sizeof C.result, "%s", korean() ? ko : en); C.result_bad = bad; changed_locked(); pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke();
+}
+// a check the launcher asked for (back from this device only, a 409 to Upload now): the start's check again, its questions over the launcher; the launcher goes on after it
+// (W.done_cb stays as it is: the start's own callback may not have run yet)
+static void recheck(JNIEnv *E) {
+    pthread_mutex_lock(&C.mu);
+    W.done = W.quit = W.applying = 0; W.choice = -1; W.recheck = 1; W.active = 1; C.mode = SS_RUN_SYNC; C.offline = 0; C.skipped = 0; wait_locked("맞추는 중…", "Syncing…");
+    pthread_mutex_unlock(&C.mu);
+    dm_start_step(STV_CLOUD, STV_RUN, korean() ? "맞추는 중…" : "Syncing…"); dm_cloud_screen_poke();
+    start_check(E, 1);
+    pthread_mutex_lock(&C.mu); if (W.active) { W.active = 0; W.done = 1; } pthread_mutex_unlock(&C.mu);
+}
+static void *act_thread(void *a) {
+    int what = (int)(intptr_t)a; pthread_setname_np(pthread_self(), "cloudact");
+    JNIEnv *E = jattach();
+    if (!E) act_result("자바를 쓸 수 없어 못 했어요", "No Java for it", 1);
+    else {
+        if (what == DM_CLOUD_ACT_UPLOAD) {   // Upload now: what this device has (a run without the sync's too: the player asks for it)
+            pthread_mutex_lock(&C.mu); C.st.offline_play = 0; C.st.pending = 1; st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke();
+            LOG("cloud: the launcher's Upload now");
+            int r = upload(E, now_ms() + 60000);
+            if (r == UP_OK) act_result("올렸어요", "Uploaded", 0);
+            else if (r == UP_CONFLICT) { act_result("다른 기기의 세이브가 더 새로워요", "Another device's save is newer", 1); recheck(E); }
+            else if (r == UP_FAIL) act_result("연결되지 않아 올리지 못했어요", "Not connected: not uploaded", 1);
+            else if (r == UP_NOTHING) act_result("올릴 진행이 없어요", "Nothing to upload", 0);
+            else act_result("올리지 못했어요", "It could not be uploaded", 1);
+        } else if (what == DM_CLOUD_ACT_RESTORE) {   // Back to the cloud save: the server's meta now, its save in, this device's to the backup slot
+            char u[1400], why[300] = ""; url_of(u, sizeof u, "meta"); hres r; ss_meta m; memset(&m, 0, sizeof m);
+            int got = http_do(E, "GET", u, NULL, 0, NULL, 3000, now_ms() + 5000, 256 << 10, &r, NULL);
+            int ok = !got && r.code == 200 && !ss_meta_parse((const char *)r.body.p, r.body.n, &m) && m.seq; ss_buf_free(&r.body);
+            LOG("cloud: the launcher's Back to the cloud save: %s", ok ? "the server's save comes in" : got ? r.why : "the server has no save");
+            if (!ok) act_result(got ? "클라우드에 연결할 수 없어요" : "클라우드에 세이브가 없어요", got ? "The cloud cannot be reached" : "The cloud has no save", 1);
+            else if (download_apply(E, &m, why, sizeof why, BACKUP_SLOT, 1)) { LOG("[RED] cloud: Back to the cloud save failed: %s", why); act_result("되돌리지 못했어요", "It could not be done", 1); }
+            else { pthread_mutex_lock(&C.mu); C.meta = m; C.meta_ok = 1; pthread_mutex_unlock(&C.mu); act_result("되돌렸어요 · 이 기기 세이브는 백업 1칸에", "Done · this device's save is in the backup slot", 0); }
+        } else if (what == DM_CLOUD_ACT_CHECK) recheck(E);
+        local_now();
+        (*C.vm)->DetachCurrentThread(C.vm);
+    }
+    pthread_mutex_lock(&C.mu); C.busy = 0; C.prog = -1; changed_locked(); pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke();
+    return NULL;
+}
+int dm_cloud_act(int what) {   // (takes no lock of datasync_android.c's: the screen's thread may call it holding its own)
+    pthread_mutex_lock(&C.mu);
+    int ok = what > DM_CLOUD_ACT_NONE && what <= DM_CLOUD_ACT_CHECK && C.began && C.vm && !C.trial && !C.busy && !W.active;
+    if (ok) { C.busy = what; C.prog = -1; C.result[0] = 0; changed_locked(); }
+    pthread_mutex_unlock(&C.mu);
+    if (!ok) return -1;
+    pthread_t t;
+    if (pthread_create(&t, NULL, act_thread, (void *)(intptr_t)what)) { LOG("[RED] cloud: cannot start the launcher's action"); pthread_mutex_lock(&C.mu); C.busy = 0; pthread_mutex_unlock(&C.mu); return -1; }
+    pthread_detach(t);
+    return 0;
+}
+int dm_cloud_set_mode(int mode) {
+    pthread_mutex_lock(&C.mu);
+    if (!C.began || C.trial || C.busy || W.active || mode < SS_MODE_AUTO || mode > SS_MODE_LOCAL || mode == C.st.mode) { pthread_mutex_unlock(&C.mu); return -1; }
+    int was = C.st.mode; ss_set_mode(&C.st, mode); st_save_locked(); changed_locked(); C.result[0] = 0;
+    int again = was == SS_MODE_LOCAL;   // back from this device only: a first connection's check, now
+    if (mode == SS_MODE_LOCAL) { C.mode = SS_RUN_SUPPRESSED; C.meta_ok = 0; }
+    pthread_mutex_unlock(&C.mu);
+    static const char *const NAME[] = {"automatic", "manual", "this device only"};
+    LOG("cloud: the launcher sets this game's mode to %s%s", NAME[mode], again ? " (a first connection's check now)" : "");
+    if (mode == SS_MODE_LOCAL) dm_start_step(STV_CLOUD, STV_SKIP, korean() ? "이 기기만" : "This device only");
+    if (again) dm_cloud_act(DM_CLOUD_ACT_CHECK);
+    dm_cloud_screen_poke();
+    return 0;
+}
+// Play without the sync, from the launcher: before the check, none is made (dm_cloud_begin); during it, it ends without the sync (as B); after it, nothing goes up this
+// run and the next start asks before this run's save does. -1: the cloud's save is being put in place (it cannot stop now)
+int dm_cloud_play_unsynced(void) {
+    pthread_mutex_lock(&C.mu);
+    if (!C.began) { C.skip_req = 1; pthread_mutex_unlock(&C.mu); return 0; }
+    if (W.active) {
+        if (W.applying) { pthread_mutex_unlock(&C.mu); return -1; }
+        finish_locked(0, 1); pthread_mutex_unlock(&C.mu); skipped_end(); return 0;
+    }
+    int now = C.mode == SS_RUN_SYNC && !C.skipped;
+    if (now) { C.skipped = 1; ss_mark_offline_play(&C.st); st_save_locked(); changed_locked(); }
+    pthread_mutex_unlock(&C.mu);
+    if (now) { LOG("cloud: this run plays without the sync (the launcher's choice after the check; the next start asks before its save goes up)"); dm_start_step(STV_CLOUD, STV_SKIP, korean() ? "건너뜀" : "Skipped"); }
+    return 0;
 }

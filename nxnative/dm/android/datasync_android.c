@@ -17,6 +17,7 @@
 // that file fills) is the third step, or a question of its own; the screen shows only once the start took 300 ms, or at once for a question
 #include "dm.h"
 #include "datasync.h"
+#include "savesync.h"   // (the launcher's times and sizes: ss_fmt_when, ss_fmt_ago, ss_fmt_size)
 #include "savecloud.h"
 #include "pixel_font.h"
 #include "startscreen.h"
@@ -235,6 +236,19 @@ static struct {
     char name[160], version[128], checked[48];
     stv_step step[STV_NSTEPS];
 } V;   // under S.mu
+// the launcher (its code at the end of this file), under S.mu
+typedef struct {
+    int on, quick, page, sel[3];              // shown (not start at once, or − pressed); the setting; the page (0 the launcher, 1 Cloud save, 2 App settings), each page's choice
+    int want, nosync, gate, gpipe[2];         // Start pressed (without the sync); the start is ready and waits for it (front_android.c's go, called through gpipe)
+    void (*go)(void);
+    int holding, hold_touch; int64_t hold_t0, hint_until;   // Back to the cloud save held (by the finger); "hold it" shown until
+    int vrun, vbad; ds_progress vpr; char amsg[160];        // Check the data again runs, failed; its progress; the App page's last outcome
+    int data_rc, data_net, data_off, data_known, has_server, verify_ok, last_act; int64_t checked_t, shader_bytes; uint64_t data_bytes;
+} lnr_t;
+static lnr_t LN = {.gpipe = {-1, -1}, .data_rc = -1};
+static int lnr_input(const AInputEvent *e);
+static int lnr_busy_locked(const dm_cloud_info *ci); static void go_locked(void); static int verify_ok_locked(const dm_cloud_info *ci);
+static uint64_t data_bytes_now(void); static int64_t shader_bytes_now(void); static void lnr_path(char *o, size_t n);
 static struct { uint8_t *ttf[2]; size_t n[2]; uint32_t *icon; int iw, ih; uint32_t glow; int tried; } R;   // the screen thread's own
 static int korean(void) { const pf_index *g = pf_find(dm_overlay_font(), 0xAC00); return g && (g->cp_adv >> 8) == 0xAC00; }   // the APK's font has Hangul (assets/font/ui.bin)
 void dm_start_step(int step, int state, const char *note) {
@@ -282,9 +296,120 @@ static void need_net_view(dm_cloud_view *q, int ws, int wtot) {
     snprintf(q->count, sizeof q->count, korean() ? "%d초 뒤 다시 확인해요" : "Trying again in %d s", ws);
     q->count_permille = wtot > 0 ? (wtot - ws) * 1000 / wtot : -1;
 }
-typedef struct { int phase, status, wait_s, wait_tot, need_net, pd, pt; ds_progress p; char msg[256], nt_ko[3][200], nt_en[3][200], nt_detail[300]; } snap_t;
+typedef struct { int phase, status, wait_s, wait_tot, need_net, pd, pt; ds_progress p; char msg[256], nt_ko[3][200], nt_en[3][200], nt_detail[300]; lnr_t ln; } snap_t;
 // the picture's state, from what the phases left (under no lock: snap and cv are copies)
-static void build_view(stv_view *v, const snap_t *x, const stv_rate *rate, dm_cloud_view *cv, dm_cloud_view *dq, const stv_step *steps) {
+// the launcher's picture: its statuses, items and pages from the start's state (x), the launcher's (x->ln) and the cloud's (ci)
+static void fmt_gb(char *o, size_t n, uint64_t b) { if (b >= 1024ull << 20) snprintf(o, n, "%.1f GB", b / 1073741824.0); else snprintf(o, n, "%.0f MB", b / 1048576.0); }
+static void st_set(stv_status *s, int state, const char *t) { s->state = state; snprintf(s->text, sizeof s->text, "%s", t); }
+static void build_launcher(stv_view *v, const snap_t *x, const stv_step *steps, const dm_cloud_info *ci) {
+    const lnr_t *n = &x->ln; int ko = korean(); int64_t now = (int64_t)time(NULL), mono = now_ms(); char t[200], a[64], b[64];
+    v->screen = n->page == 1 ? STV_SCREEN_CLOUD : n->page == 2 ? STV_SCREEN_APP : STV_SCREEN_LAUNCHER;
+    // the three statuses
+    stv_launcher *l = &v->ln; stv_status *s = l->status;
+    if (n->vrun) { int p = n->vpr.total ? (int)(n->vpr.done * 100 / n->vpr.total) : 0;
+        snprintf(t, sizeof t, ko ? "게임 데이터 %s · %d%%" : "Game data: %s · %d%%", n->vpr.phase == DS_PH_DOWNLOAD || n->vpr.phase == DS_PH_UNPACK ? L("받는 중", "downloading") : L("확인 중", "checking"), p); st_set(&s[0], STV_RUN, t); }
+    else if (x->phase == PH_DATA || steps[STV_DATA].state == STV_RUN) st_set(&s[0], STV_RUN, L("게임 데이터 확인 중", "Checking the game data"));
+    else if (steps[STV_DATA].state == STV_WAIT) st_set(&s[0], STV_WAIT, L("게임 데이터 대기", "Game data waiting"));
+    else if (n->data_off) st_set(&s[0], STV_SKIP, L("게임 데이터 · 오프라인", "Game data · offline"));
+    else st_set(&s[0], STV_DONE, n->data_rc == DS_DONE ? L("게임 데이터 받음", "Game data downloaded") : n->data_rc == DS_UPTODATE ? L("게임 데이터 최신", "Game data up to date") : L("게임 데이터 준비됨", "Game data ready"));
+    if (x->phase == PH_PREP) { if (x->pt) { snprintf(t, sizeof t, ko ? "셰이더 준비 중 · %d%%" : "Preparing shaders · %d%%", (int)((int64_t)x->pd * 100 / x->pt)); st_set(&s[1], STV_RUN, t); } else st_set(&s[1], STV_RUN, L("셰이더 확인 중", "Checking the shaders")); }
+    else st_set(&s[1], steps[STV_SHADERS].state, steps[STV_SHADERS].state == STV_DONE ? L("셰이더 준비 완료", "Shaders ready") : steps[STV_SHADERS].state == STV_SKIP ? L("셰이더 필요 없음", "No shaders to prepare") : L("셰이더 준비 대기", "Shaders waiting"));
+    if (ci->act == DM_CLOUD_ACT_UPLOAD) st_set(&s[2], STV_RUN, L("클라우드 세이브 올리는 중", "Uploading the cloud save"));
+    else if (ci->act || ci->checking || steps[STV_CLOUD].state == STV_RUN) {
+        if (ci->progress >= 0) { snprintf(t, sizeof t, ko ? "클라우드 세이브 받는 중 · %d%%" : "Downloading the cloud save · %d%%", ci->progress / 10); st_set(&s[2], STV_RUN, t); }
+        else st_set(&s[2], STV_RUN, L("클라우드 세이브 확인 중", "Checking the cloud save")); }
+    else if (ci->skipped) st_set(&s[2], STV_SKIP, L("클라우드 세이브 · 건너뜀", "Cloud save · skipped"));
+    else if (!ci->avail) st_set(&s[2], steps[STV_CLOUD].state == STV_SKIP ? STV_SKIP : STV_WAIT, steps[STV_CLOUD].state == STV_SKIP ? L("클라우드 세이브 · 사용 안 함", "Cloud save · off") : L("클라우드 세이브 대기", "Cloud save waiting"));
+    else if (ci->trial) st_set(&s[2], STV_SKIP, L("클라우드 세이브 · 시험판", "Cloud save · trial build"));
+    else if (ci->mode == 2) st_set(&s[2], STV_SKIP, L("클라우드 세이브 · 이 기기만", "Cloud save · this device only"));
+    else if (ci->auth) st_set(&s[2], STV_FAIL, L("클라우드 세이브 · 연결 끊김", "Cloud save · unlinked"));
+    else if (ci->offline) st_set(&s[2], STV_SKIP, L("클라우드 세이브 · 오프라인", "Cloud save · offline"));
+    else if (ci->local == DM_CLOUD_LOCAL_CONFLICT) st_set(&s[2], STV_FAIL, L("클라우드 세이브 · 고를 게 있어요", "Cloud save · a choice waits"));
+    else if (ci->local == DM_CLOUD_LOCAL_OWED) st_set(&s[2], STV_FAIL, L("클라우드 세이브 · 안 올린 진행", "Cloud save · not uploaded"));
+    else if (ci->local == DM_CLOUD_LOCAL_PLAYED) st_set(&s[2], STV_SKIP, L("클라우드 세이브 · 동기화 없이 한 플레이", "Cloud save · played without the sync"));
+    else st_set(&s[2], STV_DONE, L("클라우드 세이브 최신", "Cloud save up to date"));
+    static const char *const MKO[3] = {"자동", "수동", "이 기기만"}, *const MEN[3] = {"Automatic", "Manual", "This device only"};
+    const char *mname = ci->mode >= 0 && ci->mode <= 2 ? (ko ? MKO[ci->mode] : MEN[ci->mode]) : "";
+    if (v->screen == STV_SCREEN_LAUNCHER) {
+        snprintf(l->item[0], sizeof l->item[0], "%s", L("동기화 없이 플레이", "Play without the sync"));
+        snprintf(l->note[0], sizeof l->note[0], "%s", ci->avail && ci->mode != 2 ? L("테스트 · 이번 판은 올리지 않아요", "A test · this run is not uploaded") : L("이번 판은 올리지 않아요", "This run is not uploaded"));
+        snprintf(l->item[1], sizeof l->item[1], "%s", L("클라우드 세이브", "Cloud save"));
+        if (!ci->avail) snprintf(l->note[1], sizeof l->note[1], "%s", steps[STV_CLOUD].state == STV_SKIP ? L("사용 안 함", "Off") : L("확인 전", "Not checked yet"));
+        else if (ci->trial) snprintf(l->note[1], sizeof l->note[1], "%s", L("시험판 · 이 기기만", "Trial build · this device only"));
+        else if (ci->mode == 2) snprintf(l->note[1], sizeof l->note[1], "%s", mname);
+        else if (ci->cloud_time > 0) { ss_fmt_ago(a, sizeof a, ci->cloud_time, now, ko); snprintf(l->note[1], sizeof l->note[1], ko ? "%s · %s에서 %s" : "%s · from %s, %s", mname, ci->cloud_dev[0] ? ci->cloud_dev : "-", a); }
+        else snprintf(l->note[1], sizeof l->note[1], "%s · %s", mname, ci->online ? L("클라우드에 세이브 없음", "none in the cloud") : ci->offline ? L("오프라인", "offline") : L("확인 전", "not checked yet"));
+        snprintf(l->item[2], sizeof l->item[2], "%s", L("앱 설정", "App settings"));
+        if (n->data_known && n->data_bytes) { fmt_gb(a, sizeof a, n->data_bytes); snprintf(l->note[2], sizeof l->note[2], ko ? "데이터 %s · 바로 시작 %s" : "Data %s · start at once %s", a, n->quick ? L("켜짐", "on") : L("꺼짐", "off")); }
+        else snprintf(l->note[2], sizeof l->note[2], ko ? "바로 시작 %s" : "Start at once %s", n->quick ? L("켜짐", "on") : L("꺼짐", "off"));
+        snprintf(l->start, sizeof l->start, "%s", L("게임 시작", "Start the game")); l->sel = n->sel[0]; l->waiting = n->want;
+        snprintf(l->start_sub, sizeof l->start_sub, "%s", n->nosync ? L("준비가 끝나면 동기화 없이 시작해요 · B 취소", "Starts without the sync once ready · B cancel") : L("준비가 끝나면 바로 시작해요 · B 취소", "Starts once ready · B cancel"));
+        snprintf(l->keys, sizeof l->keys, "%s", n->want ? L("B 취소", "B cancel") : L("↑↓ 고르기 · A 선택", "↑↓ choose · A select"));
+        v->anim = n->want; for (int i = 0; i < STV_NSTEPS; i++) if (s[i].state == STV_RUN) v->anim = 1;
+    } else if (v->screen == STV_SCREEN_CLOUD) {
+        stv_cloudpage *p = &v->cp;
+        snprintf(p->title, sizeof p->title, "%s", L("클라우드 세이브", "Cloud save")); snprintf(p->label[0], sizeof p->label[0], "%s", L("동기화 방식", "How it syncs")); snprintf(p->label[1], sizeof p->label[1], "%s", L("지금 상태", "Now"));
+        static const char *const DKO[3] = {"저장하면 바로 올리고, 게임을 끌 때도 올려요", "올리기는 내가 정해요. 시작할 때 올릴지 물어봐요", "받지도 올리지도 않아요. 이 기기 세이브로만 테스트해요"},
+                          *const DEN[3] = {"Each save goes up, and when the game closes", "You decide when it goes up; the start asks", "Nothing down or up: this device's save only, for tests"};
+        for (int i = 0; i < 3; i++) { snprintf(p->mode[i], sizeof p->mode[i], "%s", ko ? MKO[i] : MEN[i]); snprintf(p->desc[i], sizeof p->desc[i], "%s", ko ? DKO[i] : DEN[i]); }
+        p->checked = ci->mode; p->modes_off = !ci->avail || ci->trial || ci->act || ci->checking;
+        snprintf(p->note, sizeof p->note, "%s", !ci->avail ? (steps[STV_CLOUD].state == STV_SKIP ? L("이 기기는 클라우드 세이브에 연결되지 않았어요 (sync.txt 없음).", "This device is not linked to the cloud save (no sync.txt).")
+                                                                     : L("시작 준비가 끝나면 바꿀 수 있어요.", "It can be changed once the start is ready."))
+                 : ci->trial ? L("시험판이라 이 기기 세이브로만 해요. 바꿀 수 없어요.", "A trial build keeps this device's save only. It cannot be changed.")
+                 : ci->act || ci->checking ? L("확인하는 중이에요. 끝나면 바꿀 수 있어요.", "Checking. It can be changed once done.")
+                 : L("이 기기만에서 다시 자동·수동으로 바꾸면, 처음 연결할 때처럼 어느 세이브로 할지 물어봐요.", "Back from this device only to automatic or manual, it asks which save to keep, as at the first link."));
+        p->nrow = 4; snprintf(p->key[0], sizeof p->key[0], "%s", L("클라우드", "Cloud")); snprintf(p->key[1], sizeof p->key[1], "%s", L("이 기기", "This device"));
+        snprintf(p->key[2], sizeof p->key[2], "%s", L("크기", "Size")); snprintf(p->key[3], sizeof p->key[3], "%s", L("계정", "Account"));
+        if (ci->avail && !ci->online && (ci->offline || ci->auth) && ci->mode != 2) { ss_fmt_date(a, sizeof a, ci->checked, ko); snprintf(p->val[0], sizeof p->val[0], ko ? "연결 안 됨 · 마지막 확인 %s" : "Not connected · last checked %s", ci->checked ? a : "-"); p->col[0] = STV_COL_DIM; }
+        else if (ci->cloud_time > 0) { ss_fmt_when(a, sizeof a, ci->cloud_time, now, ko); snprintf(p->val[0], sizeof p->val[0], "%s · %s", ci->cloud_dev[0] ? ci->cloud_dev : "-", a); }
+        else snprintf(p->val[0], sizeof p->val[0], "%s", ci->online ? L("아직 없음", "None yet") : "-");
+        static const char *const LKO[6] = {"확인 전", "클라우드와 같아요", "안 올린 진행 있음", "이 기기만", "동기화 없이 한 플레이 있음", "고를 게 있어요 (다음 시작)"},
+                          *const LEN[6] = {"Not checked", "Same as the cloud", "Progress not uploaded", "This device only", "Played without the sync", "A choice waits (next start)"};
+        static const int LCOL[6] = {STV_COL_DIM, STV_COL_GOOD, STV_COL_WARN, STV_COL_DIM, STV_COL_WARN, STV_COL_WARN};
+        int lk = ci->local >= 0 && ci->local < 6 ? ci->local : 0; snprintf(p->val[1], sizeof p->val[1], "%s", ko ? LKO[lk] : LEN[lk]); p->col[1] = LCOL[lk];
+        if (ci->files >= 0) { char z[32]; ss_fmt_size(z, sizeof z, ci->size); if (ko) snprintf(p->val[2], sizeof p->val[2], "%s · 파일 %lld개", z, (long long)ci->files); else snprintf(p->val[2], sizeof p->val[2], "%s · %lld files", z, (long long)ci->files); }
+        else snprintf(p->val[2], sizeof p->val[2], "-");
+        if (ci->avail) snprintf(p->val[3], sizeof p->val[3], ko ? "기기 이름 %s" : "Device name %s", ci->device); else snprintf(p->val[3], sizeof p->val[3], "%s", L("연결 안 됨", "Not linked"));
+        snprintf(p->up, sizeof p->up, "%s", L("지금 올리기", "Upload now")); p->up_off = !ci->can_upload;
+        if (ci->act == DM_CLOUD_ACT_UPLOAD) snprintf(p->up_note, sizeof p->up_note, "%s", L("올리는 중…", "Uploading…"));
+        else if (n->last_act == DM_CLOUD_ACT_UPLOAD && ci->result[0]) snprintf(p->up_note, sizeof p->up_note, "%s", ci->result);
+        else snprintf(p->up_note, sizeof p->up_note, "%s", ci->can_upload ? L("안 올린 진행 있어요", "Progress not uploaded") : !ci->avail || ci->mode == 2 || ci->trial ? L("쓸 수 없어요", "Not available")
+                      : !ci->online ? L("연결 안 됨", "Not connected") : L("올릴 진행 없음", "Nothing to upload"));
+        snprintf(p->back, sizeof p->back, "%s", L("클라우드 세이브로 되돌리기", "Back to the cloud save")); p->back_off = !ci->can_restore;
+        if (ci->act == DM_CLOUD_ACT_RESTORE) { if (ci->progress >= 0) snprintf(p->back_note, sizeof p->back_note, ko ? "받는 중 · %d%%" : "Downloading · %d%%", ci->progress / 10); else snprintf(p->back_note, sizeof p->back_note, "%s", L("되돌리는 중…", "Restoring…")); }
+        else if (n->hint_until > mono) snprintf(p->back_note, sizeof p->back_note, "%s", L("길게 눌러요 (1.5초)", "Hold it (1.5 s)"));
+        else if (n->last_act == DM_CLOUD_ACT_RESTORE && ci->result[0]) snprintf(p->back_note, sizeof p->back_note, "%s", ci->result);
+        else snprintf(p->back_note, sizeof p->back_note, "%s", ci->can_restore ? L("A 길게 · 이 기기 세이브는 백업 1칸에", "Hold A · this device's save to the backup slot") : !ci->avail || ci->mode == 2 || ci->trial ? L("쓸 수 없어요", "Not available")
+                      : !ci->online ? L("연결 안 됨", "Not connected") : L("클라우드에 세이브 없음", "None in the cloud"));
+        p->hold = n->holding ? (int)((mono - n->hold_t0) * 1000 / 1500) : 0;
+        snprintf(p->keys, sizeof p->keys, "%s", L("↑↓←→ 고르기 · A 선택 · B 돌아가기", "↑↓←→ choose · A select · B back")); p->sel = n->sel[1];
+        v->anim = n->holding || ci->act || ci->checking || n->hint_until > mono;
+    } else {
+        stv_apppage *p = &v->ap;
+        snprintf(p->title, sizeof p->title, "%s", L("앱 설정", "App settings")); snprintf(p->label[0], sizeof p->label[0], "%s", L("시작", "Start")); snprintf(p->label[1], sizeof p->label[1], "%s", L("게임 데이터", "Game data"));
+        snprintf(p->quick, sizeof p->quick, "%s", L("바로 시작", "Start at once")); p->quick_on = n->quick;
+        snprintf(p->quick_desc[0], sizeof p->quick_desc[0], "%s", L("켜면 이 런처 없이 바로 게임을 시작해요.", "On: the game starts without this launcher."));
+        snprintf(p->quick_desc[1], sizeof p->quick_desc[1], "%s", L("켤 때 −를 누르고 있으면 런처가 다시 열려요.", "Hold − while it starts to open the launcher again."));
+        p->nrow = 3; snprintf(p->key[0], sizeof p->key[0], "%s", L("게임 데이터", "Game data")); snprintf(p->key[1], sizeof p->key[1], "%s", L("셰이더 캐시", "Shader cache")); snprintf(p->key[2], sizeof p->key[2], "%s", L("마지막 확인", "Last checked"));
+        const char *st = n->vrun ? L("확인 중", "checking") : n->data_off ? L("오프라인", "offline") : n->data_rc == DS_DONE || n->data_rc == DS_UPTODATE ? L("최신", "up to date") : L("준비됨", "ready");
+        if (n->data_known && n->data_bytes) { fmt_gb(a, sizeof a, n->data_bytes); snprintf(p->val[0], sizeof p->val[0], "%s · %s", a, st); } else snprintf(p->val[0], sizeof p->val[0], "%s", st);
+        if (n->shader_bytes > 0) fmt_gb(p->val[1], sizeof p->val[1], (uint64_t)n->shader_bytes); else snprintf(p->val[1], sizeof p->val[1], "%s", L("없음", "None"));
+        if (n->checked_t > 0) ss_fmt_when(p->val[2], sizeof p->val[2], n->checked_t, now, ko); else snprintf(p->val[2], sizeof p->val[2], "-");
+        dm_cloud_info ci2 = *ci; (void)ci2;
+        if (n->vrun) { int pc = n->vpr.total ? (int)(n->vpr.done * 100 / n->vpr.total) : 0;
+            snprintf(p->verify, sizeof p->verify, ko ? "%s · %d%%" : "%s · %d%%", n->vpr.phase == DS_PH_DOWNLOAD || n->vpr.phase == DS_PH_UNPACK ? L("다시 받는 중", "Downloading") : L("확인 중", "Checking"), pc); }
+        else snprintf(p->verify, sizeof p->verify, "%s", L("데이터 다시 확인", "Check the data again"));
+        p->verify_off = !n->verify_ok; snprintf(p->clear, sizeof p->clear, "%s", L("셰이더 캐시 비우기", "Clear the shader cache")); p->clear_off = n->shader_bytes <= 0 || x->phase == PH_PREP;
+        if (n->amsg[0]) snprintf(p->note, sizeof p->note, "%s", n->amsg);
+        else if (!n->verify_ok && !n->vrun && (n->data_off || !n->has_server)) snprintf(p->note, sizeof p->note, "%s", n->has_server ? L("오프라인이라 데이터 다시 확인을 할 수 없어요.", "Offline: the data cannot be checked again.")
+                                                                                                               : L("이 앱은 데이터 서버가 없어 다시 확인할 수 없어요.", "This app has no data server to check against."));
+        else snprintf(p->note, sizeof p->note, "%s", L("데이터 다시 확인은 파일을 하나씩 검사해 망가진 것만 다시 받아요.", "Checking the data again reads every file and downloads only the damaged ones."));
+        snprintf(p->keys, sizeof p->keys, "%s", L("↑↓←→ 고르기 · A 선택 · B 돌아가기", "↑↓←→ choose · A select · B back")); p->sel = n->sel[2];
+        v->anim = n->vrun;
+    }
+    (void)b;
+}
+static void build_view(stv_view *v, const snap_t *x, const stv_rate *rate, dm_cloud_view *cv, dm_cloud_view *dq, const stv_step *steps, const dm_cloud_info *ci) {
     memset(v, 0, sizeof *v); v->bar = -1; int ko = korean(); char a[48], b[48], t[200];
     snprintf(v->name, sizeof v->name, "%s", V.name); snprintf(v->version, sizeof v->version, "%s%s", V.version, V.first_run ? L(" · 처음 실행", " · first start") : "");
     v->icon = R.icon; v->icon_w = R.iw; v->icon_h = R.ih; v->glow = R.glow;
@@ -336,6 +461,8 @@ static void build_view(stv_view *v, const snap_t *x, const stv_rate *rate, dm_cl
             if (cv->nbtn) snprintf(v->foot, sizeof v->foot, "%s", L("B · 동기화 없이 플레이", "B · play without the sync"));
         }
     }
+    if (x->ln.on && cv->ask && !v->ask) v->ask = cv;   // (a question of a check the launcher asked for)
+    if (x->ln.on && !v->ask && x->phase != PH_NOTICE && !(x->phase == PH_DATA && (v->bar >= 0 || x->status >= 0))) build_launcher(v, x, steps, ci);   // else the steps: a download, an error
 }
 static struct {   // libEGL / libGLESv2, opened here (the host links neither)
     EGLDisplay (*GetDisplay)(EGLNativeDisplayType); EGLBoolean (*Initialize)(EGLDisplay, EGLint *, EGLint *); EGLBoolean (*ChooseConfig)(EGLDisplay, const EGLint *, EGLConfig *, EGLint, EGLint *);
@@ -403,25 +530,38 @@ static void *screen_thread(void *a) {
     for (;;) {
         if (S.lost) { gl_drop(); S.lost = 0; S.released = 1; pthread_cond_broadcast(&S.cv); }
         if (V.closing) break;
-        snap_t x = {V.phase, S.status, S.wait_s, S.wait_tot, V.need_net, P.done, P.total}; x.p = S.pr; snprintf(x.msg, sizeof x.msg, "%s", S.msg);
+        dm_cloud_info ci; memset(&ci, 0, sizeof ci); ci.progress = -1; int fire = 0;
+        if (LN.on) {   // (savecloud.h: its lock is never held while this file's is taken)
+            dm_cloud_info_get(&ci); int64_t tm = now_ms();
+            if (LN.holding && tm - LN.hold_t0 >= 1500) { LN.holding = 0; fire = 1; LN.last_act = DM_CLOUD_ACT_RESTORE; }   // Back to the cloud save held 1.5 s
+            if (LN.want && LN.gate && !lnr_busy_locked(&ci)) go_locked();
+            LN.verify_ok = verify_ok_locked(&ci);
+        }
+        snap_t x = {V.phase, S.status, S.wait_s, S.wait_tot, V.need_net, P.done, P.total}; x.p = S.pr; snprintf(x.msg, sizeof x.msg, "%s", S.msg); x.ln = LN;
         if (x.phase == PH_NOTICE) { memcpy(x.nt_ko, NT.ko, sizeof NT.ko); memcpy(x.nt_en, NT.en, sizeof NT.en); memcpy(x.nt_detail, NT.detail, sizeof NT.detail); }
         stv_step steps[STV_NSTEPS]; memcpy(steps, V.step, sizeof steps); ANativeWindow *w = S.win; int64_t t = now_ms();
         dm_cloud_view cv; memset(&cv, 0, sizeof cv); cv.progress = -1;
-        if (x.phase == PH_CLOUD) dm_cloud_view_get(&cv);   // (savecloud.h: its lock is never held while this file's is taken)
+        if (x.phase == PH_CLOUD || LN.on) dm_cloud_view_get(&cv);   // (savecloud.h: its lock is never held while this file's is taken)
         if (x.phase != last_phase) { stv_rate_reset(&rate); last_phase = x.phase; }
         if (x.phase == PH_DATA && (x.p.phase == DS_PH_DOWNLOAD || x.p.phase == DS_PH_UNPACK) && x.p.total)   // network bytes only: a resumed part's bytes join done at once, not the speed
             stv_rate_feed(&rate, t, x.p.phase == DS_PH_DOWNLOAD ? (double)x.p.net : (double)x.p.done, (double)(x.p.total - (x.p.done < x.p.total ? x.p.done : x.p.total)));
         if (x.phase == PH_PREP && x.pt) stv_rate_feed(&rate, t, x.pd, x.pt - x.pd);
         int urgent = x.phase == PH_NOTICE || (x.phase == PH_CLOUD && cv.urgent) || (x.phase == PH_DATA && x.status >= 0);
-        int show = w && x.phase != PH_NONE && (V.shown || urgent || t - V.t0 > 300), animated = 0;
+        int show = w && (LN.on || (x.phase != PH_NONE && (V.shown || urgent || t - V.t0 > 300))), animated = 0;   // (the launcher: at once, and with no step running)
         if (show && !gl_tried) { gl_tried = 1; G.ok = !gl_load(); if (!G.ok) { LOG("[RED] start screen: no EGL / GLES 2: the start runs without its screen"); gl_end(); } }
         if (show && G.ok) {
             pthread_mutex_unlock(&S.mu);
+            if (fire && dm_cloud_act(DM_CLOUD_ACT_RESTORE)) LOG("[RED] launcher: Back to the cloud save cannot run now");
+            if (x.ln.on) {   // the pages' numbers: the pack's size once its data step ended, the shader cache's, this device's save on the Cloud page
+                if (!x.ln.data_known && V.step[STV_DATA].state == STV_DONE && x.phase != PH_DATA && !x.ln.vrun) { uint64_t db = data_bytes_now(); pthread_mutex_lock(&S.mu); LN.data_bytes = db; LN.data_known = 1; pthread_mutex_unlock(&S.mu); x.ln.data_bytes = db; x.ln.data_known = 1; }
+                if (x.ln.page == 2 || !x.ln.shader_bytes) { int64_t sb = shader_bytes_now(); pthread_mutex_lock(&S.mu); LN.shader_bytes = sb; pthread_mutex_unlock(&S.mu); x.ln.shader_bytes = sb; }
+                if (x.ln.page == 1) dm_cloud_local_refresh();
+            }
             if (!R.tried) res_load();
             int ww = ANativeWindow_getWidth(w), wh = ANativeWindow_getHeight(w), cw = ww, ch = wh;
             if (cw > 2560) { cw /= 2; ch /= 2; }   // (a screen bigger than that: half its size, filtered up)
             if (cw > 0 && ch > 0 && (c.w != cw || c.h != ch)) { free(c.px); c.px = malloc((size_t)cw * ch * 4); c.w = c.px ? cw : 0; c.h = c.px ? ch : 0; }
-            if (c.px) { stv_view v; dm_cloud_view dq; build_view(&v, &x, &rate, &cv, &dq, steps); stv_draw(&c, &v, t / 1000.0); animated = stv_animated(&v); gl_show(&c, w); }
+            if (c.px) { stv_view v; dm_cloud_view dq; build_view(&v, &x, &rate, &cv, &dq, steps, &ci); stv_draw(&c, &v, t / 1000.0); animated = stv_animated(&v); gl_show(&c, w); }
             pthread_mutex_lock(&S.mu);
             if (!V.shown) LOG("start screen: shown (%lld ms after the start)", (long long)(t - V.t0));
             V.shown = 1;
@@ -489,10 +629,14 @@ void dm_start_screen_open(ANativeActivity *act, const char *root) {
     snprintf(p, sizeof p, "%s/sync.txt", root);
     if (stat(p, &st)) { V.step[STV_CLOUD].state = STV_SKIP; snprintf(V.step[STV_CLOUD].note, sizeof V.step[STV_CLOUD].note, "%s", L("사용 안 함", "Off")); }
     checked_path(p, sizeof p); size_t n = 0; char *ck = p[0] ? ds_read(p, &n, 64) : NULL; V.checked[0] = 0;
+    if (ck) LN.checked_t = strtoll(ck, NULL, 10);
     if (ck) { time_t t = (time_t)strtoll(ck, NULL, 10); struct tm tm; if (t > 0 && localtime_r(&t, &tm)) snprintf(V.checked, sizeof V.checked, korean() ? "%d월 %d일" : "%d/%d", tm.tm_mon + 1, tm.tm_mday); free(ck); }
+    lnr_path(p, sizeof p); char *lq = p[0] ? ds_read(p, &n, 256) : NULL; LN.quick = lq && strstr(lq, "quick=1") != NULL; free(lq);
+    LN.on = !LN.quick; LN.sel[0] = 3; LN.has_server = V.has_server;
+    LOG("launcher: %s", LN.on ? "shown while the start runs; the game starts with Start" : "start at once (− while it starts opens it)");
     pthread_mutex_unlock(&S.mu);
     pthread_t t;
-    if (pthread_create(&t, NULL, screen_thread, NULL)) { LOG("[RED] start screen: cannot start its thread: the start runs without it"); return; }
+    if (pthread_create(&t, NULL, screen_thread, NULL)) { LOG("[RED] start screen: cannot start its thread: the start runs without it"); pthread_mutex_lock(&S.mu); LN.on = 0; pthread_mutex_unlock(&S.mu); return; }
     pthread_detach(t);
     pthread_mutex_lock(&S.mu); V.open = 1; pthread_mutex_unlock(&S.mu);
 }
@@ -512,7 +656,7 @@ void dm_start_screen_close(void) {
 // The input before the game that is not the cloud's (front_android.c on_input_early): the first start's Retry when it has no network. 1 when it was the screen's
 int dm_start_input(const AInputEvent *e) {
     pthread_mutex_lock(&S.mu); int on = V.phase == PH_DATA && V.need_net && S.status >= 0; ANativeWindow *w = S.win; int ws = S.wait_s, wt = S.wait_tot; pthread_mutex_unlock(&S.mu);
-    if (!on) return 0;
+    if (!on) return lnr_input(e);   // (the launcher's, and − at a start without it)
     int go = 0;
     if (AInputEvent_getType(e) == AINPUT_EVENT_TYPE_KEY) {
         int k = AKeyEvent_getKeyCode(e);
@@ -605,7 +749,8 @@ static void *sync_thread(void *a) {
     char note[96];
     if (rc == DS_OFFLINE && net) { if (V.checked[0]) snprintf(note, sizeof note, korean() ? "오프라인 · 마지막 확인 %s" : "Offline · last checked %s", V.checked); else snprintf(note, sizeof note, "%s", L("오프라인", "Offline")); }
     else snprintf(note, sizeof note, "%s", rc == DS_DONE && net ? L("받음", "Downloaded") : rc == DS_OFFLINE ? L("준비됨", "Ready") : L("최신", "Up to date"));
-    pthread_mutex_lock(&S.mu); V.need_net = 0; S.status = -1; V.phase = PH_NONE; V.unreached = unreached; V.step[STV_DATA].state = STV_DONE; snprintf(V.step[STV_DATA].note, sizeof V.step[STV_DATA].note, "%s", note);
+    pthread_mutex_lock(&S.mu); V.need_net = 0; S.status = -1; V.phase = PH_NONE; V.unreached = unreached;
+    LN.data_rc = rc; LN.data_net = net && (rc == DS_DONE || rc == DS_UPTODATE); LN.data_off = net && rc == DS_OFFLINE; if (LN.data_net) LN.checked_t = (int64_t)time(NULL); V.step[STV_DATA].state = STV_DONE; snprintf(V.step[STV_DATA].note, sizeof V.step[STV_DATA].note, "%s", note);
     pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
     phase_end();
     return NULL;
@@ -725,4 +870,199 @@ int dm_cloud_screen_hit(float x, float y, int *kind) {
     if (ww <= 0 || wh <= 0) return -1;
     dm_cloud_view v; dm_cloud_view_get(&v);
     return stv_hit(&v, ww, wh, x, y, kind);
+}
+
+// ---- the launcher (Launcher.dc.html and its pages): the start screen from onCreate on while the start runs behind it, the game started by its Start (A) once the
+// start is ready (dm_launcher_gate, front_android.c, where the game would start). Off when the game's "start at once" is on (nx2a_launcher.txt in the app's storage):
+// then the start is as it was (the steps, nothing drawn in the first 300 ms), unless − (Select) is pressed while it runs. A question of the start (the cloud's cards,
+// the first start's download) is drawn over it; everything it loaded goes with the screen (dm_start_screen_close) ----
+static void lnr_path(char *o, size_t n) { if (S.act && S.act->internalDataPath) snprintf(o, n, "%s/nx2a_launcher.txt", S.act->internalDataPath); else o[0] = 0; }
+static void lnr_save_quick(int on) {
+    char p[700]; lnr_path(p, sizeof p); if (!p[0]) return;
+    char t[32]; int n = snprintf(t, sizeof t, "quick=%d\n", on ? 1 : 0); if (ds_write(p, t, (size_t)n)) LOG("[RED] launcher: cannot write %s (errno %d)", p, errno);
+}
+static int lnr_busy_locked(const dm_cloud_info *ci) { return LN.vrun || ci->act || ci->checking; }   // a launcher's action runs: the game waits for it
+static void go_locked(void) {   // the game starts (the main thread's gate_ready)
+    char b = 1; LN.gate = 0; LN.want = 0;
+    if (LN.gpipe[1] < 0 || write(LN.gpipe[1], &b, 1) != 1) LOG("[RED] launcher: cannot wake the main thread");
+    else LOG("launcher: the game starts%s", LN.nosync ? " (without the sync)" : "");
+}
+static int gate_ready(int fd, int events, void *data) {
+    (void)events; (void)data; char b; if (read(fd, &b, 1) != 1) return 1;
+    pthread_mutex_lock(&S.mu); void (*go)(void) = LN.go; LN.go = NULL; int w = LN.gpipe[1]; LN.gpipe[0] = LN.gpipe[1] = -1; pthread_mutex_unlock(&S.mu);
+    close(fd); if (w >= 0) close(w);
+    if (go) go();
+    return 0;   // (the fd is removed)
+}
+// front_android.c, on the main thread where the game would start: 1 when the launcher holds it (go() is called on the main thread once Start is pressed and the start is
+// ready), 0 to start it now (no launcher, or Start was pressed before and nothing runs)
+int dm_launcher_gate(void (*go)(void)) {
+    pthread_mutex_lock(&S.mu);
+    if (!LN.on || !V.open || V.closing) { pthread_mutex_unlock(&S.mu); return 0; }
+    dm_cloud_info ci; dm_cloud_info_get(&ci);
+    if (LN.want && !lnr_busy_locked(&ci)) { LN.want = 0; pthread_mutex_unlock(&S.mu); LOG("launcher: ready, Start was pressed before: the game starts"); return 0; }
+    ALooper *lp = ALooper_forThread(); int np[2];
+    if (!lp || pipe(np)) { pthread_mutex_unlock(&S.mu); LOG("[RED] launcher: no looper: the game starts"); return 0; }
+    if (ALooper_addFd(lp, np[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, gate_ready, NULL) != 1) { close(np[0]); close(np[1]); pthread_mutex_unlock(&S.mu); LOG("[RED] launcher: no looper: the game starts"); return 0; }
+    LN.gpipe[0] = np[0]; LN.gpipe[1] = np[1]; LN.go = go; LN.gate = 1; pthread_cond_broadcast(&S.cv);
+    pthread_mutex_unlock(&S.mu);
+    LOG("launcher: the start is ready; the game starts with Start");
+    return 1;
+}
+void dm_launcher_start_now(int nosync) {   // (savecloud_android.c, a card's play without the sync: as Start pressed)
+    pthread_mutex_lock(&S.mu); if (LN.on) { LN.want = 1; LN.nosync |= nosync; LN.page = 0; pthread_cond_broadcast(&S.cv); } pthread_mutex_unlock(&S.mu);
+}
+static uint64_t data_bytes_now(void) {   // the pack's size, from files.json ("bytes", else its files summed); 0 when there is none
+    char p[1100]; snprintf(p, sizeof p, "%s/%s", S.root[0] ? S.root : getenv("DM_ROOT") ? getenv("DM_ROOT") : ".", DS_LIST);
+    size_t n = 0; char *t = ds_read(p, &n, 256u << 20); ds_list l; uint64_t b = 0;
+    if (t && !ds_parse(t, n, &l)) { b = l.bytes; if (!b) for (int i = 0; i < l.n; i++) b += l.f[i].size; ds_free(&l); }
+    free(t); return b;
+}
+static int64_t shader_bytes_now(void) {   // the shader cache: the pipeline cache and the preparation's mark (gfx_vk_pipeline_cache.inc, gfx_vk_gpl.inc)
+    const char *root = getenv("DM_ROOT"); char p[700]; struct stat st; int64_t b = 0; static const char *const F[2] = {"vk_pipeline_cache.bin", "vk_gpl.id"};
+    for (int i = 0; i < 2 && root; i++) { snprintf(p, sizeof p, "%s/%s", root, F[i]); if (!stat(p, &st)) b += (int64_t)st.st_size; }
+    return b;
+}
+static void shader_clear(void) {   // the next start prepares the shaders again (this run's game keeps what it loaded)
+    const char *root = getenv("DM_ROOT"); char p[700]; static const char *const F[2] = {"vk_pipeline_cache.bin", "vk_gpl.id"}; int bad = 0;
+    for (int i = 0; i < 2 && root; i++) { snprintf(p, sizeof p, "%s/%s", root, F[i]); if (unlink(p) && errno != ENOENT) bad = 1; }
+    LOG("launcher: the shader cache %s", bad ? "could not be removed whole" : "removed: the next start prepares the shaders again");
+    pthread_mutex_lock(&S.mu); snprintf(LN.amsg, sizeof LN.amsg, "%s", bad ? L("셰이더 캐시를 다 지우지 못했어요", "The shader cache could not be cleared whole") : L("셰이더 캐시를 비웠어요 · 다음 시작 때 다시 준비해요", "Cleared · the shaders are prepared again at the next start"));
+    LN.shader_bytes = shader_bytes_now(); pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+}
+static void verify_note(void *u, const ds_progress *p) { (void)u; pthread_mutex_lock(&S.mu); LN.vpr = *p; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); }
+static void *verify_thread(void *a) {   // Check the data again: every file's SHA-256 against the server's list, what is damaged downloaded again (datasync.h ds_ctx.verify)
+    (void)a; pthread_setname_np(pthread_self(), "dataverify");
+    JavaVM *vm = S.act->vm; jhttp h = {0}; int rc = DS_ERR_NET, fixed = 0; char err[256] = "";
+    if ((*vm)->AttachCurrentThread(vm, &h.E, NULL) != JNI_OK || jhttp_init(&h)) LOG("[RED] launcher: no Java for the data's check");
+    else {
+        pthread_mutex_lock(&S.mu); S.deadline = 0; S.netdown = 0; pthread_mutex_unlock(&S.mu);
+        ds_ctx c = {.root = S.root, .package = S.package, .fetch = http_fetch, .fu = &h, .free_bytes = free_bytes, .note = verify_note, .log = sync_log, .verify = 1};
+        int64_t t0 = now_ms(); rc = ds_sync(&c); fixed = c.fixed; snprintf(err, sizeof err, "%s", c.err);
+        LOG("launcher: the data checked file by file: %s (%lld ms)", rc == DS_DONE ? "damaged files downloaded again" : rc == DS_UPTODATE ? "nothing damaged" : err, (long long)(now_ms() - t0));
+        if (rc == DS_DONE || rc == DS_UPTODATE) { char p[700], t[32]; checked_path(p, sizeof p); int n = snprintf(t, sizeof t, "%lld\n", (long long)time(NULL)); if (p[0]) ds_write(p, t, (size_t)n); }
+        if (h.buf) (*h.E)->DeleteGlobalRef(h.E, h.buf);
+        (*vm)->DetachCurrentThread(vm);
+    }
+    pthread_mutex_lock(&S.mu);
+    LN.vrun = 0; LN.vbad = rc != DS_DONE && rc != DS_UPTODATE;
+    if (rc == DS_DONE) snprintf(LN.amsg, sizeof LN.amsg, korean() ? "망가진 파일 %d개를 다시 받았어요" : "%d damaged files downloaded again", fixed);
+    else if (rc == DS_UPTODATE) snprintf(LN.amsg, sizeof LN.amsg, "%s", L("망가진 파일이 없어요", "No file is damaged"));
+    else snprintf(LN.amsg, sizeof LN.amsg, "%s", ds_error_text(rc));
+    if (!LN.vbad) { LN.checked_t = (int64_t)time(NULL); LN.data_known = 0; }   // (counted again)
+    pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+    return NULL;
+}
+static int verify_ok_locked(const dm_cloud_info *ci) { return S.base[0] && LN.data_net && !LN.vrun && V.phase == PH_NONE && !lnr_busy_locked(ci); }
+
+// what a key does on the launcher's page (the main thread)
+enum { K_UP, K_DOWN, K_LEFT, K_RIGHT, K_A, K_B };
+static void lnr_activate(int page, int sel, int touch) {   // A (or a touch) on the page's sel
+    dm_cloud_info ci; dm_cloud_info_get(&ci);
+    pthread_mutex_lock(&S.mu);
+    int act = 0;   // what runs once the lock is let go: 1 play without the sync, 2 a mode, 3 Upload now, 4 verify, 5 shader cache
+    if (page == 0) {
+        if (sel == 0) { LN.want = 1; LN.nosync = 1; act = 1; }
+        else if (sel == 1) { LN.page = 1; LN.sel[1] = ci.mode >= 0 && ci.mode <= 2 ? ci.mode : 0; LN.last_act = 0; }
+        else if (sel == 2) { LN.page = 2; LN.sel[2] = 0; LN.amsg[0] = 0; }
+        else if (sel == 3) { LN.want = 1; LOG("launcher: Start%s", LN.gate ? "" : " (the start is not ready: it starts once it is)"); }
+    } else if (page == 1) {
+        if (sel <= 2) act = 2;
+        else if (sel == 3 && ci.can_upload) { act = 3; LN.last_act = DM_CLOUD_ACT_UPLOAD; }
+        else if (sel == 4 && ci.can_restore && !touch) { LN.holding = 1; LN.hold_t0 = now_ms(); LN.hold_touch = 0; }
+    } else if (page == 2) {
+        if (sel == 0) { LN.quick = !LN.quick; lnr_save_quick(LN.quick); LOG("launcher: start at once %s", LN.quick ? "on (− at the start opens the launcher)" : "off"); }
+        else if (sel == 1 && verify_ok_locked(&ci)) { act = 4; LN.vrun = 1; LN.amsg[0] = 0; memset(&LN.vpr, 0, sizeof LN.vpr); }
+        else if (sel == 2 && LN.shader_bytes > 0 && V.phase != PH_PREP) act = 5;
+    }
+    pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+    if (act == 1) { LOG("launcher: Play without the sync"); if (dm_cloud_play_unsynced() < 0) { pthread_mutex_lock(&S.mu); LN.nosync = 0; pthread_mutex_unlock(&S.mu); } }
+    else if (act == 2) dm_cloud_set_mode(sel);
+    else if (act == 3) dm_cloud_act(DM_CLOUD_ACT_UPLOAD);
+    else if (act == 4) { pthread_t t; if (pthread_create(&t, NULL, verify_thread, NULL)) { pthread_mutex_lock(&S.mu); LN.vrun = 0; pthread_mutex_unlock(&S.mu); } else pthread_detach(t); }
+    else if (act == 5) shader_clear();
+}
+static void lnr_hold_end(int touch) {   // A (or the finger) let go of Back to the cloud save before 1.5 s: "hold it"
+    pthread_mutex_lock(&S.mu);
+    if (LN.holding && LN.hold_touch == touch) { LN.holding = 0; LN.hint_until = now_ms() + 1500; pthread_cond_broadcast(&S.cv); }
+    pthread_mutex_unlock(&S.mu);
+}
+static void lnr_key(int k) {
+    pthread_mutex_lock(&S.mu); int page = LN.page, *sel = &LN.sel[page], s0 = *sel, want = LN.want, go = -1;
+    if (want && page == 0) { if (k == K_B) { LN.want = LN.nosync = 0; LOG("launcher: Start cancelled"); } pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); return; }
+    if (LN.holding && k != K_A) LN.holding = 0;
+    if (page == 0) { if (k == K_UP && s0 > 0) (*sel)--; else if (k == K_DOWN && s0 < 3) (*sel)++; else if (k == K_A) go = s0; }
+    else if (page == 1) {
+        if (k == K_UP) *sel = s0 <= 2 ? (s0 > 0 ? s0 - 1 : 0) : 3; else if (k == K_DOWN) *sel = s0 <= 2 ? (s0 < 2 ? s0 + 1 : 2) : 4;
+        else if (k == K_RIGHT && s0 <= 2) *sel = 3; else if (k == K_LEFT && s0 >= 3) { dm_cloud_info ci; dm_cloud_info_get(&ci); *sel = ci.mode >= 0 && ci.mode <= 2 ? ci.mode : 0; }
+        else if (k == K_A) go = s0; else if (k == K_B) { LN.page = 0; LN.sel[0] = 1; }
+    } else {
+        if (k == K_UP) *sel = 0; else if (k == K_DOWN && s0 == 0) *sel = 1; else if (k == K_LEFT && s0 == 2) *sel = 1; else if (k == K_RIGHT && s0 == 1) *sel = 2;
+        else if (k == K_A) go = s0; else if (k == K_B) { LN.page = 0; LN.sel[0] = 2; }
+    }
+    pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+    if (go >= 0) lnr_activate(page, go, 0);
+}
+static int lnr_hit(float x, float y, int *page) {   // a touch on the page shown (its layout: startscreen.c stv_page_hit)
+    pthread_mutex_lock(&S.mu); ANativeWindow *w = S.win; *page = LN.page; pthread_mutex_unlock(&S.mu);
+    if (!w) return -1;
+    stv_view v; memset(&v, 0, sizeof v); v.screen = *page == 0 ? STV_SCREEN_LAUNCHER : *page == 1 ? STV_SCREEN_CLOUD : STV_SCREEN_APP; v.cp.nrow = 4;
+    return stv_page_hit(&v, ANativeWindow_getWidth(w), ANativeWindow_getHeight(w), x, y);
+}
+static void lnr_touch(int act, float x, float y) {
+    int page, i = lnr_hit(x, y, &page);
+    if (act == AMOTION_EVENT_ACTION_DOWN) {
+        if (page == 1 && i == 4) { dm_cloud_info ci; dm_cloud_info_get(&ci);
+            if (ci.can_restore) { pthread_mutex_lock(&S.mu); LN.sel[1] = 4; LN.holding = 1; LN.hold_t0 = now_ms(); LN.hold_touch = 1; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); } }
+    } else if (act == AMOTION_EVENT_ACTION_MOVE) { if (!(page == 1 && i == 4)) { pthread_mutex_lock(&S.mu); if (LN.holding && LN.hold_touch) LN.holding = 0; pthread_mutex_unlock(&S.mu); } }
+    else if (act == AMOTION_EVENT_ACTION_CANCEL) { pthread_mutex_lock(&S.mu); if (LN.hold_touch) LN.holding = 0; pthread_mutex_unlock(&S.mu); }
+    else if (act == AMOTION_EVENT_ACTION_UP) {
+        pthread_mutex_lock(&S.mu); int held = LN.holding && LN.hold_touch, want = LN.want; pthread_mutex_unlock(&S.mu);
+        if (held) { lnr_hold_end(1); return; }
+        if (i < 0 || (want && page == 0)) return;
+        pthread_mutex_lock(&S.mu); LN.sel[page] = i; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+        lnr_activate(page, i, 1);
+    }
+}
+// the launcher is what the screen shows (not a download, an error of the data or a notice)
+static int lnr_visible_locked(void) {
+    if (!LN.on || V.phase == PH_NOTICE) return 0;
+    if (V.phase == PH_DATA && (S.status >= 0 || V.need_net || ((S.pr.phase == DS_PH_DOWNLOAD || S.pr.phase == DS_PH_UNPACK) && S.pr.total))) return 0;
+    return 1;
+}
+static int lnr_input(const AInputEvent *e) {   // 1 when it was the launcher's
+    pthread_mutex_lock(&S.mu); int open = V.open && !V.closing, on = LN.on, vis = on && lnr_visible_locked(); pthread_mutex_unlock(&S.mu);
+    if (!open) return 0;
+    int type = AInputEvent_getType(e);
+    if (type == AINPUT_EVENT_TYPE_KEY) {
+        int k = AKeyEvent_getKeyCode(e), a = AKeyEvent_getAction(e);
+        if (k == AKEYCODE_VOLUME_UP || k == AKEYCODE_VOLUME_DOWN || k == AKEYCODE_VOLUME_MUTE) return 0;
+        if (!on) {   // start at once: − (Select) while the start runs opens the launcher
+            if (k != AKEYCODE_BUTTON_SELECT || a != AKEY_EVENT_ACTION_DOWN) return 0;
+            pthread_mutex_lock(&S.mu); LN.on = 1; LN.page = 0; LN.sel[0] = 3; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+            LOG("launcher: − at the start: the launcher opens"); return 1;
+        }
+        if (!vis) return 0;
+        dm_cloud_view cv; dm_cloud_view_get(&cv); if (cv.ask) return 0;   // a question of the cloud's: its input
+        int isA = k == AKEYCODE_BUTTON_A || k == AKEYCODE_DPAD_CENTER || k == AKEYCODE_ENTER || k == AKEYCODE_NUMPAD_ENTER || k == AKEYCODE_BUTTON_START;
+        if (a == AKEY_EVENT_ACTION_UP) { if (isA) lnr_hold_end(0); return 1; }
+        if (a != AKEY_EVENT_ACTION_DOWN || AKeyEvent_getRepeatCount(e)) return 1;
+        if (k == AKEYCODE_DPAD_UP) lnr_key(K_UP); else if (k == AKEYCODE_DPAD_DOWN) lnr_key(K_DOWN); else if (k == AKEYCODE_DPAD_LEFT) lnr_key(K_LEFT); else if (k == AKEYCODE_DPAD_RIGHT) lnr_key(K_RIGHT);
+        else if (isA) lnr_key(K_A); else if (k == AKEYCODE_BUTTON_B || k == AKEYCODE_BACK || k == AKEYCODE_ESCAPE) lnr_key(K_B);
+        return 1;
+    }
+    if (type != AINPUT_EVENT_TYPE_MOTION || !vis) return 0;
+    dm_cloud_view cv; dm_cloud_view_get(&cv); if (cv.ask) return 0;
+    int src = AInputEvent_getSource(e), act = AMotionEvent_getAction(e) & AMOTION_EVENT_ACTION_MASK;
+    if ((src & AINPUT_SOURCE_JOYSTICK) == AINPUT_SOURCE_JOYSTICK) {   // the hat and the left stick: one step a push
+        static int hx, hy; float x = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_HAT_X, 0), y = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_HAT_Y, 0);
+        float sx = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_X, 0), sy = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_Y, 0);
+        if (fabsf(x) < 0.5f && fabsf(y) < 0.5f) { if (fabsf(sx) > 0.7f) x = sx; if (fabsf(sy) > 0.7f) y = sy; }
+        int dx = x < -0.5f ? -1 : x > 0.5f ? 1 : 0, dy = y < -0.5f ? -1 : y > 0.5f ? 1 : 0;
+        if (dx && dx != hx) lnr_key(dx < 0 ? K_LEFT : K_RIGHT);
+        if (dy && dy != hy) lnr_key(dy < 0 ? K_UP : K_DOWN);
+        hx = dx; hy = dy; return 1;
+    }
+    lnr_touch(act, AMotionEvent_getX(e, 0), AMotionEvent_getY(e, 0));
+    return 1;
 }

@@ -91,6 +91,7 @@ __attribute__((weak)) int dm_cloud_available(void) { return 0; }
 __attribute__((weak)) int dm_cloud_status(char *note, int cap) { if (cap > 0) note[0] = 0; return DM_CLOUD_OFF; }
 __attribute__((weak)) unsigned dm_cloud_menu_ver(void) { return 0; }
 __attribute__((weak)) int dm_cloud_mark(int64_t *age_ms) { (void)age_ms; return 0; }
+__attribute__((weak)) int dm_cloud_manual(void) { return 0; }
 __attribute__((weak)) int dm_overlay_custom(int layout, int ctl, float *x, float *y, float *s) { (void)layout; (void)ctl; (void)x; (void)y; *s = 1; return 0; }
 __attribute__((weak)) int dm_overlay_custom_ver(void) { return 0; }
 __attribute__((weak)) int dm_overlay_hidden(int layout, int ctl) { (void)layout; (void)ctl; return 0; }
@@ -533,7 +534,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             char note[32]; int cs = dm_cloud_status(note, sizeof note), on = cs != DM_CLOUD_DISABLED && cs != DM_CLOUD_TRIAL && cs != DM_CLOUD_OFF; float sx0 = x1 - sw;
             cv_rrect(cv, sx0, cy - sh / 2, x1, cy + sh / 2, sh / 2, on ? C_ACCENT : C_OFF);
             cv_disc(cv, on ? x1 - sh / 2 : sx0 + sh / 2, cy, sh / 2 - fmaxf(2, sh * 0.1f), on ? C_WHITE : C_KNOB_OFF);
-            const char *word = OVM_CLOUD_WORDS[cs]; cv_text(cv, sx0 - gap - cv_text_w(word, is), cy, word, is, cs == DM_CLOUD_CONFLICT || cs == DM_CLOUD_AUTH ? C_ACCENT : on ? C_WHITE : C_DIM);
+            const char *word = dm_cloud_manual() && cs != DM_CLOUD_CONFLICT && cs != DM_CLOUD_AUTH && cs != DM_CLOUD_UPLOADING ? "Manual" : OVM_CLOUD_WORDS[cs]; cv_text(cv, sx0 - gap - cv_text_w(word, is), cy, word, is, cs == DM_CLOUD_CONFLICT || cs == DM_CLOUD_AUTH ? C_ACCENT : on ? C_WHITE : C_DIM);   // (manual: on, "Manual")
         } else if (it == OVM_CLOUD_UP) {   // Upload now while one is owed; else when the last one went up
             char note[32], v[48]; int cs = dm_cloud_status(note, sizeof note);
             if (cs == DM_CLOUD_PENDING || cs == DM_CLOUD_OFFLINE) { float bw = cv_text_w("Upload now", is) + 2 * sh, b[4] = {x1 - bw, cy - g.bh / 2, bw, g.bh}; cv_button_s(cv, b, "Upload now", 0, 0, is); }

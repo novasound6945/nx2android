@@ -94,6 +94,7 @@ __attribute__((weak)) void vk_window_lost(void) {}   // the backend lets go of t
 void dm_sync_window(ANativeWindow *w); int dm_sync_begin(ANativeActivity *act, const char *root, void (*done)(void));   // datasync_android.c: the data from a server (porter --data-url)
 int dm_prep_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(void));   // datasync_android.c: the shader preparation (gfx_vk_gpl.inc vk_gpl_prepare), on the same screen
 int dm_notice_begin(ANativeActivity *act, ANativeWindow *w, const char *const ko[3], const char *const en[3], const char *detail);   // datasync_android.c: a notice the start stops at
+int dm_launcher_gate(void (*go)(void));   // datasync_android.c: 1 when the launcher holds the game until its Start (go() then, on this thread), 0 to start it now
 // A window made again (back from Home or the lock screen) while the pause menu (or the editor, a text entry, the save picker) holds the game: the game sends no frame,
 // so the new surface stayed black (a few frames a second at most, the menu not drawn) until the menu's state changed (B closed it). The last frame and the menu are
 // presented again at once (and every vsync after while the menu stays: gfx_vk_present.c present_thread)
@@ -1493,7 +1494,7 @@ static void *input_thread(void *a) {
 static _Atomic int g_syncing;   // the data download runs (dm_sync_begin): the game, its input thread with it, starts when it ends (game_start)
 static int on_input_early(int fd, int events, void *data) {   // the main thread's looper: events before the game, none of them handled but the start screen's (the cloud's questions, Retry)
     (void)fd; (void)events; (void)data; AInputEvent *e;
-    while (g_queue && AInputQueue_getEvent(g_queue, &e) >= 0) { if (AInputQueue_preDispatchEvent(g_queue, e)) continue; AInputQueue_finishEvent(g_queue, e, dm_cloud_input(e) || dm_start_input(e)); }
+    while (g_queue && AInputQueue_getEvent(g_queue, &e) >= 0) { if (AInputQueue_preDispatchEvent(g_queue, e)) continue; AInputQueue_finishEvent(g_queue, e, dm_start_input(e) || dm_cloud_input(e)); }   // (the launcher's first: it hands a question's input to the cloud)
     return 1;
 }
 static void on_queue_created(ANativeActivity *a, AInputQueue *q) {
@@ -1624,7 +1625,7 @@ static int rewrite_abi_fits(char *why, size_t cap) {   // 0: a module of another
 }
 static int g_sdk;
 static void game_start(ANativeActivity *act, int late); static void game_start_late(void); static int prep_start(void); static void prep_late(void);
-static void game_run(ANativeActivity *act); static void cloud_done(int quit);
+static void game_run(ANativeActivity *act); static void cloud_done(int quit); static void launch_go(void);
 __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActivity *act, void *saved, size_t saved_size) {
     (void)saved; (void)saved_size;
     g_act = act;
@@ -1695,6 +1696,7 @@ static void game_start(ANativeActivity *act, int late) {   // late: after onCrea
     // cloud_done on this thread; without sync.txt (or in a trial build) the game starts at once, as before
     atomic_store(&g_syncing, 1);
     if (dm_cloud_begin(act, phone_window(), cloud_done)) return;
+    if (dm_launcher_gate(launch_go)) return;   // the launcher: the game starts with its Start (launch_go); the start screen keeps the input (g_syncing)
     atomic_store(&g_syncing, 0);
     game_run(act);
 }
@@ -1702,11 +1704,19 @@ static void cloud_done(int quit) {   // the main thread, once the cloud sync's s
     if (g_queue) AInputQueue_detachLooper(g_queue);
     atomic_store(&g_syncing, 0);
     if (quit) { LOG("cloud: the player cancelled the start: the app ends"); g_quit = 1; dm_start_screen_close(); act_finish(g_act); return; }
+    if (dm_launcher_gate(launch_go)) { atomic_store(&g_syncing, 1); if (g_queue) AInputQueue_attachLooper(g_queue, ALooper_forThread(), 2, on_input_early, NULL); return; }
+    game_run(g_act);
+    if (g_queue) { while (!g_ilooper) usleep(1000); AInputQueue_attachLooper(g_queue, g_ilooper, 1, on_input, NULL); }
+}
+static void launch_go(void) {   // the main thread, the launcher's Start once the start was ready: the game starts (its input queue to the input thread)
+    if (g_queue) AInputQueue_detachLooper(g_queue);
+    atomic_store(&g_syncing, 0);
     game_run(g_act);
     if (g_queue) { while (!g_ilooper) usleep(1000); AInputQueue_attachLooper(g_queue, g_ilooper, 1, on_input, NULL); }
 }
 static void game_run(ANativeActivity *act) {   // the game itself: settings, the input and host threads
     dm_start_screen_close();   // the window is the game's from here: the start screen's thread, EGL and everything it loaded are gone before the host starts
+    dm_cloud_game_start();     // (the save's uploads, when this run syncs: from the game's start, not the check's, so the launcher's choices come first)
     settings_load(); aspect_variant(act); limit_apply(1);   // (after the variant's env-4x3.txt, which comes after env.txt: Auto gives back what both set)
     dm_haptics_android_start(act, atomic_load(&g_set_rumble)); dm_lan_android_start(act);
     g_vm = act->vm;

@@ -14,4 +14,6 @@ int dm_saves_list(dm_save_entry *out, int max);   // the save folders in saves/,
 int dm_saves_request_import(const char *name);    // name is imported at the next start: 0, or -1 when the request cannot be written
 const char *dm_saves_save_path(void);   // $DM_SAVE (the committed save) and <DM_SAVE>_device, once dm_saves_paths ran
 const char *dm_saves_device_path(void);
-int dm_saves_import_now(const char *name);   // saves/<name> (and <name>.device) is the save now (the current one backed up first, as an import at the start): 0, or -1 (result.txt says why)
+// saves/<name> (and <name>.device) is the save now (the current one backed up first, as an import at the start; slot: into saves/<slot>, overwritten, else
+// <stamp>-before-import): 0, or -1 (result.txt says why)
+int dm_saves_import_now(const char *name, const char *slot);

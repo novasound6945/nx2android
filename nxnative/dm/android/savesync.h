@@ -229,13 +229,19 @@ static int ss_cfg_text(const char *txt, ss_cfg *c) {   // 1: on (an http(s):// a
 // seq, sha256: the server's seq the save was last the same as, and the archive's hash then ("" for no save); pending: an upload is owed; conflict: the server moved on
 // while this device's save changed too (cseq, ctime, cdevice: the server's meta then); force, fbase: the player chose this device's save over the server's newer one (the
 // next upload's base is fbase); auth: the server refused the token; last_up: when the save last went up (Unix seconds). have: the file was there (a first setup has none).
-// offline_play (op_seq, op_sha: the last sync's seq and hash then): a run played without the sync (B at the start, a trial build, the game's sync switched off): the next
-// start with the sync asks before this device's save goes up, if it changed since. off: the player switched this game's sync off (the pause menu)
+// offline_play (op_seq, op_sha: the last sync's seq and hash then): a run played without the sync (B at the start, the launcher's Play without the sync, a trial build,
+// this device only): the next start with the sync asks before this device's save goes up, if it changed since. mode: this game's SS_MODE_* (the launcher's Cloud save
+// page, the pause menu's switch; an older state's off=1 reads as SS_MODE_LOCAL, and off= is still written for it). relink: the mode left SS_MODE_LOCAL, so the next
+// check is a first connection (ss_set_mode). m_device, m_time: the cloud's save as the server last told (who uploaded it, when; "" and 0 for none); checked: when the
+// server last answered (Unix seconds), for the launcher while it is offline
+enum { SS_MODE_AUTO,     // each save goes up about 3 s after the game commits it, and when the app leaves the screen or ends (the default)
+       SS_MODE_MANUAL,   // nothing goes up by itself: the player's Upload now (the pause menu, the launcher, the start's question) only; the next start asks about a save not sent
+       SS_MODE_LOCAL };  // this device only: nothing downloaded, uploaded or signalled (no network at all): a save kept for testing
 typedef struct { int have; uint64_t seq; char sha[65]; int pending, conflict, force, auth; uint64_t fbase, cseq; int64_t ctime, last_up; char cdevice[64];
-                 int offline_play, off; uint64_t op_seq; char op_sha[65]; } ss_state;
+                 int offline_play, mode, relink; uint64_t op_seq; char op_sha[65]; char m_device[64]; int64_t m_time, checked; } ss_state;
 static int ss_hex64(const char *s) { if (strlen(s) != 64) return 0; for (; *s; s++) if (!((*s >= '0' && *s <= '9') || (*s >= 'a' && *s <= 'f'))) return 0; return 1; }
 static void ss_state_text(const char *txt, ss_state *s) {
-    memset(s, 0, sizeof *s); s->have = 1; char line[256];
+    memset(s, 0, sizeof *s); s->have = 1; char line[256]; int mode = -1, off = 0;
     for (const char *p = txt; *p;) {
         const char *e = strchr(p, '\n'); size_t k = e ? (size_t)(e - p) : strlen(p); if (k >= sizeof line) k = sizeof line - 1;
         memcpy(line, p, k); line[k] = 0; p += k + (e != NULL); if (!e) p += strlen(p);
@@ -254,14 +260,20 @@ static void ss_state_text(const char *txt, ss_state *s) {
         else if (!strcmp(line, "offline_play")) s->offline_play = atoi(v) != 0;
         else if (!strcmp(line, "op_seq")) s->op_seq = strtoull(v, NULL, 10);
         else if (!strcmp(line, "op_sha256")) { if (ss_hex64(v)) snprintf(s->op_sha, sizeof s->op_sha, "%s", v); }
-        else if (!strcmp(line, "off")) s->off = atoi(v) != 0;
+        else if (!strcmp(line, "off")) off = atoi(v) != 0;
+        else if (!strcmp(line, "mode")) { int k = atoi(v); if (k >= SS_MODE_AUTO && k <= SS_MODE_LOCAL) mode = k; }
+        else if (!strcmp(line, "relink")) s->relink = atoi(v) != 0;
+        else if (!strcmp(line, "m_device")) snprintf(s->m_device, sizeof s->m_device, "%s", v);
+        else if (!strcmp(line, "m_time")) s->m_time = strtoll(v, NULL, 10);
+        else if (!strcmp(line, "checked")) s->checked = strtoll(v, NULL, 10);
     }
+    s->mode = mode >= 0 ? mode : off ? SS_MODE_LOCAL : SS_MODE_AUTO;   // (a state from before the modes: its switch off is this device only)
 }
 static int ss_state_format(const ss_state *s, char *out, size_t cap) {
     return snprintf(out, cap, "seq=%llu\nsha256=%s\npending=%d\nconflict=%d\ncseq=%llu\nctime=%lld\ncdevice=%s\nforce=%d\nfbase=%llu\nauth=%d\nlast_up=%lld\n"
-                              "offline_play=%d\nop_seq=%llu\nop_sha256=%s\noff=%d\n",
+                              "offline_play=%d\nop_seq=%llu\nop_sha256=%s\noff=%d\nmode=%d\nrelink=%d\nm_device=%s\nm_time=%lld\nchecked=%lld\n",
         (unsigned long long)s->seq, s->sha, s->pending, s->conflict, (unsigned long long)s->cseq, (long long)s->ctime, s->cdevice, s->force, (unsigned long long)s->fbase, s->auth, (long long)s->last_up,
-        s->offline_play, (unsigned long long)s->op_seq, s->op_sha, s->off);
+        s->offline_play, (unsigned long long)s->op_seq, s->op_sha, s->mode == SS_MODE_LOCAL, s->mode, s->relink, s->m_device, (long long)s->m_time, (long long)s->checked);
 }
 static void ss_state_load(const char *path, ss_state *s) {   // no file: a first setup (have 0)
     size_t n = 0; char *t = ds_read(path, &n, 1 << 16);
@@ -370,21 +382,24 @@ enum { SS_GO_UPTODATE,   // the server has this device's save: the state takes t
        SS_GO_CONFLICT,   // both changed since the last sync (or a first setup finds a save on both): the player chooses, nothing is overwritten by itself
        SS_GO_OFFLINE,    // the server did not answer: the game starts with the device's save
        SS_GO_AUTH,       // the server refused the token: as offline, and the menu says so
-       SS_GO_ASK_OFFLINE };   // a run without the sync changed this device's save and the server did not move: the player chooses (upload it, or go back to the server's)
+       SS_GO_ASK_OFFLINE,  // a run without the sync changed this device's save and the server did not move: the player chooses (back to the cloud's, upload it, keep it)
+       SS_GO_ASK_MANUAL }; // SS_MODE_MANUAL: this device's save changed (or none is on the server) and the server did not move: the player chooses (upload it, or keep it)
 // local: this device's archive hash, NULL when it has no save. *pending: whether an upload is owed afterwards (a conflict or a question owes none until the player chooses;
 // a run played without the sync owes none either: the next start with the sync asks). The caller clears offline_play after any decision with the server's answer but
-// SS_GO_ASK_OFFLINE and SS_GO_CONFLICT (those once the player chose)
+// SS_GO_ASK_OFFLINE, SS_GO_ASK_MANUAL and SS_GO_CONFLICT (those once the player chose), and relink once the player chose or nothing was to choose.
+// relink (the mode left this device only) is a first setup: a save on both that differs is the player's choice, never this device's going up by itself
 static int ss_decide(int net, const ss_meta *m, const ss_state *st, const char *local, int *pending) {
     int changed = local ? strcmp(local, st->sha) != 0 : st->sha[0] != 0;   // since the last sync
+    int manual = st->mode == SS_MODE_MANUAL;
     *pending = 0;
     if (net == SS_NET_FAIL || net == SS_NET_UNAUTH) { *pending = local && (changed || st->pending || st->force) && !st->conflict && !st->offline_play; return net == SS_NET_FAIL ? SS_GO_OFFLINE : SS_GO_AUTH; }
-    if (net == SS_NET_NOTFOUND || !m->seq) { *pending = local != NULL; return local ? SS_GO_PENDING : SS_GO_NOTHING; }
+    if (net == SS_NET_NOTFOUND || !m->seq) { if (local && manual) return SS_GO_ASK_MANUAL; *pending = local != NULL; return local ? SS_GO_PENDING : SS_GO_NOTHING; }
     if (local && !strcmp(local, m->sha)) return SS_GO_UPTODATE;   // the same save on both (also a first setup that found the same one)
     if (!local) return SS_GO_DOWNLOAD;                              // nothing here to lose
-    if (!st->have) return SS_GO_CONFLICT;                           // a first setup with a save on both: the player chooses
+    if (!st->have || st->relink) return SS_GO_CONFLICT;             // a first setup (or back from this device only) with a save on both: the player chooses
     if (st->offline_play && changed) return m->seq == st->seq ? SS_GO_ASK_OFFLINE : SS_GO_CONFLICT;   // played without the sync: never uploaded by itself
-    if (st->force && m->seq == st->fbase) { *pending = 1; return SS_GO_PENDING; }   // the player chose this device's save, and the server did not move since
-    if (m->seq == st->seq) { *pending = changed; return changed ? SS_GO_PENDING : SS_GO_UPTODATE; }
+    if (st->force && m->seq == st->fbase) { if (manual) return SS_GO_ASK_MANUAL; *pending = 1; return SS_GO_PENDING; }   // the player chose this device's save, the server did not move since
+    if (m->seq == st->seq) { if (changed && manual) return SS_GO_ASK_MANUAL; *pending = changed; return changed ? SS_GO_PENDING : SS_GO_UPTODATE; }
     if (m->seq > st->seq && !changed) return SS_GO_DOWNLOAD;
     return SS_GO_CONFLICT;   // the server moved and this device's save changed too (or the server went back to an older seq: neither is overwritten by itself)
 }
@@ -394,11 +409,45 @@ static int ss_decide(int net, const ss_meta *m, const ss_state *st, const char *
 // reached" question. A first failure of the cloud's own request (the data's server answered) still asks
 static int ss_start_offline(int dev_net, int data_unreached) { return dev_net == 0 || data_unreached; }
 // whether this run syncs: SS_RUN_NONE no sync.txt (nothing at all, as before the sync existed); SS_RUN_SUPPRESSED a trial build (an APK without a data server, a debuggable
-// one, env.txt's DM_SAVESYNC=off) or the game's sync switched off: no network, the run is marked offline_play; SS_RUN_SYNC the start's sync
+// one, env.txt's DM_SAVESYNC=off: always this device only) or the game's mode SS_MODE_LOCAL: no network, the run is marked offline_play; SS_RUN_SYNC the start's sync
 enum { SS_RUN_NONE, SS_RUN_SUPPRESSED, SS_RUN_SYNC };
-static int ss_run_mode(int cfg_on, int trial, int switched_off) { return !cfg_on ? SS_RUN_NONE : trial || switched_off ? SS_RUN_SUPPRESSED : SS_RUN_SYNC; }
+static int ss_run_mode(int cfg_on, int trial, int local_only) { return !cfg_on ? SS_RUN_NONE : trial || local_only ? SS_RUN_SUPPRESSED : SS_RUN_SYNC; }
 // a run without the sync: marked so the next start with it asks before this device's save goes up (op_*: the last sync's seq and hash, kept as they were)
 static void ss_mark_offline_play(ss_state *s) { if (!s->offline_play) { s->offline_play = 1; s->op_seq = s->seq; snprintf(s->op_sha, sizeof s->op_sha, "%s", s->sha); } s->have = 1; }
+// The player's mode. To this device only: the run is marked offline_play (nothing goes up from now on). Back from it to a mode that syncs: the last sync is forgotten and
+// relink set, so the next check is a first connection: a test save that differs from the cloud's is asked about (the conflict's cards), never uploaded over it or
+// replaced by itself. Between automatic and manual nothing else changes
+static void ss_set_mode(ss_state *s, int mode) {
+    if (mode < SS_MODE_AUTO || mode > SS_MODE_LOCAL || mode == s->mode) return;
+    if (mode == SS_MODE_LOCAL) ss_mark_offline_play(s);
+    else if (s->mode == SS_MODE_LOCAL) { s->relink = 1; s->seq = s->fbase = 0; s->sha[0] = 0; s->pending = s->conflict = s->force = s->offline_play = 0; s->op_seq = 0; s->op_sha[0] = 0; }
+    s->mode = mode; s->have = 1;
+}
+// whether a mode sends this device's save for an event: the game saved (SS_EV_SAVE), the app leaves the screen or ends (SS_EV_LEAVE: onPause, the menu's Exit game),
+// the player asked for it (SS_EV_ASKED: Upload now in the menu or the launcher, a card of the start chosen). This device only sends nothing, ever
+enum { SS_EV_SAVE, SS_EV_LEAVE, SS_EV_ASKED };
+static int ss_uploads(int mode, int ev) { return mode == SS_MODE_AUTO || (mode == SS_MODE_MANUAL && ev == SS_EV_ASKED); }
+// The server's save is this device's now (the launcher's Back to the cloud save, the start's download): now_sha the archive of the save as it is after the import,
+// srv_sha the server's (they differ only when a device save of this one stayed: that goes up then)
+static void ss_after_restore(ss_state *s, uint64_t seq, const char *now_sha, const char *srv_sha) {
+    s->seq = seq; snprintf(s->sha, sizeof s->sha, "%s", now_sha); s->pending = strcmp(now_sha, srv_sha) != 0;
+    s->conflict = s->force = s->offline_play = s->relink = 0; s->have = 1;
+}
+// This device's save against the cloud's, as the launcher's Cloud save page says it. local: this device's archive hash as it is now ("" for no save, NULL not known)
+enum { SS_LOCAL_UNKNOWN,   // not checked (not known, or back from this device only and not checked since)
+       SS_LOCAL_SAME,      // the cloud has it
+       SS_LOCAL_OWED,      // changed since the last sync, not sent
+       SS_LOCAL_ONLY,      // this device only: nothing is compared
+       SS_LOCAL_PLAYED,    // played without the sync and changed: the next start asks
+       SS_LOCAL_CONFLICT };// the server moved on while it changed: the next start's cards
+static int ss_local_state(const ss_state *s, const char *local) {
+    if (s->mode == SS_MODE_LOCAL) return SS_LOCAL_ONLY;
+    if (s->conflict) return SS_LOCAL_CONFLICT;
+    if (!local || s->relink || !s->have) return SS_LOCAL_UNKNOWN;
+    int changed = strcmp(local, s->sha) != 0;
+    if (s->offline_play && changed) return SS_LOCAL_PLAYED;
+    return changed || s->pending || s->force ? SS_LOCAL_OWED : SS_LOCAL_SAME;
+}
 // Another device and the game, from the session's last signal (now: this device's clock, Unix seconds). The apps upload each save within seconds, so whether the cloud
 // has the latest progress is whether that device's last save went up (dirty), not whether it closed the game: an app killed before its close leaves an open session
 // that warns nobody once its heartbeats stop.
@@ -423,6 +472,15 @@ static void ss_fmt_date(char *o, size_t n, int64_t t, int ko) {
     static const char *const mon[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
     if (ko) snprintf(o, n, "%d월 %d일 %s %d:%02d", tm.tm_mon + 1, tm.tm_mday, tm.tm_hour < 12 ? "오전" : "오후", h12, tm.tm_min);
     else snprintf(o, n, "%s %d, %d:%02d %s", mon[tm.tm_mon], tm.tm_mday, h12, tm.tm_min, tm.tm_hour < 12 ? "AM" : "PM");
+}
+// "오늘 오전 6:41", "어제 오후 11:32" (this device's day), else ss_fmt_date's
+static void ss_fmt_when(char *o, size_t n, int64_t t, int64_t now, int ko) {
+    if (t <= 0) { snprintf(o, n, "-"); return; }
+    time_t a = (time_t)t, b = (time_t)now, y = (time_t)(now - 86400); struct tm ta, tb, ty; localtime_r(&a, &ta); localtime_r(&b, &tb); localtime_r(&y, &ty);
+    int h12 = ta.tm_hour % 12 ? ta.tm_hour % 12 : 12, today = ta.tm_year == tb.tm_year && ta.tm_yday == tb.tm_yday, yday = ta.tm_year == ty.tm_year && ta.tm_yday == ty.tm_yday;
+    if (!today && !yday) { ss_fmt_date(o, n, t, ko); return; }
+    if (ko) snprintf(o, n, "%s %s %d:%02d", today ? "오늘" : "어제", ta.tm_hour < 12 ? "오전" : "오후", h12, ta.tm_min);
+    else snprintf(o, n, "%s %d:%02d %s", today ? "Today" : "Yesterday", h12, ta.tm_min, ta.tm_hour < 12 ? "AM" : "PM");
 }
 static void ss_fmt_ago(char *o, size_t n, int64_t t, int64_t now, int ko) {
     if (t <= 0) { snprintf(o, n, "-"); return; }
@@ -462,9 +520,13 @@ static void ss_qenc(char *o, size_t n, const char *s) {
 // ---- while the game runs (savecloud_android.c's upload thread): what a tick does, what an upload's answer does to the state, which corner notes show. No question is ever
 // asked once the game runs: a conflict found then is kept for the next start's cards ----
 // A run that started offline (or lost the network) has no open session on the server: once the network is back it opens one (dirty while a save is owed) and the heartbeats
-// follow; an owed upload is tried at once then, its backoff forgotten. A run without the sync (B at the start, a trial build, the game's sync off) sends nothing, ever
+// follow; an owed upload is tried at once then, its backoff forgotten. A run without the sync (B at the start, a trial build, this device only) sends nothing, ever.
+// SS_MODE_MANUAL sends only what the player asks for (kick): a burst of commits is looked at (SS_DO_CHECK: hashed, whether it is owed, for the corner's mark), not sent,
+// and nothing owed is tried again by itself
 typedef struct {
-    int syncs;               // this run syncs (not skipped, not a trial build, not switched off, the token not refused)
+    int syncs;               // this run syncs (not skipped, not a trial build, not this device only, the token not refused)
+    int mode;                // SS_MODE_AUTO or SS_MODE_MANUAL
+    int kick;                // the player asked for an upload (the menu's Upload now, a card's choice)
     int net;                 // the device has a network now (ConnectivityManager): 1, 0, or -1 when not known
     int was_net;             // the last tick's net
     int sess_open;           // the server took this run's open (or a heartbeat)
@@ -472,12 +534,14 @@ typedef struct {
     int committed;           // a burst of the game's commits ended (no new one for a poll: about 3 s after it saved) and has not gone up
     int64_t now, next_try, last_hb;   // monotonic ms: when an owed upload is tried again (the backoff), the last heartbeat
 } ss_tick_in;
-enum { SS_DO_UPLOAD = 1, SS_DO_OPEN = 2, SS_DO_ALIVE = 4, SS_DO_RETRY_NOW = 8 };   // SS_DO_RETRY_NOW: the backoff forgotten (the network came back)
+enum { SS_DO_UPLOAD = 1, SS_DO_OPEN = 2, SS_DO_ALIVE = 4, SS_DO_RETRY_NOW = 8, SS_DO_CHECK = 16 };   // SS_DO_RETRY_NOW: the backoff forgotten (the network came back)
 static int ss_tick(const ss_tick_in *t) {
     if (!t->syncs) return 0;
-    if (t->net == 0) return 0;   // known offline: nothing is tried (no request that can only time out)
+    int self = ss_uploads(t->mode, SS_EV_SAVE), check = !self && t->committed ? SS_DO_CHECK : 0;   // (a check needs no network)
+    if (t->net == 0) return check;   // known offline: nothing is tried (no request that can only time out)
     int back = t->net == 1 && t->was_net == 0, act = back ? SS_DO_RETRY_NOW : 0;
-    if (!t->conflict && (t->committed || (t->owed && (back || t->now >= t->next_try)))) act |= SS_DO_UPLOAD;
+    if (!t->conflict && (t->kick || (self && (t->committed || (t->owed && (back || t->now >= t->next_try)))))) act |= SS_DO_UPLOAD;
+    else act |= check;
     if (!t->sess_open) act |= SS_DO_OPEN;   // (an open that failed is tried at each tick the network is up, as a heartbeat would be)
     else if (t->now - t->last_hb >= 60000) act |= SS_DO_ALIVE;
     return act;

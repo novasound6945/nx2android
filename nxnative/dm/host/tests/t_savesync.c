@@ -100,9 +100,14 @@ static void t_files(void) {
     CHECK(ss_cfg_text("url=ftp://x\ntoken=abc\n", &c) == 0, "not http: off");
     CHECK(ss_cfg_text(" url = http://10.0.0.2:8080 \r\ntoken= t \r\n", &c) == 1 && !strcmp(c.token, "t") && !strcmp(c.device, "android"), "spaces, CRLF, a default device");
     ss_state s = {0}, r; s.have = 1; s.seq = 7; snprintf(s.sha, sizeof s.sha, "%064d", 0); s.pending = 1; s.conflict = 1; s.cseq = 9; s.ctime = 1700000000; snprintf(s.cdevice, sizeof s.cdevice, "deck");
-    s.force = 1; s.fbase = 9; s.last_up = 1700000100; s.offline_play = 1; s.op_seq = 7; snprintf(s.op_sha, sizeof s.op_sha, "%s", s.sha); s.off = 1;
+    s.force = 1; s.fbase = 9; s.last_up = 1700000100; s.offline_play = 1; s.op_seq = 7; snprintf(s.op_sha, sizeof s.op_sha, "%s", s.sha); s.mode = SS_MODE_LOCAL;
+    s.relink = 1; snprintf(s.m_device, sizeof s.m_device, "nova"); s.m_time = 1700000200; s.checked = 1700000300;
     char b[1024]; ss_state_format(&s, b, sizeof b); ss_state_text(b, &r);
     CHECK(!memcmp(&s, &r, sizeof s), "the state reads back");
+    CHECK(strstr(b, "off=1\n") != NULL, "this device only still writes off=1 (an older build reads it as switched off)");
+    ss_state_text("seq=3\noff=1\n", &r); CHECK(r.mode == SS_MODE_LOCAL, "an older state's switch off: this device only");
+    ss_state_text("seq=3\noff=0\n", &r); CHECK(r.mode == SS_MODE_AUTO, "an older state's switch on: automatic");
+    ss_state_text("seq=3\noff=1\nmode=1\n", &r); CHECK(r.mode == SS_MODE_MANUAL, "mode= wins over off=");
     ss_meta m;
     const char *j = "{\"seq\": 12, \"sha256\": \"ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789\", \"size\": 4096, \"time\": 1763640000, \"device\": \"deck\", "
                     "\"gameVersion\": \"v196608\", \"build\": \"1.2\", \"extra\": [1, {\"a\": null}], \"session\": {\"device\": \"deck\", \"state\": \"open\", \"updated\": \"2026-11-20T12:00:00Z\"}}";
@@ -279,9 +284,67 @@ static void t_ingame(void) {
     CHECK(ss_after_put(&s2, 0, 0, A, NULL, 0) == SS_NOTE_WAITING && s2.pending, "no answer: waiting, owed");
 }
 
+// the modes: which events send the save, the upload thread's ticks, this device only and back, manual's question (17), the question after a run without the sync (16),
+// and the state after Back to the cloud save
+static void t_modes(void) {
+    CHECK(ss_uploads(SS_MODE_AUTO, SS_EV_SAVE) && ss_uploads(SS_MODE_AUTO, SS_EV_LEAVE) && ss_uploads(SS_MODE_AUTO, SS_EV_ASKED), "automatic: a save, the app leaving and the player's ask all go up");
+    CHECK(!ss_uploads(SS_MODE_MANUAL, SS_EV_SAVE) && !ss_uploads(SS_MODE_MANUAL, SS_EV_LEAVE) && ss_uploads(SS_MODE_MANUAL, SS_EV_ASKED), "manual: only what the player asks for");
+    CHECK(!ss_uploads(SS_MODE_LOCAL, SS_EV_SAVE) && !ss_uploads(SS_MODE_LOCAL, SS_EV_LEAVE) && !ss_uploads(SS_MODE_LOCAL, SS_EV_ASKED), "this device only: nothing, ever");
+    ss_tick_in t = {.syncs = 1, .mode = SS_MODE_MANUAL, .net = 1, .was_net = 1, .sess_open = 1, .committed = 1, .now = 10000, .last_hb = 9000};
+    CHECK(ss_tick(&t) == SS_DO_CHECK, "manual: a commit is looked at (owed or not), not sent (%d)", ss_tick(&t));
+    t.committed = 0; t.owed = 1; t.next_try = 0; CHECK(ss_tick(&t) == 0, "manual: an owed save is not tried again by itself");
+    t.was_net = 0; CHECK(!(ss_tick(&t) & SS_DO_UPLOAD), "manual: nor when the network comes back");
+    t.was_net = 1; t.kick = 1; CHECK(ss_tick(&t) == SS_DO_UPLOAD, "manual: Upload now sends it");
+    t.kick = 0; t.committed = 1; t.net = 0; CHECK(ss_tick(&t) == SS_DO_CHECK, "manual offline: the commit is still looked at (the corner's mark)");
+    t.mode = SS_MODE_AUTO; t.net = 1; CHECK(ss_tick(&t) == SS_DO_UPLOAD, "automatic: the commit goes up");
+    t.syncs = 0; CHECK(ss_tick(&t) == 0, "this device only (the run does not sync): nothing");
+    int p; ss_state s; ss_meta m;
+    // this device only, a test played, then automatic again: the next check is a first connection, so the test save is asked about, never sent over the cloud's
+    s = st_of(1, 4, B); ss_set_mode(&s, SS_MODE_LOCAL);
+    CHECK(s.mode == SS_MODE_LOCAL && s.offline_play && s.op_seq == 4, "to this device only: the run is marked played without the sync");
+    ss_set_mode(&s, SS_MODE_AUTO);
+    CHECK(s.mode == SS_MODE_AUTO && s.relink && !s.seq && !s.sha[0] && !s.offline_play && !s.pending, "back to automatic: the last sync forgotten, relink");
+    m = meta_of(4, B); CHECK(ss_decide(SS_NET_OK, &m, &s, A, &p) == SS_GO_CONFLICT && !p, "back from this device only with a test save: the cards, nothing sent");
+    m = meta_of(6, C); CHECK(ss_decide(SS_NET_OK, &m, &s, B, &p) == SS_GO_CONFLICT && !p, "the cloud moved meanwhile, this device kept the old save: the cards too (not a download over it)");
+    m = meta_of(4, B); CHECK(ss_decide(SS_NET_OK, &m, &s, B, &p) == SS_GO_UPTODATE, "the same save on both: nothing to ask");
+    CHECK(ss_decide(SS_NET_OK, &m, &s, NULL, &p) == SS_GO_DOWNLOAD, "no save here: the cloud's");
+    CHECK(ss_decide(SS_NET_NOTFOUND, &m, &s, A, &p) == SS_GO_PENDING && p, "nothing on the server: this device's goes up (nothing is overwritten)");
+    s = st_of(1, 4, B); ss_set_mode(&s, SS_MODE_MANUAL); CHECK(!s.relink && s.seq == 4 && !s.offline_play, "automatic to manual: nothing else changes");
+    ss_set_mode(&s, SS_MODE_AUTO); CHECK(!s.relink && s.seq == 4, "and back");
+    // manual: a save not sent; the next start asks (17), unless the cloud moved too (the conflict's cards)
+    s = st_of(1, 4, B); s.mode = SS_MODE_MANUAL; m = meta_of(4, B);
+    CHECK(ss_decide(SS_NET_OK, &m, &s, A, &p) == SS_GO_ASK_MANUAL && !p, "manual, changed, the cloud did not move: ask (upload / keep)");
+    m = meta_of(6, C); CHECK(ss_decide(SS_NET_OK, &m, &s, A, &p) == SS_GO_CONFLICT, "manual, changed, the cloud moved: the conflict's cards instead");
+    m = meta_of(6, C); CHECK(ss_decide(SS_NET_OK, &m, &s, B, &p) == SS_GO_DOWNLOAD, "manual, unchanged, the cloud moved: the cloud's, as automatic");
+    m = meta_of(4, B); CHECK(ss_decide(SS_NET_OK, &m, &s, B, &p) == SS_GO_UPTODATE, "manual, unchanged: up to date");
+    CHECK(ss_decide(SS_NET_NOTFOUND, &m, &s, A, &p) == SS_GO_ASK_MANUAL, "manual, nothing on the server: asked before it goes up");
+    CHECK(ss_decide(SS_NET_FAIL, &m, &s, A, &p) == SS_GO_OFFLINE && p, "manual offline: owed (the corner's mark), sent only when asked");
+    s.force = 1; s.fbase = 4; CHECK(ss_decide(SS_NET_OK, &m, &s, A, &p) == SS_GO_ASK_MANUAL, "manual, this device's chosen earlier but not sent: asked again");
+    // a run with Play without the sync (the launcher, or B on a card) changed the save: the next start asks (16), in automatic and in manual; offline nothing is asked
+    s = st_of(1, 4, B); ss_mark_offline_play(&s); m = meta_of(4, B);
+    CHECK(ss_decide(SS_NET_OK, &m, &s, A, &p) == SS_GO_ASK_OFFLINE && !p, "after a test play: ask (back to the cloud's / upload / keep)");
+    s.mode = SS_MODE_MANUAL; CHECK(ss_decide(SS_NET_OK, &m, &s, A, &p) == SS_GO_ASK_OFFLINE, "the same in manual");
+    CHECK(ss_decide(SS_NET_FAIL, &m, &s, A, &p) == SS_GO_OFFLINE && !p, "offline: no question, nothing owed");
+    CHECK(ss_local_state(&s, A) == SS_LOCAL_PLAYED, "the launcher says so (played without the sync)");
+    CHECK(ss_decide(SS_NET_OK, &m, &s, B, &p) == SS_GO_UPTODATE, "a test play that saved nothing: nothing to ask");
+    // Back to the cloud save: this device's goes to the backup slot, the cloud's is the save, the state is the cloud's
+    ss_after_restore(&s, 4, B, B);
+    CHECK(s.seq == 4 && !strcmp(s.sha, B) && !s.pending && !s.offline_play && !s.conflict && !s.relink, "after Back to the cloud save: synced");
+    CHECK(ss_decide(SS_NET_OK, &m, &s, B, &p) == SS_GO_UPTODATE && ss_local_state(&s, B) == SS_LOCAL_SAME, "the next start: up to date");
+    s = st_of(1, 4, B); s.relink = 1; ss_after_restore(&s, 6, C, C); CHECK(!s.relink && s.seq == 6, "a restore ends a relink too");
+    ss_after_restore(&s, 6, A, C); CHECK(s.pending, "a device save kept from before: what is there now goes up");
+    s = st_of(1, 4, B); CHECK(ss_local_state(&s, A) == SS_LOCAL_OWED && ss_local_state(&s, B) == SS_LOCAL_SAME && ss_local_state(&s, NULL) == SS_LOCAL_UNKNOWN, "the launcher's This device row");
+    s.mode = SS_MODE_LOCAL; CHECK(ss_local_state(&s, A) == SS_LOCAL_ONLY, "this device only");
+    s.mode = SS_MODE_AUTO; s.conflict = 1; CHECK(ss_local_state(&s, A) == SS_LOCAL_CONFLICT, "a conflict");
+    char o[64]; int64_t now = 1795176000;   // (local time: only the words are checked)
+    ss_fmt_when(o, sizeof o, now - 60, now, 1); CHECK(!strncmp(o, "오늘 ", 7) || !strncmp(o, "어제 ", 7), "%s", o);
+    ss_fmt_when(o, sizeof o, now - 10 * 86400, now, 1); CHECK(strstr(o, "월 ") != NULL, "%s", o);
+    ss_fmt_when(o, sizeof o, now - 60, now, 0); CHECK(!strncmp(o, "Today ", 6) || !strncmp(o, "Yesterday ", 10), "%s", o);
+}
+
 int main(void) {
     snprintf(g_tmp, sizeof g_tmp, "%s/t_savesync.%d", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid()); ss_rm_tree(g_tmp); mkdir(g_tmp, 0755);
-    t_tar(); t_files(); t_decide(); t_ingame();
+    t_tar(); t_files(); t_decide(); t_ingame(); t_modes();
     ss_rm_tree(g_tmp);
     printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
     return fails != 0;
