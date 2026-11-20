@@ -135,7 +135,7 @@ void dm_input_set(uint64_t b, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
 void dm_touch_set(const dm_touch *points, int n) { (void)points; touches = n; }
 static void (*dm_picture_rect)(float r[4]);
 ''' + pad + events + r'''
-static void controls(int shown);
+static void controls(int shown);   // 1: the gamepad, 0: the menu button only, -1: nothing (a controller in use)
 static void input_handoff(int test) {
     width = layout ? 2400 : 1920; height = 1080;
     atomic_store(&g_set_overlay, test != 6);
@@ -147,7 +147,7 @@ static void input_handoff(int test) {
     assert(handle_event(&pad) == 1);
     assert(g_btn & DM_BTN_A);
     assert(pad_publications == before + 1 && vibration == 42);
-    assert(dm_overlay_visible() == 2); controls(0);
+    assert(dm_overlay_visible() == 0); controls(-1);
     AInputEvent tap = {.source = AINPUT_SOURCE_TOUCHSCREEN, .type = AINPUT_EVENT_TYPE_MOTION,
                        .action = AMOTION_EVENT_ACTION_DOWN, .x = width * 0.5f, .y = height * 0.5f};
     assert(handle_event(&tap) == 1);
@@ -158,7 +158,10 @@ static void input_handoff(int test) {
     pad.axis[AMOTION_EVENT_AXIS_X] = 0.7f;
     assert(handle_event(&pad) == 1);
     assert(g_ax[0] == 0.7f && pad_publications == before + 2 && vibration == 42);
-    assert(dm_overlay_visible() == 2); controls(0);
+    assert(dm_overlay_visible() == 0); controls(-1);
+    tap.x = width * 0.5f; tap.y = height * 0.5f; tap.action = AMOTION_EVENT_ACTION_DOWN;   // a touch shows the gamepad (or its menu button) again
+    assert(handle_event(&tap) == 1 && dm_overlay_visible() == (test == 6 ? 2 : 1)); controls(test != 6);
+    tap.action = AMOTION_EVENT_ACTION_UP; assert(handle_event(&tap) == 1); tap.action = AMOTION_EVENT_ACTION_DOWN;
     for (int i = 0; i < OV_N; i++) if (OV_CTLS[i].kind == OV_MENU) {
         float b[4]; ov_box(&OV_CTLS[i], width, height, b);
         tap.x = b[0]; tap.y = b[1];
@@ -198,7 +201,7 @@ static void motion_handoff(void) {
         AInputEvent pad = {.source = AINPUT_SOURCE_JOYSTICK, .type = AINPUT_EVENT_TYPE_MOTION, .device = 42};
         pad.axis[code] = cases[i].active;
         assert(handle_event(&pad) == 1);
-        assert(dm_overlay_visible() == 2 && g_pad_used && atomic_load(&g_pad_in) == 42 && vibration == 42);
+        assert(dm_overlay_visible() == 0 && g_pad_used && atomic_load(&g_pad_in) == 42 && vibration == 42);
         assert(pad_buttons == cases[i].button);
         if (stick >= 0) assert(pad_sticks[stick] == (int32_t)(0.12f * DM_STICK_MAX));
 
@@ -234,8 +237,8 @@ static void controls(int shown) {
     assert(button >= 0 && menu >= 0);
     float b[4], m[4];
     ov_box(&OV_CTLS[button], W, H, b); ov_box(&OV_CTLS[menu], W, H, m);
-    assert(ctl_at(b[0], b[1], W, H) == (shown ? button : -1));
-    assert(ctl_at(m[0], m[1], W, H) == menu);
+    assert(ctl_at(b[0], b[1], W, H) == (shown > 0 ? button : -1));
+    assert(ctl_at(m[0], m[1], W, H) == (shown >= 0 ? menu : -1));   // shown -1: a controller in use, the menu button hidden with the gamepad (its menu key opens the menu)
     assert(ctl_at(W * 0.5f, H * 0.5f, W, H) == -1);
 }
 static void hidden_controls(void) {
@@ -267,11 +270,11 @@ int main(int argc, char **argv) {
         if (test == 1) {
             // A connected or used pad does not override the current input mode.
             atomic_store(&g_set_overlay, 1);
-            assert(dm_overlay_visible() == (touch ? 1 : 2)); controls(touch);
+            assert(dm_overlay_visible() == (touch ? 1 : 0)); controls(touch ? 1 : -1);
         } else if (test == 2) {
             // Off leaves a reachable menu and sends touches elsewhere to the game.
             atomic_store(&g_set_overlay, 0);
-            assert(dm_overlay_visible() == 2); controls(0);
+            assert(dm_overlay_visible() == (touch ? 2 : 0)); controls(touch ? 0 : -1);
             atomic_store(&g_edit, 1); controls(1);
         } else {
             // The actual menu action enables controls even with a used pad present,
