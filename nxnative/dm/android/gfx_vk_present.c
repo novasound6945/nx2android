@@ -392,9 +392,9 @@ static void cv_button(const ov_canvas *cv, const float b[4], const char *l, int 
 // The pause menu (overlay_layout.h: the rows, the tabs, the slider's track), in the raster's panel rectangle. Its letters are as large as a row allows (0.30 of
 // its height, about 2.7 mm on a 6.7" phone and 3.6 mm on the 8.8" tablet) and smaller only when the widest row would not fit beside its control
 static const char *const OVM_LABELS_EN[OVM_N] = {"Show gamepad", "Opacity", "Edit layout", "Rumble", "Show FPS", "Mode", "Export save", "Import save", "Face buttons", "Audio output", "Frame rate", "Resolution",
-                                                  "Detail distance", "Frame rate limit", "Cloud save", "Upload save", "Touch input", "Resume", ""};
+                                                  "Detail distance", "Frame rate limit", "Cloud save", "Upload save", "Touch input", "Resume", "Exit game", ""};
 static const char *const OVM_LABELS_ZH[OVM_N] = {"显示手柄", "透明度", "编辑布局", "震动", "显示帧率", "模式", "导出存档", "导入存档", "按键布局", "音频输出", "帧率", "分辨率",
-                                                  "细节距离", "帧率上限", "云存档", "上传存档", "触屏操作", "继续游戏", ""};
+                                                  "细节距离", "帧率上限", "云存档", "上传存档", "触屏操作", "继续游戏", "退出游戏", ""};
 #define OVM_LABELS (dm_ui_zh() ? OVM_LABELS_ZH : OVM_LABELS_EN)
 static const char *const OVM_BUTTONS_EN[OVM_N] = {[OVM_EDIT] = "Edit", [OVM_EXPORT] = "Export", [OVM_IMPORT] = "Import", [OVM_AUDIO] = "Select"};   // the rows that are a button: its word
 static const char *const OVM_BUTTONS_ZH[OVM_N] = {[OVM_EDIT] = "编辑", [OVM_EXPORT] = "导出", [OVM_IMPORT] = "导入", [OVM_AUDIO] = "选择"};
@@ -439,7 +439,13 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             cv_rrect(cv, r[0], r[1] + rh - 1, r[0] + rw, r[1] + rh, 0.5f, C_LINE);
             continue;
         }
-        if (it == OVM_RESUME) { const char *w = TR("Resume", "继续游戏"); cv_rrect(cv, r[0], r[1], r[0] + rw, r[1] + 1, 0.5f, C_LINE); cv_text(cv, r[0] + (rw - cv_text_w(w, is)) / 2, cy, w, is, C_ACCENT); continue; }
+        if (it == OVM_RESUME) {   // the button row: Exit game (left) beside Resume (right), each centred in its half (menu_touch splits the row at the same midline); the row's line stays
+            cv_rrect(cv, r[0], r[1], r[0] + rw, r[1] + 1, 0.5f, C_LINE);
+            const char *const w[2] = {OVM_LABELS[OVM_EXIT], OVM_LABELS[OVM_RESUME]};   // (by the items' ids: the words of OVM_EXIT and OVM_RESUME)
+            for (int k = 0; k < 2; k++) { int s = is; while (s > 1 && cv_text_w(w[k], s) > rw / 2 - rh * 0.3f) s--;   // the letters shrink only if the half would not hold them
+                cv_text(cv, r[0] + k * (rw / 2) + (rw / 2 - cv_text_w(w[k], s)) / 2, cy, w[k], s, k ? C_ACCENT : C_WHITE); }
+            continue;
+        }
         cv_text(cv, r[0] + rh * 0.15f, cy, OVM_LABELS[it], is, row == sel ? C_WHITE : C_DIM);
         if (it == OVM_OPACITY) {   // the slider: its track, filled to the value, the knob and the percent
             float t[3]; ov_menu_track(p, row, t); float f = (float)(op - OV_OPACITY_MIN) / (OV_OPACITY_MAX - OV_OPACITY_MIN), th = fmaxf(2, rh * 0.08f), kr = rh * 0.20f;

@@ -183,7 +183,7 @@ void dm_overlay_theme_done(const ov_theme *t);   // the pixels are on the GPU: t
 
 // ---- the pause menu: a panel in the middle of the window: a row of tabs, the open tab's rows, and Resume. Everything is placed in a panel rectangle p
 // (x, y, width, height: the window's for touches, the raster's for drawing), so the touches and the drawing agree ----
-enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_PAD, OVM_AUDIO, OVM_RATE, OVM_RES, OVM_DETAIL, OVM_LIMIT, OVM_CLOUD, OVM_CLOUD_UP, OVM_TOUCH, OVM_RESUME, OVM_TAB, OVM_N };   // OVM_TAB: the tabs' row;
+enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_PAD, OVM_AUDIO, OVM_RATE, OVM_RES, OVM_DETAIL, OVM_LIMIT, OVM_CLOUD, OVM_CLOUD_UP, OVM_TOUCH, OVM_RESUME, OVM_EXIT, OVM_TAB, OVM_N };   // OVM_TAB: the tabs' row;
             // OVM_EDIT: the layout editor; OVM_MODE: handheld (performance) or docked (resolution); OVM_EXPORT, OVM_IMPORT: the save manager (saves_android.c);
             // OVM_PAD: a controller's face buttons by their position or by their label (front_android.c pad_labels); OVM_RATE: the frame step's target, 30 or 60 fps,
             // for a game whose rewriter stubs step by the host's target; OVM_RES: the render scale of a game with a render-scale stub, in three steps. Both only
@@ -191,7 +191,8 @@ enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EX
             // (front_android.c limit_apply: Auto, 60, 40, 30, held through DM_FPS_PIN); OVM_AUDIO: the audio output, a row only where the app has outputs to choose
             // (dm_menu_audio_available: an external-screen port); OVM_CLOUD: the save's cloud sync for this game, a switch with its status in place of ON / OFF;
             // OVM_CLOUD_UP: Upload now while an upload is owed, else how the last one went. Both only with the files folder's sync.txt (savecloud_android.c dm_cloud_available);
-            // OVM_TOUCH: every touch is the game's own touch screen and the gamepad is not drawn (front_android.c g_set_touch, settings.txt touch=)
+            // OVM_TOUCH: every touch is the game's own touch screen and the gamepad is not drawn (front_android.c g_set_touch, settings.txt touch=); OVM_EXIT: the button
+            // row's Exit game beside Resume (front_android.c menu_do: the app ends as Android ends it - Activity.finish(), never a hard exit)
 #define OVM_TABS 2
 #define OVM_PER_TAB 11
 static const int OVM_TAB_ITEMS[OVM_TABS][OVM_PER_TAB] = {{OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_TOUCH, OVM_PAD, -1, -1, -1, -1, -1},

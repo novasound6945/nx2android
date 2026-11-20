@@ -62,6 +62,8 @@ static void ed_open(void) {}
 static void sp_open(void) {}
 static void save_export(void) {}
 static void menu_audio(void) {}
+static void *g_act; static int g_quit; static void act_finish(void *a) { (void)a; }   // (Exit game: menu_do)
+#define LOG(...) ((void)0)   // (until the harness's own, below)
 static void menu_close(void) {}
 static void dm_overlay_redraw(void) {}
 static void dm_cloud_menu_toggle(void) {}   // the Cloud save row (savecloud_android.c)
@@ -111,6 +113,7 @@ static struct { int sel; } g_tx;
 static int g_tx_mu;
 #define pthread_mutex_lock(m) ((void)(m))
 #define pthread_mutex_unlock(m) ((void)(m))
+#undef LOG
 #define LOG(...) log_line(__VA_ARGS__)
 #define AInputEvent_getSource(e) ((e)->source)
 #define AInputEvent_getType(e) ((e)->type)
