@@ -311,10 +311,11 @@ static void *start_thread(void *a) {
         char u[1400]; url_of(u, sizeof u, "meta"); hres r; ss_meta m; memset(&m, 0, sizeof m);
         int got = http_do(E, "GET", u, NULL, 0, NULL, 3000, now_ms() + 5000, 256 << 10, &r, NULL);
         if (ended()) { ss_buf_free(&r.body); break; }
-        int net = got ? SS_NET_FAIL : r.code == 200 ? (ss_meta_parse((const char *)r.body.p, r.body.n, &m) ? SS_NET_FAIL : SS_NET_OK) : r.code == 404 ? SS_NET_NOTFOUND
+        int net = got ? SS_NET_FAIL : r.code == 200 ? (ss_meta_parse((const char *)r.body.p, r.body.n, &m) ? SS_NET_FAIL : SS_NET_OK) : r.code == 404 ? (ss_meta_parse((const char *)r.body.p, r.body.n, &m), m.seq = 0, SS_NET_NOTFOUND)
                 : r.code == 401 || r.code == 403 ? SS_NET_UNAUTH : SS_NET_FAIL;
         if (got) LOG("cloud: no answer from the server (%s): the game starts with this device's save unless the player retries", r.why);
         else if (net == SS_NET_FAIL) LOG("[RED] cloud: the server answered HTTP %d%s", r.code, r.code == 200 ? " with a meta that cannot be read" : "");
+        // (a 404 still carries the session, {"error":"none","session":…}: a game another device runs before its first upload is seen too)
         ss_buf_free(&r.body);
         if (net == SS_NET_FAIL || net == SS_NET_UNAUTH) {
             pthread_mutex_lock(&C.mu); C.st.auth = net == SS_NET_UNAUTH; int p; ss_decide(net, &m, &C.st, loc, &p); if (p) C.st.pending = 1; C.offline = net == SS_NET_FAIL; st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
@@ -333,7 +334,7 @@ static void *start_thread(void *a) {
             break;
         }
         pthread_mutex_lock(&C.mu); C.st.auth = 0; C.offline = 0; pthread_mutex_unlock(&C.mu);
-        if (net == SS_NET_OK && ss_other_running(&m, C.cfg.device, (int64_t)time(NULL))) {
+        if ((net == SS_NET_OK || net == SS_NET_NOTFOUND) && ss_other_running(&m, C.cfg.device, (int64_t)time(NULL))) {
             char l0[200], when[64]; ss_fmt_date(when, sizeof when, m.s_updated, ko);
             snprintf(l0, sizeof l0, ko ? "%s에서 %s에 시작한 게임이 아직 끝나지 않았어요." : "The game started on %s at %s has not ended yet.", m.s_device, when);
             LOG("cloud: the game is open on %s since %s: the player is warned", m.s_device, when);
