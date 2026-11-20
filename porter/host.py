@@ -181,8 +181,9 @@ def update(adb, package, jobs=os.cpu_count() or 8):
         so = build_host(package, title_id, debug, t, jobs)
         src, out = Path(t) / 'installed.apk', Path(t) / 'host.apk'
         adb.run('pull', installed_apk(adb, package), src, timeout=600)
-        from porter.pipeline import ui_font_assets   # the overlay's font: an APK ported before it came has none, and the new host looks for it
+        from porter.pipeline import ui_font_assets, start_icon   # the overlay's and the start screen's fonts: an APK ported before them has none, and the new host looks for them
         fonts = [a for n, f in ui_font_assets().items() for a in ('--asset', f'{n}={f}')]
+        fonts += start_icon_asset(src, Path(t), start_icon)
         r = subprocess.run([sys.executable, str(DM / 'android/apk/apkdriver.py'), str(src), str(out), str(paths.signing_key()), '--host', str(so)] + fonts,
                            capture_output=True, text=True, errors='replace')
         if r.returncode: raise BuildError((r.stderr.strip() or r.stdout.strip()).splitlines()[-1])
@@ -192,3 +193,15 @@ def update(adb, package, jobs=os.cpu_count() or 8):
         except AdbError as e: raise BuildError(str(e)) from e
     say(f'{package}: host of this checkout installed ({size / 2**20:.1f} MB); the game\'s data on the device is unchanged')
     return {'package': package, 'title_id': title_id, 'debug': debug, 'host': size}
+
+
+def start_icon_asset(apk, tmp, make):   # the start screen's icon for an APK ported before it: from the launcher icon the APK has (res/drawable-nodpi-v4/icon.png); [] without one or Pillow
+    import io, zipfile
+    try:
+        from PIL import Image
+        with zipfile.ZipFile(apk) as z:
+            if 'assets/start/icon.bin' in z.namelist() or 'res/drawable-nodpi-v4/icon.png' not in z.namelist(): return []
+            art = Image.open(io.BytesIO(z.read('res/drawable-nodpi-v4/icon.png')))
+        return ['--asset', f'start/icon.bin={make(art, tmp / "start_icon.bin")}']
+    except (ImportError, OSError, zipfile.BadZipFile):
+        return []

@@ -3,21 +3,25 @@
 // password does not show as plain text; neither the password nor the Authorization header is ever logged. Without the asset nothing here runs: the app starts as before.
 // HTTP: java.net.HttpURLConnection through JNI (framework classes, no dex of the app's own): the system's DNS, proxy, TLS trust store (a server's Let's Encrypt certificate)
 // and redirects, which a socket of our own would each have to redo; cleartext http:// only with mkapk.py --cleartext (Android 9+ refuses it otherwise).
-// The screen: no game is running yet, so the window gets a small GLES 2 picture (libEGL / libGLESv2 opened here): EGL leaves the window when its surface is destroyed,
-// and the game's Vulkan swapchain can take it after (a window drawn with ANativeWindow_lock stays the CPU's and Vulkan cannot connect to it).
+// The screen: the start screen (startscreen.c draws it: the steps game data, shaders, cloud save, a progress block, the cloud's questions), one for the whole start.
+// No game is running yet, so the window gets a GLES 2 picture (libEGL / libGLESv2 opened here): EGL leaves the window when its surface is destroyed, and the game's
+// Vulkan swapchain can take it after (a window drawn with ANativeWindow_lock stays the CPU's and Vulkan cannot connect to it).
 // The front end (front_android.c) starts the game when the sync ends: done, nothing to do, or no server and a whole pack in the files folder (offline play)
 // An APK without the asset runs the sync too when its files folder has a bundles folder (a pack whose small files porter install pushed in bundles: datasync.h), with
 // no server: the bundles are unpacked, then the game starts
-// The same screen shows the shader preparation (dm_prep_begin: gfx_vk_gpl.inc vk_gpl_prepare), after the sync or without one, before the game starts
+// The same screen shows the shader preparation (dm_prep_begin: gfx_vk_gpl.inc vk_gpl_prepare), after the sync or without one, before the game starts, as its second step
 // An asset of version 2 (porter port --data-pointer) names a pointer file as well: the sync thread reads it before files.json (pointer_resolve), without the Authorization
 // header, and takes the server root and credentials it holds (+ the pack's folder under the root); without an answer, the pointer line it last read (kept in the app's
 // internal storage, encrypted as it came); without that, the asset's own address. An asset of version 1 never goes that way
-// The same screen shows the save's cloud sync at the start (savecloud_android.c dm_cloud_begin, after the shader preparation): draw_cloud draws its view (savecloud.h
-// dm_cloud_view, which that file fills), so what the screen looks like is this file's alone; it shows only once a step takes 300 ms, or at once for a question
+// The same screen shows the save's cloud sync at the start (savecloud_android.c dm_cloud_begin, after the shader preparation): its view (savecloud.h dm_cloud_view, which
+// that file fills) is the third step, or a question of its own; the screen shows only once the start took 300 ms, or at once for a question
 #include "dm.h"
 #include "datasync.h"
 #include "savecloud.h"
 #include "pixel_font.h"
+#include "startscreen.h"
+#include <android/keycodes.h>
+#include <sys/stat.h>
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
 #include <android/asset_manager.h>
@@ -37,12 +41,12 @@ static struct {
     pthread_mutex_t mu; pthread_cond_t cv;
     ANativeActivity *act; char root[512], package[256], base[1024], auth[600];
     ANativeWindow *win; int lost, released;           // the window (on_window_created / destroyed: dm_sync_window), and a destroy waiting for the screen to let it go
-    ds_progress pr; int status, finished, wait_s; char msg[256];   // status: -1 working, else the last error (DS_ERR_*); wait_s: seconds to the next try
+    ds_progress pr; int status, wait_s, wait_tot; char msg[256];   // status: -1 working, else the last error (DS_ERR_*); wait_s: seconds to the next try (of wait_tot)
+    int retry_now, netdown; int64_t deadline;   // Retry pressed; the device has no network (nothing is asked); the time the server's answer is given up at (0: none)
     void (*done)(void); int pipe[2];
 } S = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, .status = -1, .pipe = {-1, -1}};
-static struct { int on, done, total, gl_tried; } P;   // the shader preparation (dm_prep_begin), under S.mu: the screen shows it instead of the sync
-static struct { int on, gl_tried; } CL;              // the cloud sync's start (dm_cloud_screen_begin), under S.mu: the screen shows its view
-static struct { int on, gl_tried; char ko[3][200], en[3][200], detail[300]; } NT;   // a notice the start stops at (dm_notice_begin), under S.mu: shown until the app ends
+static struct { int on, done, total; } P;   // the shader preparation (dm_prep_begin), under S.mu
+static struct { char ko[3][200], en[3][200], detail[300]; } NT;   // a notice the start stops at (dm_notice_begin, PH_NOTICE), under S.mu: shown until the app ends
 // the pointer (an asset of version 2): its address, key and the pack's folder under the root; the asset's own server (base, auth) for when neither the pointer nor the
 // cache answers; cache: the file in the app's internal storage the last pointer line read is kept in (as it came, encrypted). fresh: the pointer itself answered this run
 static struct { int on, fresh; char pointer[1024], sub[1024], base[1024], auth[600], cache[600]; uint8_t key[32]; } PT;
@@ -86,6 +90,13 @@ static void jheader(jhttp *h, jobject C, const char *k, char *out, size_t cap) {
     size_t len = strlen(s); if (len < cap) memcpy(out, s, len + 1);
     (*E)->ReleaseStringUTFChars(E, v, s);
 }
+// What is left of the time the server gets (ms): none when the device has no network; S.deadline (3 s from the first try when the folder has a pack) else 3 s a request
+static int64_t budget_left(void) {
+    pthread_mutex_lock(&S.mu); int down = S.netdown; int64_t d = S.deadline; pthread_mutex_unlock(&S.mu);
+    if (down) return 0;
+    if (!d) return 3000;
+    int64_t l = d - now_ms(); return l < 300 ? 0 : l;
+}
 // cond / got (datasync.h ds_fetch_fn): files.json asked for only if it changed since the copy the app has. HttpURLConnection passes the headers as they are and returns
 // the server's 304 (setUseCaches(false), and the app installs no HttpResponseCache, that would answer it itself); a server that does not honour them answers 200 and
 // sends the list whole, as before
@@ -95,11 +106,14 @@ static int http_fetch(void *u, const char *rel, uint64_t from, uint64_t *start, 
     if (ds_url(url, sizeof url, S.base, rel)) { LOG("[RED] data: the address of %s is too long", rel); return DS_ERR_SERVER; }
     if ((*E)->PushLocalFrame(E, 48)) { jx(E, NULL, 0); return DS_ERR_NET; }
     int rc = DS_ERR_NET, probe = !strcmp(rel, DS_LIST);   // the list: short timeouts, so an app without the server starts the game soon (offline play)
+    int64_t left = probe ? budget_left() : 1 << 30;
+    if (left <= 0) { (*E)->PopLocalFrame(E, NULL); LOG("data: %s: %s", rel, S.netdown ? "the device has no network" : "out of the 3 s the server gets"); return DS_ERR_NET; }
+    int cto = probe ? (int)(left < 3000 ? left : 3000) : 10000, rto = probe ? (int)(left < 3000 ? left : 3000) : 30000;
     jobject U = (*E)->NewObject(E, h->cUrl, h->mUrl, (*E)->NewStringUTF(E, url)); jobject C = U && !jx(E, why, sizeof why) ? (*E)->CallObjectMethod(E, U, h->mOpen) : NULL;
     jobject in = NULL;
     if (!C || jx(E, why, sizeof why) || !(*E)->IsInstanceOf(E, C, h->cConn)) goto out;
-    (*E)->CallVoidMethod(E, C, h->mConnTo, probe ? 4000 : 10000); if (jx(E, why, sizeof why)) goto out;
-    (*E)->CallVoidMethod(E, C, h->mReadTo, probe ? 8000 : 30000); if (jx(E, why, sizeof why)) goto out;
+    (*E)->CallVoidMethod(E, C, h->mConnTo, cto); if (jx(E, why, sizeof why)) goto out;
+    (*E)->CallVoidMethod(E, C, h->mReadTo, rto); if (jx(E, why, sizeof why)) goto out;
     (*E)->CallVoidMethod(E, C, h->mCaches, JNI_FALSE); if (jx(E, why, sizeof why)) goto out;
     if (S.auth[0] && jprop(h, C, "Authorization", S.auth, why, sizeof why)) goto out;
     if (jprop(h, C, "Accept-Encoding", "identity", why, sizeof why)) goto out;   // the bytes as they are on the server: Range offsets and sizes are the file's
@@ -138,12 +152,14 @@ out:
 // short timeouts, nothing from a cache; its body (at most cap - 1 bytes) into out, NUL-terminated. 0, or -1 with why (the reason, never the body)
 static int http_get_plain(jhttp *h, const char *url, char *out, size_t cap, size_t *got, char *why, size_t wcap) {
     JNIEnv *E = h->E; int rc = -1; size_t n = 0; jobject U = NULL, C = NULL, in = NULL; why[0] = 0; *got = 0;
+    int64_t left = budget_left(); if (left <= 0) { snprintf(why, wcap, "%s", S.netdown ? "the device has no network" : "out of the 3 s the server gets"); return -1; }
+    int to = (int)(left < 3000 ? left : 3000);
     if ((*E)->PushLocalFrame(E, 32)) { jx(E, NULL, 0); snprintf(why, wcap, "no JNI frame"); return -1; }
     jstring su = (*E)->NewStringUTF(E, url); if (jx(E, why, wcap) || !su) goto out;
     U = (*E)->NewObject(E, h->cUrl, h->mUrl, su); if (jx(E, why, wcap) || !U) goto out;
     C = (*E)->CallObjectMethod(E, U, h->mOpen); if (jx(E, why, wcap) || !C || !(*E)->IsInstanceOf(E, C, h->cConn)) goto out;
-    (*E)->CallVoidMethod(E, C, h->mConnTo, 4000); if (jx(E, why, wcap)) goto out;
-    (*E)->CallVoidMethod(E, C, h->mReadTo, 8000); if (jx(E, why, wcap)) goto out;
+    (*E)->CallVoidMethod(E, C, h->mConnTo, to); if (jx(E, why, wcap)) goto out;
+    (*E)->CallVoidMethod(E, C, h->mReadTo, to); if (jx(E, why, wcap)) goto out;
     (*E)->CallVoidMethod(E, C, h->mCaches, JNI_FALSE); if (jx(E, why, wcap)) goto out;
     if (jprop(h, C, "Cache-Control", "no-cache", why, wcap) || jprop(h, C, "Accept-Encoding", "identity", why, wcap)) goto out;
     int code = (*E)->CallIntMethod(E, C, h->mCode); if (jx(E, why, wcap)) goto out;
@@ -172,7 +188,7 @@ static void basic_auth(char *out, size_t cap, const char *cred) {   // "Basic <b
     ds_base64(b64, cred, n); snprintf(out, cap, "Basic %s", b64); memset(b64, 0, sizeof b64);
 }
 // The server for this try (an asset of version 2), on the sync thread before files.json: the pointer, else the pointer line kept from the last time, else the asset's own.
-// A pointer that cannot be read costs one short timeout (4 s to connect, 8 s to read), and the sync then goes on as before (no server: the game starts with what it has)
+// A pointer that cannot be read costs one short timeout (3 s, within the 3 s the first try has in all when the folder has a pack; none without a network), and the sync then goes on as before (no server: the game starts with what it has)
 static void pointer_resolve(jhttp *h) {
     char line[DS_PTR_MAX + 1], why[256] = "", root[1024], cred[512], base[1100]; const char *bad = NULL; size_t n = 0; int src = 0;   // src: 1 the pointer, 2 the cache, 0 the asset
     if (!http_get_plain(h, PT.pointer, line, sizeof line, &n, why, sizeof why)) {
@@ -207,111 +223,119 @@ static uint64_t free_bytes(void *u, const char *root) { (void)u; struct statvfs 
 static void sync_note(void *u, const ds_progress *p) { (void)u; pthread_mutex_lock(&S.mu); S.pr = *p; pthread_mutex_unlock(&S.mu); }
 static void sync_log(void *u, const char *m) { (void)u; LOG("%s", m); }
 
-// ---- the screen: a canvas 640 wide, drawn by the CPU, shown as one texture through GLES 2 ----
-typedef struct { uint32_t *px; int w, h; uint32_t ink; } canvas;
-static void plot(void *u, int x, int y) { canvas *c = u; if (x >= 0 && y >= 0 && x < c->w && y < c->h) c->px[y * c->w + x] = c->ink; }
-static void fill(canvas *c, int x, int y, int w, int h, uint32_t col) { for (int j = y < 0 ? 0 : y; j < y + h && j < c->h; j++) for (int i = x < 0 ? 0 : x; i < x + w && i < c->w; i++) c->px[j * c->w + i] = col; }
-static void text(canvas *c, const char *s, int x, int y, int scale, uint32_t col) { c->ink = col; pf_draw(dm_overlay_font(), s, x, y, scale, plot, c); }
-static void ctext(canvas *c, const char *s, int y, int scale, uint32_t col) { text(c, s, (c->w - pf_width(dm_overlay_font(), s) * scale) / 2, y, scale, col); }
-static void ctext_fit(canvas *c, const char *s, int y, int scale, uint32_t col) {   // centred, at scale or smaller so it fits with 16 px at each side
-    while (scale > 1 && pf_width(dm_overlay_font(), s) * scale > c->w - 32) scale--;
-    ctext(c, s, y, scale, col);
-}
-#define RGB(r, g, b) (0xff000000u | (uint32_t)(b) << 16 | (uint32_t)(g) << 8 | (uint32_t)(r))   // RGBA bytes in memory
+// ---- the screen: one for the whole start (V), from onCreate (dm_start_screen_open) through the data, the shader preparation and the cloud's start, to the game's first
+// frame (dm_start_screen_close from front_android.c game_run): startscreen.c draws its picture into a canvas the window's size, shown as one texture through GLES 2.
+// It shows once the start took 300 ms, at once for a question or an error: a start with nothing to do shows nothing. Closing it ends its thread, lets the window go
+// (EGL's surface and context destroyed) and frees the fonts, the glyphs, the icon, the background and the canvas: nothing of it is left while the game runs ----
+enum { PH_NONE, PH_DATA, PH_PREP, PH_CLOUD, PH_NOTICE };
+static struct {
+    int open, closing, closed, phase, shown, first_run, need_net, retry_now, has_server;
+    int unreached;   // the data's step started the game with the device's pack because its server was not reached (dm_data_unreached)
+    int64_t t0;
+    char name[160], version[128], checked[48];
+    stv_step step[STV_NSTEPS];
+} V;   // under S.mu
+static struct { uint8_t *ttf[2]; size_t n[2]; uint32_t *icon; int iw, ih; uint32_t glow; int tried; } R;   // the screen thread's own
 static int korean(void) { const pf_index *g = pf_find(dm_overlay_font(), 0xAC00); return g && (g->cp_adv >> 8) == 0xAC00; }   // the APK's font has Hangul (assets/font/ui.bin)
-static void dur(char *o, size_t n, double s, int ko) {
-    if (s < 0 || s > 359999) { snprintf(o, n, "-"); return; }
-    int m = (int)(s / 60), x = (int)s % 60;
-    if (ko) { if (m >= 60) snprintf(o, n, "%d시간 %d분", m / 60, m % 60); else if (m) snprintf(o, n, "%d분 %d초", m, x); else snprintf(o, n, "%d초", x); }
-    else { if (m >= 60) snprintf(o, n, "%dh %dm", m / 60, m % 60); else if (m) snprintf(o, n, "%dm %ds", m, x); else snprintf(o, n, "%ds", x); }
+void dm_start_step(int step, int state, const char *note) {
+    if (step < 0 || step >= STV_NSTEPS) return;
+    pthread_mutex_lock(&S.mu); V.step[step].state = state; snprintf(V.step[step].note, sizeof V.step[step].note, "%s", note ? note : ""); pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
 }
-static void draw(canvas *c, const ds_progress *p, int status, int wait_s, const char *msg, double speed) {
-    // (30 px higher with the storage line below the retry: the block then ends 24 px lower, which a 640 x 360 canvas (a 16:9 screen) cut off)
-    int ko = korean(), y = c->h / 2 - 70 - (status == DS_ERR_SPACE ? 30 : 0); char t[400], a[64];
-    fill(c, 0, 0, c->w, c->h, RGB(18, 20, 26));
-    ctext(c, ko ? "게임 데이터" : "Game data", y, 3, RGB(235, 238, 245)); y += 36;
-    const char *ph = p->phase == DS_PH_CONNECT ? (ko ? "서버에 연결하는 중" : "Connecting to the server") : p->phase == DS_PH_CHECK ? (ko ? "가지고 있는 파일 확인 중" : "Checking the files on the device")
-                   : p->phase == DS_PH_DOWNLOAD ? (ko ? "받는 중" : "Downloading") : p->phase == DS_PH_UNPACK ? (ko ? "묶음 파일을 푸는 중" : "Extracting the bundles")
-                   : (ko ? "마무리하는 중" : "Finishing");
-    ctext(c, ph, y, 2, RGB(170, 180, 200)); y += 26;
-    int bw = c->w - 80, bx = 40; double f = p->total ? (double)p->done / (double)p->total : 0; if (f > 1) f = 1;
-    fill(c, bx, y, bw, 12, RGB(50, 55, 68)); fill(c, bx, y, (int)(bw * f), 12, RGB(90, 160, 255)); y += 34;
-    snprintf(t, sizeof t, "%.0f / %.0f MB  (%d%%)", p->done / 1048576.0, p->total / 1048576.0, (int)(f * 100)); ctext(c, t, y, 2, RGB(235, 238, 245)); y += 24;
-    if (p->phase == DS_PH_DOWNLOAD && speed > 0) { dur(a, sizeof a, (double)(p->total - p->done) / speed, ko); snprintf(t, sizeof t, ko ? "%.1f MB/s, 남은 시간 %s" : "%.1f MB/s, %s left", speed / 1048576.0, a); ctext(c, t, y, 2, RGB(170, 180, 200)); }
-    if (p->phase == DS_PH_UNPACK) { snprintf(t, sizeof t, ko ? "파일 %d / %d개" : "%d / %d files", p->file_no, p->files); ctext(c, t, y, 2, RGB(170, 180, 200)); }   // the bundle on the line below
-    y += 24;
-    if (p->file[0]) { if (p->phase == DS_PH_UNPACK) snprintf(t, sizeof t, "%.60s", p->file); else snprintf(t, sizeof t, "%d/%d  %.60s", p->file_no, p->files, p->file); ctext(c, t, y, 1, RGB(120, 130, 150)); }
-    y += 30;
-    if (status >= 0) {
-        const char *w = status == DS_ERR_NET ? (ko ? "서버에 연결할 수 없습니다 (네트워크를 확인해 주세요)" : "The server cannot be reached (check the network)")
-                      : status == DS_ERR_LOCAL ? (ko ? "기기에 있는 게임 데이터가 모자랍니다. 다시 설치해 주세요" : "The game data on the device is incomplete: install it again")
-                      : status == DS_ERR_SPACE ? (ko ? "저장 공간이 부족합니다" : "Not enough storage space")
-                      : status == DS_ERR_PACKAGE ? (ko ? "서버의 데이터가 이 앱의 것이 아닙니다" : "The server's data is not this app's")
-                      : status == DS_ERR_DATA ? (!S.base[0] ? (ko ? "기기에 있는 묶음 파일이 손상되었습니다. 다시 설치해 주세요" : "A bundle on the device is damaged: install the pack again")
-                                                      : ko ? "받은 파일이 손상되었습니다. 다시 받습니다" : "A downloaded file was damaged; it is downloaded again")
-                      : status == DS_ERR_DISK ? (ko ? "파일을 쓸 수 없습니다" : "A file cannot be written") : (ko ? "서버 오류" : "Server error");
-        ctext(c, w, y, 2, RGB(255, 150, 120)); y += 22;
-        if (msg[0]) { ctext(c, msg, y, 1, RGB(200, 140, 120)); y += 16; }
-        snprintf(t, sizeof t, ko ? "%d초 후 다시 시도합니다" : "Trying again in %d s", wait_s); ctext(c, t, y + 6, 2, RGB(170, 180, 200));
-        if (status == DS_ERR_SPACE) ctext_fit(c, ko ? "공간을 비우면 자동으로 이어서 받습니다" : "Free some space: the download resumes by itself", y + 36, 2, RGB(170, 180, 200));   // (each try checks the space again)
+static const char *L(const char *ko, const char *en) { return korean() ? ko : en; }
+static uint8_t *asset_all(const char *name, size_t *n) {
+    AAssetManager *am = S.act ? S.act->assetManager : NULL; AAsset *a = am ? AAssetManager_open(am, name, AASSET_MODE_STREAMING) : NULL;
+    if (!a) return NULL;
+    off_t len = AAsset_getLength(a); uint8_t *b = len > 0 ? malloc((size_t)len) : NULL;
+    if (b && AAsset_read(a, b, (size_t)len) != len) { free(b); b = NULL; }
+    AAsset_close(a); if (b) *n = (size_t)len;
+    return b;
+}
+static void res_load(void) {   // the first time the screen shows: Noto Sans KR (assets/font/start-*.ttf, porter's) and the game's icon (assets/start/icon.bin: "NXIC", u16 w, h, RGBA)
+    R.tried = 1;
+    static const char *const NAME[2] = {"font/start-regular.ttf", "font/start-bold.ttf"};
+    for (int i = 0; i < 2; i++) { R.ttf[i] = asset_all(NAME[i], &R.n[i]); if (R.ttf[i] && stv_font_set(i, R.ttf[i], R.n[i])) { free(R.ttf[i]); R.ttf[i] = NULL; } }
+    if (!R.ttf[0]) LOG("[RED] start screen: the APK has no assets/font/start-regular.ttf (an APK ported before it): its text is drawn with the overlay's pixel font");
+    stv_font_fallback(dm_overlay_font());
+    size_t n = 0; uint8_t *ic = asset_all("start/icon.bin", &n);
+    if (ic && n >= 8 && !memcmp(ic, "NXIC", 4)) { int w = ic[4] | ic[5] << 8, h = ic[6] | ic[7] << 8;
+        if (w > 0 && h > 0 && (size_t)w * h * 4 + 8 <= n && (R.icon = malloc((size_t)w * h * 4))) { memcpy(R.icon, ic + 8, (size_t)w * h * 4); R.iw = w; R.ih = h; } }
+    free(ic);
+    R.glow = stv_icon_colour(R.icon, R.iw, R.ih);
+}
+static void res_free(void) { stv_release(); for (int i = 0; i < 2; i++) { free(R.ttf[i]); } free(R.icon); memset(&R, 0, sizeof R); }
+static const char *ds_error_text(int status) {
+    return status == DS_ERR_NET ? L("서버에 연결할 수 없어요 · 네트워크를 확인해 주세요", "The server cannot be reached · check the network")
+         : status == DS_ERR_LOCAL ? L("기기에 있는 게임 데이터가 모자라요 · 다시 설치해 주세요", "The game data on the device is incomplete · install it again")
+         : status == DS_ERR_SPACE ? L("저장 공간이 부족해요 · 공간을 비우면 이어서 받아요", "Not enough storage space · the download resumes once there is room")
+         : status == DS_ERR_PACKAGE ? L("서버의 데이터가 이 앱의 것이 아니에요", "The server's data is not this app's")
+         : status == DS_ERR_DATA ? (!S.base[0] ? L("기기에 있는 묶음 파일이 손상됐어요 · 다시 설치해 주세요", "A bundle on the device is damaged · install the pack again")
+                                               : L("받은 파일이 손상돼서 다시 받아요", "A downloaded file was damaged; it is downloaded again"))
+         : status == DS_ERR_DISK ? L("파일을 쓸 수 없어요", "A file cannot be written") : L("서버 오류", "Server error");
+}
+// the first start without a network: a question of its own (Retry; it goes on by itself once the network is back)
+static void need_net_view(dm_cloud_view *q, int ws, int wtot) {
+    memset(q, 0, sizeof *q); q->ask = 1; q->urgent = 1; q->icon = DM_CLOUD_ICON_OFFLINE; q->progress = -1; q->nbtn = 1;
+    snprintf(q->title, sizeof q->title, "%s", L("인터넷 연결이 필요해요", "An internet connection is needed"));
+    snprintf(q->line[0], sizeof q->line[0], "%s", V.first_run ? L("처음 한 번 게임 데이터를 받아야 해요. 연결되면 바로 이어서 받아요.", "The game data has to be downloaded once. It starts as soon as there is a connection.")
+                                                              : L("남은 게임 데이터를 받아야 해요. 연결되면 바로 이어서 받아요.", "The rest of the game data has to be downloaded. It goes on as soon as there is a connection."));
+    snprintf(q->btn[0], sizeof q->btn[0], "%s", L("다시 시도", "Retry"));
+    snprintf(q->count, sizeof q->count, korean() ? "%d초 뒤 다시 확인해요" : "Trying again in %d s", ws);
+    q->count_permille = wtot > 0 ? (wtot - ws) * 1000 / wtot : -1;
+}
+typedef struct { int phase, status, wait_s, wait_tot, need_net, pd, pt; ds_progress p; char msg[256], nt_ko[3][200], nt_en[3][200], nt_detail[300]; } snap_t;
+// the picture's state, from what the phases left (under no lock: snap and cv are copies)
+static void build_view(stv_view *v, const snap_t *x, const stv_rate *rate, dm_cloud_view *cv, dm_cloud_view *dq, const stv_step *steps) {
+    memset(v, 0, sizeof *v); v->bar = -1; int ko = korean(); char a[48], b[48], t[200];
+    snprintf(v->name, sizeof v->name, "%s", V.name); snprintf(v->version, sizeof v->version, "%s%s", V.version, V.first_run ? L(" · 처음 실행", " · first start") : "");
+    v->icon = R.icon; v->icon_w = R.iw; v->icon_h = R.ih; v->glow = R.glow;
+    memcpy(v->step, steps, sizeof v->step);
+    snprintf(v->hint, sizeof v->hint, "%s", L("곧 시작해요", "Starting soon"));
+    if (x->phase == PH_DATA) {
+        const ds_progress *p = &x->p; stv_step *s = &v->step[STV_DATA]; s->state = STV_RUN;
+        stv_fmt_int(a, sizeof a, p->file_no); stv_fmt_int(b, sizeof b, p->files);
+        if (p->phase == DS_PH_CONNECT) snprintf(s->note, sizeof s->note, "%s", L("서버 확인 중…", "Checking the server…"));
+        else if (p->phase == DS_PH_CHECK) snprintf(s->note, sizeof s->note, "%s", L("파일 확인 중…", "Checking the files…"));
+        else if (p->phase == DS_PH_FINISH) snprintf(s->note, sizeof s->note, "%s", L("마무리 중…", "Finishing…"));
+        else snprintf(s->note, sizeof s->note, ko ? "파일 %s / %s" : "%s / %s files", a, b);
+        if ((p->phase == DS_PH_DOWNLOAD || p->phase == DS_PH_UNPACK) && p->total) {
+            v->bar = (int)(p->done * 1000 / p->total);
+            snprintf(v->bar_title, sizeof v->bar_title, "%s", p->phase == DS_PH_DOWNLOAD ? L("게임 데이터 받는 중", "Downloading the game data") : L("묶음 파일 푸는 중", "Extracting the bundles"));
+            stv_fmt_bytes(v->bar_left, sizeof v->bar_left, p->done, p->total);
+            char e[64]; stv_fmt_eta(e, sizeof e, rate->eta, ko);
+            if (p->phase == DS_PH_DOWNLOAD && rate->speed > 0) { char sp[32]; stv_fmt_speed(sp, sizeof sp, rate->speed); snprintf(v->bar_right, sizeof v->bar_right, e[0] ? "%s · %s" : "%s", sp, e); }
+            else snprintf(v->bar_right, sizeof v->bar_right, "%s", e);
+            if (p->phase == DS_PH_DOWNLOAD) snprintf(v->hint, sizeof v->hint, "%s", L("와이파이에서 받는 걸 권해요 · 중간에 꺼도 받은 파일은 그대로예요", "Wi-Fi is best · what was downloaded stays if the app is closed"));
+            else v->hint[0] = 0;
+        }
+        if (x->status >= 0) {
+            if (x->need_net) { need_net_view(dq, x->wait_s, x->wait_tot); v->ask = dq; }
+            else { s->state = STV_FAIL; snprintf(s->note, sizeof s->note, ko ? "%d초 뒤 다시 시도" : "again in %d s", x->wait_s);
+                   v->hint_warn = 1; snprintf(v->hint, sizeof v->hint, "%s", ds_error_text(x->status)); snprintf(v->hint2, sizeof v->hint2, "%s", x->msg); }
+        }
+    } else if (x->phase == PH_PREP) {
+        stv_step *s = &v->step[STV_SHADERS]; s->state = STV_RUN;
+        if (!x->pt) snprintf(s->note, sizeof s->note, "%s", L("확인 중…", "Checking…"));
+        else {
+            stv_fmt_int(a, sizeof a, x->pd); stv_fmt_int(b, sizeof b, x->pt); snprintf(t, sizeof t, "%s / %s", a, b); snprintf(s->note, sizeof s->note, "%s", t);
+            v->bar = (int)((int64_t)x->pd * 1000 / x->pt); snprintf(v->bar_title, sizeof v->bar_title, "%s", L("셰이더 준비 중", "Preparing the shaders"));
+            snprintf(v->bar_left, sizeof v->bar_left, "%s", t); stv_fmt_eta(v->bar_right, sizeof v->bar_right, x->pd > 16 ? rate->eta : -1, ko);
+            snprintf(v->hint, sizeof v->hint, "%s", L("처음 한 번만 해요 · 게임 데이터나 드라이버가 바뀌면 다시 해요", "Done once · again after a data or driver update"));
+        }
+    } else if (x->phase == PH_NOTICE) {   // a question's screen without buttons: the warning's icon, the title, two lines, the log's words small at the bottom
+        int k = korean(); memset(dq, 0, sizeof *dq); dq->ask = 1; dq->urgent = 1; dq->icon = DM_CLOUD_ICON_WARN; dq->progress = -1;
+        snprintf(dq->title, sizeof dq->title, "%s", k ? x->nt_ko[0] : x->nt_en[0]);
+        for (int i = 0; i < 2; i++) snprintf(dq->line[i], sizeof dq->line[i], "%s", k ? x->nt_ko[i + 1] : x->nt_en[i + 1]);
+        snprintf(dq->foot, sizeof dq->foot, "%s", x->nt_detail);
+        v->ask = dq;
+    } else if (x->phase == PH_CLOUD) {
+        if (cv->ask) v->ask = cv;
+        else {
+            stv_step *s = &v->step[STV_CLOUD]; s->state = STV_RUN; snprintf(s->note, sizeof s->note, "%s", cv->note);
+            if (cv->progress >= 0) { v->bar = cv->progress; snprintf(v->bar_title, sizeof v->bar_title, "%s", L("클라우드 세이브 받는 중", "Downloading the cloud save")); }
+            if (cv->hint[0]) snprintf(v->hint, sizeof v->hint, "%s", cv->hint);
+            if (cv->nbtn) snprintf(v->foot, sizeof v->foot, "%s", L("B · 동기화 없이 플레이", "B · play without the sync"));
+        }
     }
-}
-static void draw_prep(canvas *c, int done, int total, double el) {   // el: seconds since the parts began
-    int ko = korean(), y = c->h / 2 - 84; char t[200], a[64], b[64];
-    fill(c, 0, 0, c->w, c->h, RGB(18, 20, 26));
-    ctext(c, ko ? "셰이더 준비" : "Preparing shaders", y, 3, RGB(235, 238, 245)); y += 36;
-    // two lines, each made smaller when it would not fit the canvas (one line was cut at both sides of the 640 wide canvas: Retroid Pocket 6)
-    ctext_fit(c, ko ? "처음 한 번만 합니다" : "Done once, at the first start", y, 2, RGB(170, 180, 200)); y += 30;   // the font is 12 px: 24 at scale 2 (22 overlapped the next line)
-    ctext_fit(c, ko ? "(게임 데이터나 드라이버가 바뀌면 다시 합니다)" : "(and again after a data or driver update)", y, 2, RGB(170, 180, 200)); y += 34;
-    int bw = c->w - 80, bx = 40; double f = total ? (double)done / total : 0; if (f > 1) f = 1;
-    fill(c, bx, y, bw, 12, RGB(50, 55, 68)); fill(c, bx, y, (int)(bw * f), 12, RGB(90, 160, 255)); y += 34;
-    snprintf(t, sizeof t, "%d / %d  (%d%%)", done, total, (int)(f * 100)); ctext(c, t, y, 2, RGB(235, 238, 245)); y += 24;
-    dur(a, sizeof a, el, ko); if (done > 16 && done < total) dur(b, sizeof b, el * (total - done) / done, ko); else snprintf(b, sizeof b, "-");
-    snprintf(t, sizeof t, ko ? "%s 지남, 남은 시간 약 %s" : "%s so far, about %s left", a, b); ctext(c, t, y, 2, RGB(170, 180, 200));
-}
-// The cloud sync's view (savecloud.h dm_cloud_view): a title, small lines, two cards side by side or a row of buttons, a bar, a hint at the bottom. cl_layout places the cards
-// and buttons, for the drawing and for a touch's hit (dm_cloud_screen_hit) alike
-static void draw_notice(canvas *c) {   // the title, two lines in the app's language, the detail (the log's words) small below
-    int ko = korean(), y = c->h / 2 - 66;
-    fill(c, 0, 0, c->w, c->h, RGB(18, 20, 26));
-    ctext_fit(c, ko ? NT.ko[0] : NT.en[0], y, 3, RGB(255, 150, 120)); y += 44;
-    for (int i = 1; i < 3; i++) { ctext_fit(c, ko ? NT.ko[i] : NT.en[i], y, 2, i == 1 ? RGB(235, 238, 245) : RGB(170, 180, 200)); y += 28; }
-    if (NT.detail[0]) ctext_fit(c, NT.detail, y + 8, 1, RGB(120, 130, 150));
-}
-static int cl_canvas_h(int ww, int wh) { int ch = ww > 0 && wh > 0 ? 640 * wh / ww : 360; return ch < 240 ? 240 : ch; }
-static int cl_layout(int cw, int ch, const dm_cloud_view *v, int r[3][4]) {   // the rectangles (x, y, w, h) of the cards, else of the buttons; their count
-    if (v->ncards) { int w = 250, h = 112, gap = 24, x0 = (cw - 2 * w - gap) / 2, y = ch / 2 - 64;
-        for (int i = 0; i < 2; i++) { r[i][0] = x0 + i * (w + gap); r[i][1] = y; r[i][2] = w; r[i][3] = h; } return 2; }
-    int n = v->nbtn, gap = 16, h = 30, w[3], tot = 0;
-    for (int i = 0; i < n; i++) { w[i] = pf_width(dm_overlay_font(), v->btn[i]) + 40; if (w[i] < 150) w[i] = 150; tot += w[i] + (i ? gap : 0); }
-    for (int i = 0, x = (cw - tot) / 2; i < n; x += w[i] + gap, i++) { r[i][0] = x; r[i][1] = ch - 92; r[i][2] = w[i]; r[i][3] = h; }
-    return n;
-}
-static void rect_line(canvas *c, int x, int y, int w, int h, int t, uint32_t col) { fill(c, x, y, w, t, col); fill(c, x, y + h - t, w, t, col); fill(c, x, y, t, h, col); fill(c, x + w - t, y, t, h, col); }
-static void draw_cloud(canvas *c, const dm_cloud_view *v) {
-    const uint32_t ink = RGB(235, 238, 245), dim = RGB(150, 160, 180), acc = RGB(90, 160, 255), box = RGB(34, 38, 48);
-    fill(c, 0, 0, c->w, c->h, RGB(18, 20, 26));
-    int y = v->ncards ? c->h / 2 - 104 : c->h / 2 - 70;
-    ctext_fit(c, v->title, y, 2, ink); y += 26;
-    for (int i = 0; i < 3; i++) if (v->line[i][0]) { ctext_fit(c, v->line[i], y, 1, i == 2 ? dim : RGB(200, 206, 220)); y += 16; }
-    if (v->progress >= 0) { int bw = c->w - 160, bx = 80, f = v->progress > 1000 ? 1000 : v->progress; y += 6;
-        fill(c, bx, y, bw, 8, RGB(50, 55, 68)); fill(c, bx, y, bw * f / 1000, 8, acc);
-        char t[16]; snprintf(t, sizeof t, "%d%%", f / 10); ctext(c, t, y + 24, 1, dim); }
-    int r[3][4], n = cl_layout(c->w, c->h, v, r);
-    for (int i = 0; i < n; i++) {
-        int x = r[i][0], yy = r[i][1], w = r[i][2], h = r[i][3], sel = i == v->sel;
-        fill(c, x, yy, w, h, sel ? RGB(40, 58, 90) : box);
-        if (sel) rect_line(c, x, yy, w, h, 2, acc);
-        if (v->ncards) {
-            const dm_cloud_card *k = &v->card[i]; int cx = x + 12;
-            text(c, k->head, cx, yy + 18, 1, sel ? ink : RGB(200, 206, 220));
-            if (k->newer) { const char *b = korean() ? "더 최근" : "newer"; int bw = pf_width(dm_overlay_font(), b) + 10; fill(c, x + w - bw - 8, yy + 6, bw, 16, acc); text(c, b, x + w - bw - 3, yy + 18, 1, ink); }
-            text(c, k->who, cx, yy + 36, 1, dim);
-            text(c, k->ago, cx, yy + 72, 2, ink);
-            text(c, k->date, cx, yy + 96, 1, RGB(200, 206, 220));
-        } else { int tw = pf_width(dm_overlay_font(), v->btn[i]); text(c, v->btn[i], x + (w - tw) / 2, yy + h / 2 + 5, 1, ink); }
-    }
-    if (v->foot[0]) ctext_fit(c, v->foot, c->h - 28, 1, dim);
 }
 static struct {   // libEGL / libGLESv2, opened here (the host links neither)
     EGLDisplay (*GetDisplay)(EGLNativeDisplayType); EGLBoolean (*Initialize)(EGLDisplay, EGLint *, EGLint *); EGLBoolean (*ChooseConfig)(EGLDisplay, const EGLint *, EGLConfig *, EGLint, EGLint *);
@@ -323,10 +347,10 @@ static struct {   // libEGL / libGLESv2, opened here (the host links neither)
     void (*GenTextures)(GLsizei, GLuint *); void (*BindTexture)(GLenum, GLuint); void (*TexParameteri)(GLenum, GLenum, GLint);
     void (*TexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *); void (*VertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void *);
     void (*EnableVertexAttribArray)(GLuint); void (*DrawArrays)(GLenum, GLint, GLsizei); void (*Viewport)(GLint, GLint, GLsizei, GLsizei);
-    EGLDisplay dpy; EGLConfig cfg; EGLContext ctx; EGLSurface surf; ANativeWindow *on; GLuint prog, tex; int ok;
+    void *libe, *libg; EGLDisplay dpy; EGLConfig cfg; EGLContext ctx; EGLSurface surf; ANativeWindow *on; GLuint prog, tex; int ok;
 } G;
 static int gl_load(void) {
-    void *e = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL), *g = dlopen("libGLESv2.so", RTLD_NOW | RTLD_LOCAL); if (!e || !g) return -1;
+    void *e = G.libe = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL), *g = G.libg = dlopen("libGLESv2.so", RTLD_NOW | RTLD_LOCAL); if (!e || !g) return -1;
 #define LE(n) if (!(*(void **)&G.n = dlsym(e, "egl" #n))) return -1
 #define LG(n) if (!(*(void **)&G.n = dlsym(g, "gl" #n))) return -1
     LE(GetDisplay); LE(Initialize); LE(ChooseConfig); LE(CreateContext); LE(CreateWindowSurface); LE(MakeCurrent); LE(SwapBuffers); LE(DestroySurface); LE(DestroyContext); LE(Terminate);
@@ -339,6 +363,14 @@ static int gl_load(void) {
     G.ctx = G.CreateContext(G.dpy, G.cfg, EGL_NO_CONTEXT, xa); return G.ctx ? 0 : -1;
 }
 static void gl_drop(void) { if (G.surf) { G.MakeCurrent(G.dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT); G.DestroySurface(G.dpy, G.surf); G.surf = NULL; G.on = NULL; } }   // the window is free for Vulkan after this
+static void gl_end(void) {   // everything EGL: the context, the display's use, the libraries
+    gl_drop();
+    if (G.ctx && G.DestroyContext) G.DestroyContext(G.dpy, G.ctx);
+    if (G.dpy && G.Terminate) G.Terminate(G.dpy);
+    if (G.libg) dlclose(G.libg);
+    if (G.libe) dlclose(G.libe);
+    memset(&G, 0, sizeof G);
+}
 static int gl_bind(ANativeWindow *w) {
     if (G.on == w && G.surf) return 0;
     gl_drop();
@@ -354,50 +386,53 @@ static int gl_bind(ANativeWindow *w) {
     }
     return 0;
 }
-static void gl_show(canvas *c, ANativeWindow *w) {
+static void gl_show(stv_canvas *c, ANativeWindow *w) {
     if (gl_bind(w)) return;
     static const float quad[] = {-1, -1, 1, -1, -1, 1, 1, 1};
     G.Viewport(0, 0, ANativeWindow_getWidth(w), ANativeWindow_getHeight(w)); G.UseProgram(G.prog); G.BindTexture(GL_TEXTURE_2D, G.tex);
-    G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     G.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, c->w, c->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, c->px);
     G.VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, quad); G.EnableVertexAttribArray(0); G.DrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     G.SwapBuffers(G.dpy, G.surf);
 }
 static void *screen_thread(void *a) {
-    (void)a; pthread_setname_np(pthread_self(), "datascreen");
-    int64_t t0 = now_ms(), last_t = 0; uint64_t last_done = 0; double speed = 0; canvas c = {0};
+    (void)a; pthread_setname_np(pthread_self(), "startscreen");
+    stv_canvas c = {0}; stv_rate rate; stv_rate_reset(&rate); int last_phase = -1, gl_tried = 0;
     pthread_mutex_lock(&S.mu);
     for (;;) {
         if (S.lost) { gl_drop(); S.lost = 0; S.released = 1; pthread_cond_broadcast(&S.cv); }
-        if (S.finished) break;
-        ds_progress p = S.pr; int st = S.status, ws = S.wait_s; char msg[256]; snprintf(msg, sizeof msg, "%s", S.msg); ANativeWindow *w = S.win;
-        int64_t t = now_ms();
-        if (p.phase == DS_PH_DOWNLOAD) {   // MB/s over the last seconds
-            if (last_t && t > last_t && p.net >= last_done) { double v = (double)(p.net - last_done) * 1000.0 / (double)(t - last_t); speed = speed ? speed * 0.85 + v * 0.15 : v; }
-            last_t = t; last_done = p.net;   // network bytes only: a resumed part's bytes join done at once, not the speed
-        }
-        // drawn only once the sync takes a moment: a launch with the data up to date shows no screen at all; the preparation once it makes parts (EGL opened then)
-        int pd = P.done, pt = P.total; if (P.on && pt && !P.gl_tried) { P.gl_tried = 1; G.ok = !gl_load(); if (!G.ok) LOG("[RED] shaders: no EGL / GLES 2: the preparation runs without its screen"); t0 = t; }
-        if (NT.on && !NT.gl_tried) { NT.gl_tried = 1; G.ok = !gl_load(); if (!G.ok) LOG("[RED] notice: no EGL / GLES 2: the notice is in the log only"); }
-        dm_cloud_view cv; int cl_show = 0;
-        if (CL.on) { dm_cloud_view_get(&cv); cl_show = cv.urgent || t - t0 > 300;   // (savecloud.h: its lock is never held while this file's is taken)
-            if (cl_show && !CL.gl_tried) { CL.gl_tried = 1; G.ok = !gl_load(); if (!G.ok) LOG("[RED] cloud: no EGL / GLES 2: the sync's start runs without its screen"); } }
-        if (w && G.ok && (NT.on || (CL.on ? cl_show : P.on ? pt > 0 : t - t0 > 400))) {
+        if (V.closing) break;
+        snap_t x = {V.phase, S.status, S.wait_s, S.wait_tot, V.need_net, P.done, P.total}; x.p = S.pr; snprintf(x.msg, sizeof x.msg, "%s", S.msg);
+        if (x.phase == PH_NOTICE) { memcpy(x.nt_ko, NT.ko, sizeof NT.ko); memcpy(x.nt_en, NT.en, sizeof NT.en); memcpy(x.nt_detail, NT.detail, sizeof NT.detail); }
+        stv_step steps[STV_NSTEPS]; memcpy(steps, V.step, sizeof steps); ANativeWindow *w = S.win; int64_t t = now_ms();
+        dm_cloud_view cv; memset(&cv, 0, sizeof cv); cv.progress = -1;
+        if (x.phase == PH_CLOUD) dm_cloud_view_get(&cv);   // (savecloud.h: its lock is never held while this file's is taken)
+        if (x.phase != last_phase) { stv_rate_reset(&rate); last_phase = x.phase; }
+        if (x.phase == PH_DATA && (x.p.phase == DS_PH_DOWNLOAD || x.p.phase == DS_PH_UNPACK) && x.p.total)   // network bytes only: a resumed part's bytes join done at once, not the speed
+            stv_rate_feed(&rate, t, x.p.phase == DS_PH_DOWNLOAD ? (double)x.p.net : (double)x.p.done, (double)(x.p.total - (x.p.done < x.p.total ? x.p.done : x.p.total)));
+        if (x.phase == PH_PREP && x.pt) stv_rate_feed(&rate, t, x.pd, x.pt - x.pd);
+        int urgent = x.phase == PH_NOTICE || (x.phase == PH_CLOUD && cv.urgent) || (x.phase == PH_DATA && x.status >= 0);
+        int show = w && x.phase != PH_NONE && (V.shown || urgent || t - V.t0 > 300), animated = 0;
+        if (show && !gl_tried) { gl_tried = 1; G.ok = !gl_load(); if (!G.ok) { LOG("[RED] start screen: no EGL / GLES 2: the start runs without its screen"); gl_end(); } }
+        if (show && G.ok) {
             pthread_mutex_unlock(&S.mu);
-            int ww = ANativeWindow_getWidth(w), wh = ANativeWindow_getHeight(w), cw = 640, ch = ww > 0 && wh > 0 ? 640 * wh / ww : 360;
-            if (ch < 240) ch = 240;
-            if (c.w != cw || c.h != ch) { free(c.px); c.px = malloc((size_t)cw * ch * 4); c.w = cw; c.h = ch; }
-            if (c.px) { if (NT.on) draw_notice(&c); else if (CL.on) draw_cloud(&c, &cv); else if (P.on) draw_prep(&c, pd, pt, (t - t0) / 1000.0); else draw(&c, &p, st, ws, msg, speed); gl_show(&c, w); }
+            if (!R.tried) res_load();
+            int ww = ANativeWindow_getWidth(w), wh = ANativeWindow_getHeight(w), cw = ww, ch = wh;
+            if (cw > 2560) { cw /= 2; ch /= 2; }   // (a screen bigger than that: half its size, filtered up)
+            if (cw > 0 && ch > 0 && (c.w != cw || c.h != ch)) { free(c.px); c.px = malloc((size_t)cw * ch * 4); c.w = c.px ? cw : 0; c.h = c.px ? ch : 0; }
+            if (c.px) { stv_view v; dm_cloud_view dq; build_view(&v, &x, &rate, &cv, &dq, steps); stv_draw(&c, &v, t / 1000.0); animated = stv_animated(&v); gl_show(&c, w); }
             pthread_mutex_lock(&S.mu);
+            if (!V.shown) LOG("start screen: shown (%lld ms after the start)", (long long)(t - V.t0));
+            V.shown = 1;
         }
-        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 200 * 1000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        int ms = animated ? 66 : 200;   // a spinner turns at 15 frames a second; else a picture when something changed (a poke) or every 200 ms
+        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += ms * 1000000L; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
         pthread_cond_timedwait(&S.cv, &S.mu, &ts);
     }
     pthread_mutex_unlock(&S.mu);
-    gl_drop(); if (G.ok) { G.DestroyContext(G.dpy, G.ctx); G.Terminate(G.dpy); G.ok = 0; }
-    free(c.px);
-    char b = 1; if (write(S.pipe[1], &b, 1) != 1) LOG("[RED] data: cannot wake the main thread");   // the game starts on the main thread (sync_ready)
+    gl_end(); res_free(); free(c.px);
+    pthread_mutex_lock(&S.mu); V.closed = 1; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
     return NULL;
 }
 void dm_sync_window(ANativeWindow *w) {   // on_window_created (w) and on_window_destroyed (NULL): a destroyed window is let go before the callback returns
@@ -406,49 +441,176 @@ void dm_sync_window(ANativeWindow *w) {   // on_window_created (w) and on_window
     if (w) S.win = w;
     else if (S.win) {
         S.win = NULL;
-        if (G.on && !S.finished) { S.lost = 1; S.released = 0; pthread_cond_broadcast(&S.cv);
+        if (G.on && V.open && !V.closed) { S.lost = 1; S.released = 0; pthread_cond_broadcast(&S.cv);
             struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 2;
-            while (!S.released && !S.finished) if (pthread_cond_timedwait(&S.cv, &S.mu, &ts)) break; }
+            while (!S.released && !V.closed) if (pthread_cond_timedwait(&S.cv, &S.mu, &ts)) break; }
     }
     pthread_mutex_unlock(&S.mu);
 }
+// "1.4.1-3" (porter: the game's version, then the build number) as "1.4.1 · build 3"
+static void version_line(char *o, size_t n, const char *vn) {
+    const char *d = strrchr(vn, '-'); int num = d && d[1]; for (const char *q = d ? d + 1 : ""; *q; q++) if (*q < '0' || *q > '9') num = 0;
+    if (num) snprintf(o, n, korean() ? "%.*s · 빌드 %s" : "%.*s · build %s", (int)(d - vn), vn, d + 1); else snprintf(o, n, "%s", vn);
+}
+static void app_names(ANativeActivity *act, char *label, size_t lcap, char *ver, size_t vcap) {   // the app's label and versionName (on the main thread)
+    JNIEnv *E = act->env; label[0] = ver[0] = 0;
+    if ((*E)->PushLocalFrame(E, 32)) { jx(E, NULL, 0); return; }
+    jobject a = act->clazz; jclass cA = (*E)->GetObjectClass(E, a);
+    jmethodID mPm = cA ? (*E)->GetMethodID(E, cA, "getPackageManager", "()Landroid/content/pm/PackageManager;") : NULL; jobject pm = mPm && !jx(E, NULL, 0) ? (*E)->CallObjectMethod(E, a, mPm) : NULL;
+    jmethodID mAi = !jx(E, NULL, 0) && cA ? (*E)->GetMethodID(E, cA, "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;") : NULL; jobject ai = mAi && !jx(E, NULL, 0) ? (*E)->CallObjectMethod(E, a, mAi) : NULL;
+    jmethodID mL = ai && pm && !jx(E, NULL, 0) ? (*E)->GetMethodID(E, (*E)->GetObjectClass(E, ai), "loadLabel", "(Landroid/content/pm/PackageManager;)Ljava/lang/CharSequence;") : NULL;
+    jobject cs = mL && !jx(E, NULL, 0) ? (*E)->CallObjectMethod(E, ai, mL, pm) : NULL;
+    jmethodID mS = cs && !jx(E, NULL, 0) ? (*E)->GetMethodID(E, (*E)->GetObjectClass(E, cs), "toString", "()Ljava/lang/String;") : NULL;
+    jstring ls = mS && !jx(E, NULL, 0) ? (*E)->CallObjectMethod(E, cs, mS) : NULL;
+    const char *u = ls && !jx(E, NULL, 0) ? (*E)->GetStringUTFChars(E, ls, NULL) : NULL; if (u) { snprintf(label, lcap, "%s", u); (*E)->ReleaseStringUTFChars(E, ls, u); }
+    jmethodID mN = !jx(E, NULL, 0) && cA ? (*E)->GetMethodID(E, cA, "getPackageName", "()Ljava/lang/String;") : NULL; jobject pn = mN && !jx(E, NULL, 0) ? (*E)->CallObjectMethod(E, a, mN) : NULL;
+    jmethodID mPi = pm && pn && !jx(E, NULL, 0) ? (*E)->GetMethodID(E, (*E)->GetObjectClass(E, pm), "getPackageInfo", "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;") : NULL;
+    jobject pi = mPi && !jx(E, NULL, 0) ? (*E)->CallObjectMethod(E, pm, mPi, pn, 0) : NULL;
+    jfieldID fV = pi && !jx(E, NULL, 0) ? (*E)->GetFieldID(E, (*E)->GetObjectClass(E, pi), "versionName", "Ljava/lang/String;") : NULL;
+    jstring vn = fV && !jx(E, NULL, 0) ? (*E)->GetObjectField(E, pi, fV) : NULL;
+    u = vn && !jx(E, NULL, 0) ? (*E)->GetStringUTFChars(E, vn, NULL) : NULL; if (u) { snprintf(ver, vcap, "%s", u); (*E)->ReleaseStringUTFChars(E, vn, u); }
+    jx(E, NULL, 0); (*E)->PopLocalFrame(E, NULL);
+}
+__attribute__((weak)) int vk_gpl_prepare(void (*note)(void *u, int done, int total), void *u);   // (a build without the Vulkan backend has none)
+static void checked_path(char *o, size_t n) { if (S.act && S.act->internalDataPath) snprintf(o, n, "%s/nx2a_data_checked.txt", S.act->internalDataPath); else o[0] = 0; }   // when the server last answered
+// The start screen, opened in onCreate before anything of the start runs: its steps as they stand, its thread waiting to show (it draws nothing in the first 300 ms)
+void dm_start_screen_open(ANativeActivity *act, const char *root) {
+    if (V.open) return;
+    char label[160], vn[96], p[1100]; struct stat st; app_names(act, label, sizeof label, vn, sizeof vn);
+    pthread_mutex_lock(&S.mu);
+    S.act = act; V.t0 = now_ms(); V.closing = V.closed = V.shown = 0; V.phase = PH_NONE;
+    snprintf(V.name, sizeof V.name, "%s", label); version_line(V.version, sizeof V.version, vn);
+    AAsset *as = act->assetManager ? AAssetManager_open(act->assetManager, "nx2a/source.bin", AASSET_MODE_UNKNOWN) : NULL; if (as) AAsset_close(as);
+    V.has_server = as != NULL; snprintf(p, sizeof p, "%s/%s", root, DS_LIST); V.first_run = V.has_server && stat(p, &st);
+    static const char *const KO[] = {"게임 데이터", "셰이더 준비", "클라우드 세이브"}, *const EN[] = {"Game data", "Shaders", "Cloud save"};
+    for (int i = 0; i < STV_NSTEPS; i++) { snprintf(V.step[i].name, sizeof V.step[i].name, "%s", korean() ? KO[i] : EN[i]); V.step[i].state = STV_WAIT; snprintf(V.step[i].note, sizeof V.step[i].note, "%s", L("대기", "Waiting")); }
+    if (!V.has_server && !ds_bundles_dir(root)) { V.step[STV_DATA].state = STV_DONE; snprintf(V.step[STV_DATA].note, sizeof V.step[STV_DATA].note, "%s", L("준비됨", "Ready")); }
+    if (!vk_gpl_prepare) { V.step[STV_SHADERS].state = STV_SKIP; snprintf(V.step[STV_SHADERS].note, sizeof V.step[STV_SHADERS].note, "%s", L("필요 없음", "Not needed")); }
+    snprintf(p, sizeof p, "%s/sync.txt", root);
+    if (stat(p, &st)) { V.step[STV_CLOUD].state = STV_SKIP; snprintf(V.step[STV_CLOUD].note, sizeof V.step[STV_CLOUD].note, "%s", L("사용 안 함", "Off")); }
+    checked_path(p, sizeof p); size_t n = 0; char *ck = p[0] ? ds_read(p, &n, 64) : NULL; V.checked[0] = 0;
+    if (ck) { time_t t = (time_t)strtoll(ck, NULL, 10); struct tm tm; if (t > 0 && localtime_r(&t, &tm)) snprintf(V.checked, sizeof V.checked, korean() ? "%d월 %d일" : "%d/%d", tm.tm_mon + 1, tm.tm_mday); free(ck); }
+    pthread_mutex_unlock(&S.mu);
+    pthread_t t;
+    if (pthread_create(&t, NULL, screen_thread, NULL)) { LOG("[RED] start screen: cannot start its thread: the start runs without it"); return; }
+    pthread_detach(t);
+    pthread_mutex_lock(&S.mu); V.open = 1; pthread_mutex_unlock(&S.mu);
+}
+// Before the game takes the window (front_android.c game_run, and an app that ends before its game): the screen's thread ends, EGL lets the window go, everything the screen
+// held is freed. Waits for it (a frame being drawn: tens of ms)
+void dm_start_screen_close(void) {
+    pthread_mutex_lock(&S.mu);
+    if (V.open && !V.closed) {
+        V.closing = 1; pthread_cond_broadcast(&S.cv);
+        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 3;
+        while (!V.closed) if (pthread_cond_timedwait(&S.cv, &S.mu, &ts)) { LOG("[RED] start screen: its thread did not end within 3 s"); break; }
+        if (V.closed) LOG("start screen: closed, its resources freed (%s)", V.shown ? "it was shown" : "never shown: the start took under 300 ms");
+    }
+    V.open = 0; V.phase = PH_NONE;
+    pthread_mutex_unlock(&S.mu);
+}
+// The input before the game that is not the cloud's (front_android.c on_input_early): the first start's Retry when it has no network. 1 when it was the screen's
+int dm_start_input(const AInputEvent *e) {
+    pthread_mutex_lock(&S.mu); int on = V.phase == PH_DATA && V.need_net && S.status >= 0; ANativeWindow *w = S.win; int ws = S.wait_s, wt = S.wait_tot; pthread_mutex_unlock(&S.mu);
+    if (!on) return 0;
+    int go = 0;
+    if (AInputEvent_getType(e) == AINPUT_EVENT_TYPE_KEY) {
+        int k = AKeyEvent_getKeyCode(e);
+        if (k == AKEYCODE_VOLUME_UP || k == AKEYCODE_VOLUME_DOWN || k == AKEYCODE_VOLUME_MUTE) return 0;
+        go = AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_DOWN && !AKeyEvent_getRepeatCount(e) && (k == AKEYCODE_BUTTON_A || k == AKEYCODE_DPAD_CENTER || k == AKEYCODE_ENTER || k == AKEYCODE_BUTTON_START);
+    } else if (AInputEvent_getType(e) == AINPUT_EVENT_TYPE_MOTION && (AMotionEvent_getAction(e) & AMOTION_EVENT_ACTION_MASK) == AMOTION_EVENT_ACTION_UP && w) {
+        dm_cloud_view q; need_net_view(&q, ws, wt); int kind = 0;
+        go = stv_hit(&q, ANativeWindow_getWidth(w), ANativeWindow_getHeight(w), AMotionEvent_getX(e, 0), AMotionEvent_getY(e, 0), &kind) == 0;
+    }
+    if (go) { LOG("data: the player asked to try again now"); pthread_mutex_lock(&S.mu); S.retry_now = 1; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); }
+    return 1;
+}
+// 1: the device has a connected network (ConnectivityManager.getActiveNetworkInfo), 0: none, -1: not known (a Java failure). ctx: the activity
+int dm_net_state(JNIEnv *E, jobject ctx) {
+    if (!E || !ctx) return -1;
+    if ((*E)->PushLocalFrame(E, 16)) { jx(E, NULL, 0); return -1; }
+    int r = -1;
+    jclass cc = (*E)->GetObjectClass(E, ctx); jmethodID ms = cc ? (*E)->GetMethodID(E, cc, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;") : NULL;
+    jstring nm = ms && !jx(E, NULL, 0) ? (*E)->NewStringUTF(E, "connectivity") : NULL;
+    jobject cm = nm && !jx(E, NULL, 0) ? (*E)->CallObjectMethod(E, ctx, ms, nm) : NULL;
+    jmethodID ma = cm && !jx(E, NULL, 0) ? (*E)->GetMethodID(E, (*E)->GetObjectClass(E, cm), "getActiveNetworkInfo", "()Landroid/net/NetworkInfo;") : NULL;
+    if (ma && !jx(E, NULL, 0)) {
+        jobject ni = (*E)->CallObjectMethod(E, cm, ma);
+        if (!jx(E, NULL, 0)) {
+            if (!ni) r = 0;
+            else { jmethodID mc = (*E)->GetMethodID(E, (*E)->GetObjectClass(E, ni), "isConnected", "()Z");
+                   if (mc && !jx(E, NULL, 0)) { jboolean b = (*E)->CallBooleanMethod(E, ni, mc); if (!jx(E, NULL, 0)) r = b ? 1 : 0; } }
+        }
+    }
+    jx(E, NULL, 0); (*E)->PopLocalFrame(E, NULL);
+    return r;
+}
 
 // ---- the sync thread ----
+// Without a network the start does not wait: a device with none (ConnectivityManager) asks no server at all; one with a network the server does not answer from gives it 3 s
+// in all (the pointer and the list together) when the files folder holds a pack, which the game then starts with (the data's step says offline, and when the server
+// last answered). A folder without a whole pack cannot start: the screen asks for a connection (Retry), and tries again after 2, 4, 8 … 60 s, at once when the device's
+// network comes back
+static void phase_end(void) { char b = 1; if (write(S.pipe[1], &b, 1) != 1) LOG("[RED] start: cannot wake the main thread"); }   // the main thread's sync_ready runs the next step
 static void *sync_thread(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "datasync");
-    JavaVM *vm = S.act->vm; jhttp h = {0}; int rc = DS_OFFLINE, net = S.base[0] != 0;   // !net: no server, only the folder's bundles to unpack (dm_sync_begin)
+    JavaVM *vm = S.act->vm; jhttp h = {0}; int rc = DS_OFFLINE, net = S.base[0] != 0, unreached = 0;   // !net: no server, only the folder's bundles to unpack (dm_sync_begin)
+    int64_t t_start = now_ms(); struct stat lst; char lp[1100]; snprintf(lp, sizeof lp, "%s/%s", S.root, DS_LIST); int have_list = !stat(lp, &lst);
     if (net && ((*vm)->AttachCurrentThread(vm, &h.E, NULL) != JNI_OK || jhttp_init(&h))) LOG("[RED] data: no Java for the download: the game starts with the data the app has");
     else {
         ds_ctx c = {.root = S.root, .package = S.package, .fetch = net ? http_fetch : NULL, .fu = &h, .free_bytes = free_bytes, .note = sync_note, .log = sync_log};
-        int delay = 2;
+        int delay = 2, last_net = -1;
         for (int round = 1;; round++) {
-            pthread_mutex_lock(&S.mu); S.status = -1; S.msg[0] = 0; pthread_mutex_unlock(&S.mu);
+            int ns = net ? dm_net_state(h.E, S.act->clazz) : -1;
+            pthread_mutex_lock(&S.mu); S.status = -1; S.msg[0] = 0; S.retry_now = 0; S.netdown = ns == 0;
+            S.deadline = round == 1 && have_list ? now_ms() + 3000 : 0;   // the folder has a pack: the server gets 3 s in all, then the game starts with it
+            pthread_mutex_unlock(&S.mu);
+            if (ns == 0 && round == 1) LOG("data: the device has no network: the server is not asked");
             if (net && PT.on && !PT.fresh) pointer_resolve(&h);   // (again at each try until the pointer itself answers: a launch before the network is up reaches it later)
-            rc = ds_sync(&c);
+            rc = ds_sync(&c); unreached = rc == DS_OFFLINE && c.unreached;
             if (rc == DS_DONE || rc == DS_UPTODATE || rc == DS_OFFLINE) break;
             if (c.pr.phase == DS_PH_DOWNLOAD && c.pr.done) delay = 2;   // it moved on: the next break waits from the start again
             LOG("[RED] data: try %d failed (%d): %s; again in %d s", round, rc, c.err, delay);
             char msg[256]; snprintf(msg, sizeof msg, "%s", c.err);   // (the log keeps c.err in English; the screen says how much space in the app's language)
             if (rc == DS_ERR_SPACE) {   // (under 0.1 GB short: MB, else it would say 0.0 GB more)
                 double more = c.space_need / 1073741824.0, fr = c.space_free / 1073741824.0;
-                if (more < 0.1) { if (korean()) snprintf(msg, sizeof msg, "%.0fMB가 더 필요합니다 (남은 공간 %.1fGB)", c.space_need / 1048576.0, fr); else snprintf(msg, sizeof msg, "%.0f MB more space is needed; the device has %.1f GB free", c.space_need / 1048576.0, fr); }
-                else if (korean()) snprintf(msg, sizeof msg, "%.1fGB가 더 필요합니다 (남은 공간 %.1fGB)", more, fr);
+                if (more < 0.1) { if (korean()) snprintf(msg, sizeof msg, "%.0fMB가 더 필요해요 (남은 공간 %.1fGB)", c.space_need / 1048576.0, fr); else snprintf(msg, sizeof msg, "%.0f MB more space is needed; the device has %.1f GB free", c.space_need / 1048576.0, fr); }
+                else if (korean()) snprintf(msg, sizeof msg, "%.1fGB가 더 필요해요 (남은 공간 %.1fGB)", more, fr);
             }
-            for (int s = delay; s > 0; s--) { pthread_mutex_lock(&S.mu); S.status = rc; S.wait_s = s; snprintf(S.msg, sizeof S.msg, "%s", msg); pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); sleep(1); }
+            int need_net = rc == DS_ERR_NET && net;   // (DS_ERR_NET with a server: the folder has no whole pack, so the game cannot start without it)
+            pthread_mutex_lock(&S.mu); V.need_net = need_net; pthread_mutex_unlock(&S.mu);
+            last_net = ns;
+            for (int s = delay; s > 0; s--) {   // the countdown, a second a step; Retry, or the device's network coming back, ends it
+                pthread_mutex_lock(&S.mu); S.status = rc; S.wait_s = s; S.wait_tot = delay; snprintf(S.msg, sizeof S.msg, "%s", need_net ? "" : msg); pthread_cond_broadcast(&S.cv);
+                struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 1; int now_retry = S.retry_now;
+                while (!S.retry_now && pthread_cond_timedwait(&S.cv, &S.mu, &ts) == 0) {}
+                now_retry = S.retry_now; pthread_mutex_unlock(&S.mu);
+                if (now_retry) break;
+                if (need_net) { int n2 = dm_net_state(h.E, S.act->clazz); if (n2 == 1 && last_net == 0) { LOG("data: the device's network is back: trying again now"); break; } if (n2 >= 0) last_net = n2; }
+            }
             delay = rc == DS_ERR_PACKAGE || rc == DS_ERR_SPACE || rc == DS_ERR_LOCAL ? 30 : delay * 2 > 60 ? 60 : delay * 2;   // (DS_ERR_LOCAL: until an install pushes what is missing)
         }
-        LOG("%s", rc == DS_DONE ? c.pr.net ? "data: downloaded, the files folder holds the server's pack"
+        LOG("%s (%lld ms)", rc == DS_DONE ? c.pr.net ? "data: downloaded, the files folder holds the server's pack"
             : "data: unpacked the bundles in the folder, the files folder holds the server's pack" : rc == DS_UPTODATE ? "data: the files folder holds the server's pack already"
-            : "data: no server, the files folder holds a whole pack: the game starts with it");
+            : "data: no server, the files folder holds a whole pack: the game starts with it", (long long)(now_ms() - t_start));
+        if (net && (rc == DS_DONE || rc == DS_UPTODATE)) {   // the server answered: kept for the offline note ("last checked")
+            char p[700], t[32]; checked_path(p, sizeof p); int n = snprintf(t, sizeof t, "%lld\n", (long long)time(NULL));
+            if (p[0] && ds_write(p, t, (size_t)n)) LOG("[RED] data: cannot write %s (errno %d)", p, errno);
+        }
         if (net) {
             if (h.buf) (*h.E)->DeleteGlobalRef(h.E, h.buf);
             (*vm)->DetachCurrentThread(vm);
         }
     }
-    pthread_mutex_lock(&S.mu); S.finished = rc ? rc : 1; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+    char note[96];
+    if (rc == DS_OFFLINE && net) { if (V.checked[0]) snprintf(note, sizeof note, korean() ? "오프라인 · 마지막 확인 %s" : "Offline · last checked %s", V.checked); else snprintf(note, sizeof note, "%s", L("오프라인", "Offline")); }
+    else snprintf(note, sizeof note, "%s", rc == DS_DONE && net ? L("받음", "Downloaded") : rc == DS_OFFLINE ? L("준비됨", "Ready") : L("최신", "Up to date"));
+    pthread_mutex_lock(&S.mu); V.need_net = 0; S.status = -1; V.phase = PH_NONE; V.unreached = unreached; V.step[STV_DATA].state = STV_DONE; snprintf(V.step[STV_DATA].note, sizeof V.step[STV_DATA].note, "%s", note);
+    pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+    phase_end();
     return NULL;
 }
-static int sync_ready(int fd, int events, void *data) {   // the main thread's looper: the screen let the window go, the game starts
+static int sync_ready(int fd, int events, void *data) {   // the main thread's looper: a step of the start ended, the next one (or the game) starts
     (void)events; (void)data; char b; if (read(fd, &b, 1) != 1) return 1;
     void (*d)(void) = S.done; S.done = NULL; if (d) d();
     return 0;   // the fd is removed
@@ -458,6 +620,12 @@ static int package_name(ANativeActivity *act, char *out, size_t cap) {
     jstring s = m ? (*E)->CallObjectMethod(E, act->clazz, m) : NULL; if (jx(E, NULL, 0) || !s) return -1;
     const char *u = (*E)->GetStringUTFChars(E, s, NULL); if (!u) return -1;
     snprintf(out, cap, "%s", u); (*E)->ReleaseStringUTFChars(E, s, u); return 0;
+}
+static int phase_pipe(const char *what) {   // a pipe of its own for each step (called from the last step's sync_ready, whose fd the looper removes when it returns)
+    ALooper *lp = ALooper_forThread(); int np[2];
+    if (!lp || pipe(np)) { LOG("[RED] %s: no looper on the main thread", what); return -1; }
+    if (ALooper_addFd(lp, np[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, sync_ready, NULL) != 1) { LOG("[RED] %s: no looper on the main thread", what); close(np[0]); close(np[1]); return -1; }
+    S.pipe[0] = np[0]; S.pipe[1] = np[1]; return 0;
 }
 // 1: the APK has a data server (or the files folder has bundles to unpack), the sync runs and done() is called on the main thread once the game may start; 0: none, start the game now
 int dm_sync_begin(ANativeActivity *act, const char *root, void (*done)(void)) {
@@ -485,87 +653,76 @@ int dm_sync_begin(ANativeActivity *act, const char *root, void (*done)(void)) {
     }
     if (package_name(act, S.package, sizeof S.package)) { LOG("[RED] data: the app's package is not known: the game starts with the data the app has"); return 0; }
     snprintf(S.root, sizeof S.root, "%s", root);
-    S.done = done;
-    ALooper *lp = ALooper_forThread();
-    if (!lp || pipe(S.pipe) || ALooper_addFd(lp, S.pipe[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, sync_ready, NULL) != 1) { LOG("[RED] data: no looper on the main thread: the game starts with the data the app has"); return 0; }
+    pthread_mutex_lock(&S.mu); S.done = done; S.act = act; int ok = !phase_pipe("data"); pthread_mutex_unlock(&S.mu);
+    if (!ok) { LOG("[RED] data: the game starts with the data the app has"); return 0; }
     if (S.base[0] && PT.on) LOG("data: the data server is read from the pointer %s first (else the last one read, else %s)", PT.pointer, S.base);
     else if (S.base[0]) LOG("data: the app's data comes from %s%s", S.base, S.auth[0] ? " (Basic authentication)" : "");
     else LOG("data: no data server; the bundles in the files folder are unpacked before the game starts");
-    G.ok = !gl_load(); if (!G.ok) LOG("[RED] data: no EGL / GLES 2: the download runs without its screen");
-    pthread_mutex_lock(&S.mu); S.act = act; pthread_mutex_unlock(&S.mu);
+    pthread_mutex_lock(&S.mu); V.phase = PH_DATA; V.step[STV_DATA].state = STV_RUN; S.status = -1; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
     pthread_t t;
-    if (pthread_create(&t, NULL, screen_thread, NULL)) { LOG("[RED] data: cannot start the screen thread"); return 0; }
-    pthread_detach(t);
-    if (pthread_create(&t, NULL, sync_thread, NULL)) { LOG("[RED] data: cannot start the download thread"); pthread_mutex_lock(&S.mu); S.finished = 1; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); return 1; }
+    if (pthread_create(&t, NULL, sync_thread, NULL)) { LOG("[RED] data: cannot start the download thread"); pthread_mutex_lock(&S.mu); V.phase = PH_NONE; pthread_mutex_unlock(&S.mu); phase_end(); return 1; }
     pthread_detach(t);
     return 1;
 }
 
-// ---- the shader preparation: gfx_vk_gpl.inc vk_gpl_prepare on a thread of its own, this screen while it makes parts (none when there is nothing to make) ----
-__attribute__((weak)) int vk_gpl_prepare(void (*note)(void *u, int done, int total), void *u);   // (a build without the Vulkan backend has none)
+// ---- the shader preparation: gfx_vk_gpl.inc vk_gpl_prepare on a thread of its own, the screen's second step ----
 static void prep_note(void *u, int done, int total) { (void)u; pthread_mutex_lock(&S.mu); P.done = done; P.total = total; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); }
 static void *prep_thread(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "shaderprep");
-    int r = vk_gpl_prepare(prep_note, NULL);
-    pthread_mutex_lock(&S.mu); S.finished = 1; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
-    LOG("shaders: %s", r ? "prepared: the game starts" : "nothing to prepare: the game starts");
+    int64_t t0 = now_ms(); int r = vk_gpl_prepare(prep_note, NULL);
+    pthread_mutex_lock(&S.mu); V.phase = PH_NONE; V.step[STV_SHADERS].state = STV_DONE; snprintf(V.step[STV_SHADERS].note, sizeof V.step[STV_SHADERS].note, "%s", L("완료", "Done"));
+    pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+    LOG("shaders: %s (%lld ms)", r ? "prepared: the game starts" : "nothing to prepare: the game starts", (long long)(now_ms() - t0));
+    phase_end();
     return NULL;
 }
 // 1: the preparation runs and done() is called on the main thread once the game may start; 0: start the game now. w: the window if there is one already
 int dm_prep_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(void)) {
     if (!vk_gpl_prepare) return 0;
-    ALooper *lp = ALooper_forThread();
-    int np[2];   // a pipe of its own: called from the sync's sync_ready, whose fd the looper removes when it returns
-    if (!lp || pipe(np) || ALooper_addFd(lp, np[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, sync_ready, NULL) != 1) { LOG("[RED] shaders: no looper on the main thread: the game starts without the preparation"); return 0; }
     pthread_mutex_lock(&S.mu);
-    S.pipe[0] = np[0]; S.pipe[1] = np[1]; S.act = act; if (w && !S.win) S.win = w; S.done = done; S.finished = 0; S.lost = 0; S.released = 0; P.on = 1; P.done = P.total = P.gl_tried = 0;
-    G.ok = 0; G.prog = 0; G.tex = 0; G.surf = NULL; G.on = NULL;   // (the sync's context is gone with its screen)
+    int ok = !phase_pipe("shaders");
+    if (ok) { S.act = act; if (w && !S.win) S.win = w; S.done = done; P.on = 1; P.done = P.total = 0; V.phase = PH_PREP; V.step[STV_SHADERS].state = STV_RUN; pthread_cond_broadcast(&S.cv); }
     pthread_mutex_unlock(&S.mu);
+    if (!ok) { LOG("[RED] shaders: the game starts without the preparation"); return 0; }
     pthread_t t;
-    if (pthread_create(&t, NULL, screen_thread, NULL)) { LOG("[RED] shaders: cannot start the screen thread: the game starts without the preparation"); ALooper_removeFd(lp, S.pipe[0]); return 0; }
-    pthread_detach(t);
-    if (pthread_create(&t, NULL, prep_thread, NULL)) { LOG("[RED] shaders: cannot start the preparation thread"); pthread_mutex_lock(&S.mu); S.finished = 1; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); return 1; }
+    if (pthread_create(&t, NULL, prep_thread, NULL)) { LOG("[RED] shaders: cannot start the preparation thread"); pthread_mutex_lock(&S.mu); V.phase = PH_NONE; pthread_mutex_unlock(&S.mu); phase_end(); return 1; }
     pthread_detach(t);
     return 1;
 }
 
-// ---- the save's cloud sync at the start (savecloud_android.c): this screen while it runs; done() on the main thread once dm_cloud_screen_end ends it ----
+// ---- the save's cloud sync at the start (savecloud_android.c): the screen's third step; done() on the main thread once dm_cloud_screen_end ends it ----
 int dm_cloud_screen_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(void)) {
-    ALooper *lp = ALooper_forThread();
-    int np[2];   // a pipe of its own, as dm_prep_begin's (it may be called from a looper callback whose fd is removed when it returns)
-    if (!lp || pipe(np) || ALooper_addFd(lp, np[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, sync_ready, NULL) != 1) { LOG("[RED] cloud: no looper on the main thread"); return 0; }
     pthread_mutex_lock(&S.mu);
-    S.pipe[0] = np[0]; S.pipe[1] = np[1]; S.act = act; if (w && !S.win) S.win = w; S.done = done; S.finished = 0; S.lost = 0; S.released = 0;
-    P.on = 0; CL.on = 1; CL.gl_tried = 0;
-    G.ok = 0; G.prog = 0; G.tex = 0; G.surf = NULL; G.on = NULL;   // (an earlier screen's context is gone with it)
+    int ok = V.open && !V.closing && !phase_pipe("cloud");
+    if (ok) { S.act = act; if (w && !S.win) S.win = w; S.done = done; V.phase = PH_CLOUD; V.step[STV_CLOUD].state = STV_RUN; pthread_cond_broadcast(&S.cv); }
     pthread_mutex_unlock(&S.mu);
-    pthread_t t;
-    if (pthread_create(&t, NULL, screen_thread, NULL)) { LOG("[RED] cloud: cannot start the screen thread"); ALooper_removeFd(lp, np[0]); close(np[0]); close(np[1]); CL.on = 0; return 0; }
-    pthread_detach(t);
-    return 1;
+    return ok;
 }
-// ---- a notice the start stops at (front_android.c: data rewritten for another host contract): this screen until the player leaves the app; the game is not started ----
-// ko, en: the title and two lines in each language; detail: the log's line, small. 0 when the screen cannot start (the caller ends the app)
+// 1: the data's step of this start could not reach its server and the game starts with the pack on the device (savecloud_android.c: then the cloud's step asks
+// nothing of its server either, savesync.h ss_start_offline)
+int dm_data_unreached(void) { pthread_mutex_lock(&S.mu); int u = V.unreached; pthread_mutex_unlock(&S.mu); return u; }
+// ---- a notice the start stops at (front_android.c: data rewritten for another host contract): the start screen shows it until the player leaves the app; the game is
+// not started. ko, en: the title and two lines in each language; detail: the log's line, small. 0 when the screen is not open (the caller ends the app) ----
 int dm_notice_begin(ANativeActivity *act, ANativeWindow *w, const char *const ko[3], const char *const en[3], const char *detail) {
     pthread_mutex_lock(&S.mu);
-    S.act = act; if (w && !S.win) S.win = w; S.done = NULL; S.finished = 0; S.lost = 0; S.released = 0; P.on = 0; CL.on = 0;
-    NT.on = 1; NT.gl_tried = 0;
-    for (int i = 0; i < 3; i++) { snprintf(NT.ko[i], sizeof NT.ko[i], "%s", ko[i]); snprintf(NT.en[i], sizeof NT.en[i], "%s", en[i]); }
-    snprintf(NT.detail, sizeof NT.detail, "%s", detail ? detail : "");
-    G.ok = 0; G.prog = 0; G.tex = 0; G.surf = NULL; G.on = NULL;   // (an earlier screen's context is gone with it)
+    int ok = V.open && !V.closing;
+    if (ok) {
+        S.act = act; if (w && !S.win) S.win = w; S.done = NULL;
+        for (int i = 0; i < 3; i++) { snprintf(NT.ko[i], sizeof NT.ko[i], "%s", ko[i]); snprintf(NT.en[i], sizeof NT.en[i], "%s", en[i]); }
+        snprintf(NT.detail, sizeof NT.detail, "%s", detail ? detail : "");
+        V.phase = PH_NOTICE; pthread_cond_broadcast(&S.cv);
+    }
     pthread_mutex_unlock(&S.mu);
-    pthread_t t;
-    if (pthread_create(&t, NULL, screen_thread, NULL)) { LOG("[RED] notice: cannot start the screen thread"); NT.on = 0; return 0; }
-    pthread_detach(t);
-    return 1;
+    return ok;
 }
-void dm_cloud_screen_end(void) { pthread_mutex_lock(&S.mu); if (CL.on) { S.finished = 1; pthread_cond_broadcast(&S.cv); } pthread_mutex_unlock(&S.mu); }
+void dm_cloud_screen_end(void) {
+    pthread_mutex_lock(&S.mu); int on = V.phase == PH_CLOUD; if (on) { V.phase = PH_NONE; pthread_cond_broadcast(&S.cv); } pthread_mutex_unlock(&S.mu);
+    if (on) phase_end();
+}
 void dm_cloud_screen_poke(void) { pthread_mutex_lock(&S.mu); pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); }
 int dm_cloud_screen_hit(float x, float y, int *kind) {
     pthread_mutex_lock(&S.mu); ANativeWindow *w = S.win; int ww = w ? ANativeWindow_getWidth(w) : 0, wh = w ? ANativeWindow_getHeight(w) : 0; pthread_mutex_unlock(&S.mu);
     if (ww <= 0 || wh <= 0) return -1;
-    dm_cloud_view v; dm_cloud_view_get(&v); int ch = cl_canvas_h(ww, wh), r[3][4], n = cl_layout(640, ch, &v, r);
-    float cx = x * 640.0f / ww, cy = y * (float)ch / wh;
-    for (int i = 0; i < n; i++) if (cx >= r[i][0] && cx < r[i][0] + r[i][2] && cy >= r[i][1] && cy < r[i][1] + r[i][3]) { *kind = v.ncards ? 1 : 2; return i; }
-    return -1;
+    dm_cloud_view v; dm_cloud_view_get(&v);
+    return stv_hit(&v, ww, wh, x, y, kind);
 }

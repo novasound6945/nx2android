@@ -1273,9 +1273,9 @@ static void *input_thread(void *a) {
     return NULL;
 }
 static _Atomic int g_syncing;   // the data download runs (dm_sync_begin): the game, its input thread with it, starts when it ends (game_start)
-static int on_input_early(int fd, int events, void *data) {   // the main thread's looper: events before the game, none of them handled but the cloud sync's start screen's
+static int on_input_early(int fd, int events, void *data) {   // the main thread's looper: events before the game, none of them handled but the start screen's (the cloud's questions, Retry)
     (void)fd; (void)events; (void)data; AInputEvent *e;
-    while (g_queue && AInputQueue_getEvent(g_queue, &e) >= 0) { if (AInputQueue_preDispatchEvent(g_queue, e)) continue; AInputQueue_finishEvent(g_queue, e, dm_cloud_input(e)); }
+    while (g_queue && AInputQueue_getEvent(g_queue, &e) >= 0) { if (AInputQueue_preDispatchEvent(g_queue, e)) continue; AInputQueue_finishEvent(g_queue, e, dm_cloud_input(e) || dm_start_input(e)); }
     return 1;
 }
 static void on_queue_created(ANativeActivity *a, AInputQueue *q) {
@@ -1433,6 +1433,9 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
     snprintf(p, sizeof p, "%s/shaders.dmsv", g_root); setenv("DM_VK_SHADERS", p, 0);
     g_sdk = sdk; snprintf(g_mods, sizeof g_mods, "%s/mods", g_root);
     // an APK ported with --data-url downloads its data first (datasync_android.c), on threads of its own; the game starts on this thread when that ends
+    // the start screen (datasync_android.c), one for the data download, the shader preparation and the cloud's start: it shows only once they took 300 ms, and closes
+    // (its thread, EGL, fonts and icon gone) before the game takes the window (game_run)
+    dm_start_screen_open(act, g_root);
     atomic_store(&g_syncing, 1);
     if (dm_sync_begin(act, g_root, prep_late)) return;
     if (prep_start()) return;
@@ -1456,16 +1459,16 @@ static void game_start(ANativeActivity *act, int late) {   // late: after onCrea
     unsetenv("DM_CTL");   // a release build takes no remote key presses (the control file is a development tool)
 #endif
     // the save manager's requests (saves_android.c), before the host mounts the save: an import chosen in the menu or pushed by porter, an export porter asks for
-    if (dm_saves_start(g_root)) { LOG("[saves] the request asked the app to end: the game is not started"); g_quit = 1; if (late) act_finish(act); return; }
-    if (!romfs_readable(act, sdk)) { g_quit = 1; if (late) act_finish(act); return; }   // after the save manager's requests, which need no RomFS
+    if (dm_saves_start(g_root)) { LOG("[saves] the request asked the app to end: the game is not started"); g_quit = 1; dm_start_screen_close(); if (late) act_finish(act); return; }
+    if (!romfs_readable(act, sdk)) { g_quit = 1; dm_start_screen_close(); if (late) act_finish(act); return; }   // after the save manager's requests, which need no RomFS
     char why[300];
-    if (!rewrite_abi_fits(why, sizeof why)) {   // the notice stays until the player leaves the app; its input goes to on_input_early (g_syncing), which hands the keys back
+    if (!rewrite_abi_fits(why, sizeof why)) {   // the start screen shows the notice until the player leaves the app; its input goes to on_input_early (g_syncing), which hands the keys back
         LOG("[RED] the game's rewritten code does not fit this APK's host (%s): the game is not started. Install the APK that came with the data, or port the game again "
             "from its files (porter apk-update refuses such a pack)", why);
-        static const char *const ko[3] = {"게임을 시작할 수 없습니다", "이 앱과 기기에 있는 게임 데이터가 서로 맞지 않습니다", "데이터와 함께 배포된 앱을 설치하거나 배포한 곳에 알려 주세요"};
+        static const char *const ko[3] = {"게임을 시작할 수 없어요", "이 앱과 기기에 있는 게임 데이터가 서로 맞지 않아요", "데이터와 함께 배포된 앱을 설치하거나 배포한 곳에 알려 주세요"};
         static const char *const en[3] = {"The game cannot start", "This app and the game data on the device do not fit together", "Install the app that came with the data, or tell where you got it"};
         atomic_store(&g_syncing, 1);
-        if (!dm_notice_begin(act, phone_window(), ko, en, why)) { atomic_store(&g_syncing, 0); g_quit = 1; if (late) act_finish(act); }
+        if (!dm_notice_begin(act, phone_window(), ko, en, why)) { atomic_store(&g_syncing, 0); g_quit = 1; dm_start_screen_close(); if (late) act_finish(act); }
         return;
     }
     // the save's cloud sync (savecloud_android.c, sync.txt), still before the host mounts the save: its start screen runs on threads of its own and the game starts from
@@ -1478,11 +1481,12 @@ static void game_start(ANativeActivity *act, int late) {   // late: after onCrea
 static void cloud_done(int quit) {   // the main thread, once the cloud sync's start ended: the game starts (its input queue to the input thread), or the player chose to end the app
     if (g_queue) AInputQueue_detachLooper(g_queue);
     atomic_store(&g_syncing, 0);
-    if (quit) { LOG("cloud: the player cancelled the start: the app ends"); g_quit = 1; act_finish(g_act); return; }
+    if (quit) { LOG("cloud: the player cancelled the start: the app ends"); g_quit = 1; dm_start_screen_close(); act_finish(g_act); return; }
     game_run(g_act);
     if (g_queue) { while (!g_ilooper) usleep(1000); AInputQueue_attachLooper(g_queue, g_ilooper, 1, on_input, NULL); }
 }
 static void game_run(ANativeActivity *act) {   // the game itself: settings, the input and host threads
+    dm_start_screen_close();   // the window is the game's from here: the start screen's thread, EGL and everything it loaded are gone before the host starts
     settings_load(); aspect_variant(act); limit_apply(1);   // (after the variant's env-4x3.txt, which comes after env.txt: Auto gives back what both set)
     dm_haptics_android_start(act, atomic_load(&g_set_rumble)); dm_lan_android_start(act);
     { pthread_t w; if (!pthread_create(&w, NULL, pad_watch, act->vm)) pthread_detach(w); }

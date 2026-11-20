@@ -274,7 +274,7 @@ static int ss_state_save(const char *path, const ss_state *s) { char b[1024]; in
 // session.state: "open" (the start), "alive" (a heartbeat each minute while the game is on screen) or "closed" (onPause); dirty: that device has a save not yet uploaded
 // (an older server sends no dirty: 0). updated: when the server took it
 // time and updated: Unix seconds (milliseconds when the number is that large), or an ISO 8601 text ("2026-11-20T12:34:56Z", "...+09:00", fractions ignored)
-typedef struct { uint64_t seq, size; char sha[65], device[64], game_version[32], build[64]; int64_t time; int session, s_open, s_dirty; char s_device[64]; int64_t s_updated; } ss_meta;   // s_open: open or alive
+typedef struct { uint64_t seq, size; int64_t files; char sha[65], device[64], game_version[32], build[64]; int64_t time; int session, s_open, s_dirty; char s_device[64]; int64_t s_updated; } ss_meta;   // s_open: open or alive; files: the save's file count (the meta's fileCount), -1 when the server keeps none
 static int64_t ss_days(int y, int m, int d) { y -= m <= 2; int64_t era = (y >= 0 ? y : y - 399) / 400; int yoe = y - (int)era * 400, doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1, doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; return era * 146097 + doe - 719468; }
 static int ss_iso_time(const char *s, int64_t *out) {
     int Y, M, D, h = 0, mi = 0, se = 0, n = 0;
@@ -319,7 +319,7 @@ static int ss_session_obj(ds_js *j, ss_meta *m) {
     }
 }
 static int ss_meta_obj(ds_js *j, ss_meta *m) {   // an object at j (null: -2)
-    memset(m, 0, sizeof *m); char key[32]; ds_ws(j);
+    memset(m, 0, sizeof *m); m->files = -1; char key[32]; ds_ws(j);
     if (j->e - j->p >= 4 && !memcmp(j->p, "null", 4)) { j->p += 4; return -2; }
     if (j->p >= j->e || *j->p++ != '{') return -1;
     ds_ws(j); if (j->p < j->e && *j->p == '}') { j->p++; return -1; }
@@ -328,6 +328,7 @@ static int ss_meta_obj(ds_js *j, ss_meta *m) {   // an object at j (null: -2)
         ds_ws(j); if (j->p >= j->e || *j->p++ != ':') return -1;
         if (!strcmp(key, "seq")) { if (ss_js_u64(j, &m->seq)) return -1; }
         else if (!strcmp(key, "size")) { if (ss_js_u64(j, &m->size)) return -1; }
+        else if (!strcmp(key, "fileCount")) { ds_ws(j); uint64_t v; if (j->e - j->p >= 4 && !memcmp(j->p, "null", 4)) { j->p += 4; } else { if (ss_js_u64(j, &v)) return -1; m->files = (int64_t)v; } }
         else if (!strcmp(key, "sha256")) { if (ds_str(j, m->sha, sizeof m->sha)) return -1; for (char *q = m->sha; *q; q++) if (*q >= 'A' && *q <= 'F') *q += 32; }
         else if (!strcmp(key, "time")) { if (ss_js_time(j, &m->time)) return -1; }
         else if (!strcmp(key, "device")) { ds_ws(j); if (j->p < j->e && *j->p == '"') { if (ds_str(j, m->device, sizeof m->device)) return -1; } else if (ds_skip(j, 1)) return -1; }
@@ -387,6 +388,11 @@ static int ss_decide(int net, const ss_meta *m, const ss_state *st, const char *
     if (m->seq > st->seq && !changed) return SS_GO_DOWNLOAD;
     return SS_GO_CONFLICT;   // the server moved and this device's save changed too (or the server went back to an older seq: neither is overwritten by itself)
 }
+// whether the start's sync asks the server at all: not when the device has no network (dev_net 0; -1 not known asks), nor when the data's step of this start could
+// not reach its server just now (data_unreached; an HTTP error is not that). Then the game starts at once with this device's save, as SS_NET_FAIL decides
+// (SS_GO_OFFLINE: what changed is owed and goes up once there is a connection), without the meta request that could only time out and without the "cannot be
+// reached" question. A first failure of the cloud's own request (the data's server answered) still asks
+static int ss_start_offline(int dev_net, int data_unreached) { return dev_net == 0 || data_unreached; }
 // whether this run syncs: SS_RUN_NONE no sync.txt (nothing at all, as before the sync existed); SS_RUN_SUPPRESSED a trial build (an APK without a data server, a debuggable
 // one, env.txt's DM_SAVESYNC=off) or the game's sync switched off: no network, the run is marked offline_play; SS_RUN_SYNC the start's sync
 enum { SS_RUN_NONE, SS_RUN_SUPPRESSED, SS_RUN_SYNC };
@@ -427,6 +433,23 @@ static void ss_fmt_ago(char *o, size_t n, int64_t t, int64_t now, int ko) {
     else if (d < 2 * 86400) snprintf(o, n, ko ? "어제" : "yesterday");
     else snprintf(o, n, ko ? "%d일 전" : "%d days ago", (int)(d / 86400));
 }
+// The archive's file count (folders not counted), as the start screen's card shows it beside the size; -1 for an archive ss_untar would not take
+static int64_t ss_tar_files(const uint8_t *p, size_t n) {
+    int64_t files = 0; char name[512]; const char *why = NULL;
+    for (size_t o = 0; o + 512 <= n;) {
+        uint64_t size = 0; int k = ss_tar_entry(p + o, name, sizeof name, &size, &why);
+        if (k < 0) return -1;
+        if (k == 2) return files;
+        if (k == 0) files++;
+        o += 512 + (size_t)((size + 511) / 512 * 512);
+    }
+    return -1;
+}
+static void ss_fmt_size(char *o, size_t n, uint64_t b) {   // "1.2 MB", "640 KB", "12 MB"
+    double m = b / 1048576.0;
+    if (b < 1024 * 1024) snprintf(o, n, "%llu KB", (unsigned long long)((b + 1023) / 1024));
+    else snprintf(o, n, m < 10 ? "%.1f MB" : "%.0f MB", m);
+}
 // a query value: unreserved bytes as they are, the rest percent-encoded
 static void ss_qenc(char *o, size_t n, const char *s) {
     size_t k = 0; if (!n) return;
@@ -434,4 +457,48 @@ static void ss_qenc(char *o, size_t n, const char *s) {
         if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') o[k++] = (char)c;
         else k += (size_t)snprintf(o + k, n - k, "%%%02X", c); }
     o[k] = 0;
+}
+
+// ---- while the game runs (savecloud_android.c's upload thread): what a tick does, what an upload's answer does to the state, which corner notes show. No question is ever
+// asked once the game runs: a conflict found then is kept for the next start's cards ----
+// A run that started offline (or lost the network) has no open session on the server: once the network is back it opens one (dirty while a save is owed) and the heartbeats
+// follow; an owed upload is tried at once then, its backoff forgotten. A run without the sync (B at the start, a trial build, the game's sync off) sends nothing, ever
+typedef struct {
+    int syncs;               // this run syncs (not skipped, not a trial build, not switched off, the token not refused)
+    int net;                 // the device has a network now (ConnectivityManager): 1, 0, or -1 when not known
+    int was_net;             // the last tick's net
+    int sess_open;           // the server took this run's open (or a heartbeat)
+    int owed, conflict;      // a save the cloud has not got; a conflict waits for the next start
+    int committed;           // a burst of the game's commits ended (no new one for a poll: about 3 s after it saved) and has not gone up
+    int64_t now, next_try, last_hb;   // monotonic ms: when an owed upload is tried again (the backoff), the last heartbeat
+} ss_tick_in;
+enum { SS_DO_UPLOAD = 1, SS_DO_OPEN = 2, SS_DO_ALIVE = 4, SS_DO_RETRY_NOW = 8 };   // SS_DO_RETRY_NOW: the backoff forgotten (the network came back)
+static int ss_tick(const ss_tick_in *t) {
+    if (!t->syncs) return 0;
+    if (t->net == 0) return 0;   // known offline: nothing is tried (no request that can only time out)
+    int back = t->net == 1 && t->was_net == 0, act = back ? SS_DO_RETRY_NOW : 0;
+    if (!t->conflict && (t->committed || (t->owed && (back || t->now >= t->next_try)))) act |= SS_DO_UPLOAD;
+    if (!t->sess_open) act |= SS_DO_OPEN;   // (an open that failed is tried at each tick the network is up, as a heartbeat would be)
+    else if (t->now - t->last_hb >= 60000) act |= SS_DO_ALIVE;
+    return act;
+}
+// An upload's answer (code: HTTP, 0 no answer) into the state; returns the note it calls for (SS_NOTE_*), the caller shows it if ss_note_ok lets it
+enum { SS_NOTE_NONE, SS_NOTE_SAVED, SS_NOTE_WAITING, SS_NOTE_CONFLICT, SS_NOTE_OFF, SS_NOTE_TRIAL, SS_NOTE_N };
+static int ss_after_put(ss_state *st, int code, uint64_t seq, const char *sha, const ss_meta *cur, int64_t now_s) {
+    if (code == 200) { if (seq) st->seq = seq; snprintf(st->sha, sizeof st->sha, "%s", sha); st->pending = st->force = 0; st->last_up = now_s; return SS_NOTE_SAVED; }
+    if (code == 409) {   // another device's save is newer: not overwritten, the next start asks
+        st->conflict = 1; st->pending = 1; st->cseq = cur ? cur->seq : 0; st->ctime = cur ? cur->time : 0; snprintf(st->cdevice, sizeof st->cdevice, "%s", cur ? cur->device : "");
+        return SS_NOTE_CONFLICT;
+    }
+    if (code == 401 || code == 403) { st->auth = 1; return SS_NOTE_NONE; }
+    st->pending = 1; return code ? SS_NOTE_NONE : SS_NOTE_WAITING;
+}
+// The corner notes: one when the state changes (saved -> waiting, waiting -> saved, a conflict), never the same kind twice in a row nor within 5 minutes of the last one
+// of its kind (a network that comes and goes, a retry, every save of a game that saves often: one note)
+#define SS_NOTE_GAP_MS (5 * 60 * 1000)
+typedef struct { int last; int64_t at[SS_NOTE_N]; } ss_notes;
+static int ss_note_ok(ss_notes *n, int kind, int64_t now_ms) {
+    if (kind <= SS_NOTE_NONE || kind >= SS_NOTE_N) return 0;
+    if (kind == n->last || (n->at[kind] && now_ms - n->at[kind] < SS_NOTE_GAP_MS)) return 0;
+    n->last = kind; n->at[kind] = now_ms ? now_ms : 1; return 1;
 }
