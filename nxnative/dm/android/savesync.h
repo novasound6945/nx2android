@@ -586,7 +586,23 @@ static void ss_qenc(char *o, size_t n, const char *s) {
 // device send the same key and the server links them together (the first game linked by a code, the others by link/start's linked:true at their next start). start's
 // answer: {linked:true, token, device:{id,name}} or {linked:false, code, poll, expiresIn, url}; 429 too often. poll's: {status:"waiting", expiresIn} or {status:"linked",
 // token, device}; 410 the code ran out, 404 not known. The token becomes sync.txt as an adb push would write it (url=, token=, device=), mode 0600
-#define SS_LINK_URL "https://saves.example.com"   // the server when env.txt has no DM_SAVESYNC_URL
+// The device link's server, first of: sync.txt's url= (cfg_url, "" or NULL none), env.txt's DM_SAVESYNC_URL (env), the APK's assets/nx2a/savecloud.txt (asset: its text,
+// a url= line; the porter writes it from the porter computer's own savecloud.txt, so the address is in no source file). Each an http:// or https:// address, printable
+// ASCII, its trailing / dropped; one that is not is passed over. 0 and o set; -1 none: the app has no cloud save server (no link is asked, the launcher says so)
+static int ss_link_url_ok(const char *u, size_t n) { return u && (!strncmp(u, "https://", 8) || !strncmp(u, "http://", 7)) && ds_url_text(u) && strlen(u) < n; }
+static int ss_link_server(char *o, size_t n, const char *cfg_url, const char *env, const char *asset) {
+    char a[600] = "";
+    for (const char *s = asset; s && *s; ) {   // the asset's url= line (CR LF or LF; blank lines and # comments passed over)
+        const char *e = s; while (*e && *e != '\n' && *e != '\r') e++;
+        while (s < e && (*s == ' ' || *s == '\t')) s++;
+        if (e - s > 4 && !strncmp(s, "url=", 4)) { size_t k = (size_t)(e - s - 4); if (k < sizeof a) { memcpy(a, s + 4, k); a[k] = 0; while (k && (a[k - 1] == ' ' || a[k - 1] == '\t')) a[--k] = 0; } break; }
+        s = *e ? e + 1 : e;
+    }
+    const char *pick = ss_link_url_ok(cfg_url, n) ? cfg_url : ss_link_url_ok(env, n) ? env : ss_link_url_ok(a, n) ? a : NULL;
+    if (!pick) { if (n) o[0] = 0; return -1; }
+    snprintf(o, n, "%s", pick); size_t k = strlen(o); while (k && o[k - 1] == '/') o[--k] = 0;
+    return k > (o[4] == 's' ? 8u : 7u) ? 0 : (o[0] = 0, -1);   // ("https://" alone is no server)
+}
 static void ss_link_key(const char *android_id, char out[65]) {
     ds_sha s; ds_sha_init(&s); static const char pre[] = "nx2a-savecloud:";
     ds_sha_update(&s, pre, sizeof pre - 1); ds_sha_update(&s, android_id, strlen(android_id)); ds_sha_hex(&s, out); memset(&s, 0, sizeof s);
@@ -756,6 +772,16 @@ static void ss_link_qr(char *o, size_t n, const char *url, const char *code) { s
 static void ss_link_host(char *o, size_t n, const char *url) {
     const char *s = !strncmp(url, "https://", 8) ? url + 8 : !strncmp(url, "http://", 7) ? url + 7 : url; snprintf(o, n, "%s", s);
     size_t k = strlen(o); while (k && o[k - 1] == '/') o[--k] = 0;
+}
+// The link page's address: link/start's url (the server's own word for it), else <server>/link (base: ss_link_server's); "" with neither
+static void ss_link_page_url(char *o, size_t n, const char *answer_url, const char *base) {
+    if (answer_url && answer_url[0]) snprintf(o, n, "%s", answer_url); else if (base && base[0]) snprintf(o, n, "%s/link", base); else if (n) o[0] = 0;
+}
+// The linked page's last line: where the device's name is changed (the address's host, from ss_link_host's text or a url; no host: the web, unnamed)
+static void ss_link_foot(char *o, size_t n, const char *addr, int ko) {
+    char site[160]; ss_link_host(site, sizeof site, addr ? addr : ""); char *sl = strchr(site, '/'); if (sl) *sl = 0;
+    if (site[0]) snprintf(o, n, ko ? "기기 이름은 웹 %s/saves 에서 바꾸거나 연결을 끊을 수 있어요" : "The device's name can be changed, or the link ended, at %s/saves", site);
+    else snprintf(o, n, "%s", ko ? "기기 이름은 웹에서 바꾸거나 연결을 끊을 수 있어요" : "The device's name can be changed, or the link ended, on the web");
 }
 // A token the server refused (401 or 403 to meta, data or session: the device was unlinked on the web, or a hand-pushed token's device was merged into a linked one),
 // whether sync.txt came by hand or from the link: sync.txt goes aside to sync.txt.revoked (sync-state.txt stays: the save's sync is the device's, not the token's), and

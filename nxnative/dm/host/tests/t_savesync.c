@@ -351,6 +351,7 @@ static void t_modes(void) {
 }
 
 // the device link: the key, when the start asks, link/start's and link/poll's answers, sync.txt as it writes it (0600, read back by ss_cfg_text)
+#define SS_TEST_URL "https://saves.example.com"   // an example server (the link's own has no default: savesync.h ss_link_server)
 static void t_link(void) {
     char k[65]; ss_link_key("9774d56d682e549c", k);
     ds_sha h; ds_sha_init(&h); ds_sha_update(&h, "nx2a-savecloud:9774d56d682e549c", 31); char want[65]; ds_sha_hex(&h, want);
@@ -389,15 +390,32 @@ static void t_link(void) {
     const char *JF = "{\"linked\":true}"; CHECK(ss_link_read(200, JF, strlen(JF), &l) == SS_LK_BAD, "linked without a token");
     char q[400]; ss_link_qr(q, sizeof q, "https://saves.example.com/link", "K7Q-4MP"); CHECK(!strcmp(q, "https://saves.example.com/link?code=K7Q-4MP"), "%s", q);
     ss_link_host(q, sizeof q, "https://saves.example.com/link/"); CHECK(!strcmp(q, "saves.example.com/link"), "%s", q);
+    // the server: sync.txt's url= > env.txt's DM_SAVESYNC_URL > the APK's assets/nx2a/savecloud.txt > none (the cloud save off)
+    char sv[600]; const char *AS = "# the porter's savecloud.txt\r\nurl=https://saves.example.com/\r\n";
+    CHECK(!ss_link_server(sv, sizeof sv, "https://cfg.example.com", "https://env.example.com", AS) && !strcmp(sv, "https://cfg.example.com"), "sync.txt's url= first: %s", sv);
+    CHECK(!ss_link_server(sv, sizeof sv, "", "https://env.example.com/", AS) && !strcmp(sv, "https://env.example.com"), "then DM_SAVESYNC_URL: %s", sv);
+    CHECK(!ss_link_server(sv, sizeof sv, NULL, NULL, AS) && !strcmp(sv, SS_TEST_URL), "then the asset (its / dropped): %s", sv);
+    CHECK(!ss_link_server(sv, sizeof sv, NULL, "ftp://env.example.com", "url=http://lan.example.com:8080\n") && !strcmp(sv, "http://lan.example.com:8080"), "a bad DM_SAVESYNC_URL passed over: %s", sv);
+    CHECK(ss_link_server(sv, sizeof sv, NULL, NULL, NULL) == -1 && !sv[0] && ss_link_server(sv, sizeof sv, NULL, NULL, "") == -1, "none at all: no server");
+    CHECK(ss_link_server(sv, sizeof sv, NULL, NULL, "token=x\nurl=\n") == -1 && ss_link_server(sv, sizeof sv, NULL, NULL, "url=https://") == -1
+          && ss_link_server(sv, sizeof sv, NULL, NULL, "url=https://a b") == -1 && ss_link_server(sv, sizeof sv, "ftp://x", "", "url=saves.example.com") == -1, "no usable address: no server");
+    CHECK(!ss_link_server(sv, sizeof sv, NULL, NULL, "  url=https://saves.example.com  ") && !strcmp(sv, SS_TEST_URL), "spaces around the line: %s", sv);
+    // the link page's address: the server's answer, else <server>/link; the linked page's site from it
+    ss_link lb; CHECK(ss_link_read(200, JB, strlen(JB), &lb) == SS_LK_CODE, "the code again"); ss_link_page_url(q, sizeof q, lb.url, "https://other.example.com"); CHECK(!strcmp(q, "https://saves.example.com/link"), "the answer's url: %s", q);
+    ss_link_page_url(q, sizeof q, "", SS_TEST_URL); CHECK(!strcmp(q, "https://saves.example.com/link"), "no url in the answer: <server>/link: %s", q);
+    ss_link_page_url(q, sizeof q, "", ""); CHECK(!q[0], "no server: no address");
+    ss_link_foot(q, sizeof q, "saves.example.com/link", 1); CHECK(!strcmp(q, "기기 이름은 웹 saves.example.com/saves 에서 바꾸거나 연결을 끊을 수 있어요"), "%s", q);
+    ss_link_foot(q, sizeof q, "https://saves.example.com/link", 0); CHECK(strstr(q, "at saves.example.com/saves"), "%s", q);
+    ss_link_foot(q, sizeof q, "", 1); CHECK(!strstr(q, "/saves") && strstr(q, "웹에서"), "no host: the web unnamed: %s", q);
     char p[1024]; path(p, sizeof p, "sync.txt"); unlink(p);
-    CHECK(!ss_link_write(p, SS_LINK_URL, "tok_ABC123", "Retroid Pocket Nova"), "sync.txt written");
+    CHECK(!ss_link_write(p, SS_TEST_URL, "tok_ABC123", "Retroid Pocket Nova"), "sync.txt written");
     struct stat st; CHECK(!stat(p, &st) && (st.st_mode & 0777) == 0600, "sync.txt is 0600 (%o)", st.st_mode & 0777);
     size_t n = 0; char *txt = ds_read(p, &n, 1 << 16); ss_cfg c;
-    CHECK(txt && ss_cfg_text(txt, &c) && !strcmp(c.url, SS_LINK_URL) && !strcmp(c.token, "tok_ABC123") && !strcmp(c.device, "Retroid Pocket Nova"), "sync.txt reads back as the sync's");
+    CHECK(txt && ss_cfg_text(txt, &c) && !strcmp(c.url, SS_TEST_URL) && !strcmp(c.token, "tok_ABC123") && !strcmp(c.device, "Retroid Pocket Nova"), "sync.txt reads back as the sync's");
     free(txt);
-    CHECK(ss_link_write(p, "ftp://x", "t", "d") == -1 && ss_link_write(p, SS_LINK_URL, "", "d") == -1, "no address or no token: not written");
+    CHECK(ss_link_write(p, "ftp://x", "t", "d") == -1 && ss_link_write(p, SS_TEST_URL, "", "d") == -1, "no address or no token: not written");
     txt = ds_read(p, &n, 1 << 16); CHECK(txt && strstr(txt, "tok_ABC123"), "a refused write leaves the file as it was"); free(txt);
-    CHECK(!ss_link_write(p, SS_LINK_URL, "t3", ""), "again"); txt = ds_read(p, &n, 1 << 16); CHECK(txt && ss_cfg_text(txt, &c) && !strcmp(c.device, "android"), "no name: android"); free(txt);
+    CHECK(!ss_link_write(p, SS_TEST_URL, "t3", ""), "again"); txt = ds_read(p, &n, 1 << 16); CHECK(txt && ss_cfg_text(txt, &c) && !strcmp(c.device, "android"), "no name: android"); free(txt);
     char nw[1100]; snprintf(nw, sizeof nw, "%s.new", p); CHECK(stat(nw, &st) != 0, "no .new left");
 }
 
@@ -421,7 +439,7 @@ static void t_reauth(void) {
     size_t n = 0; char *txt = ds_read(rv, &n, 1 << 16); CHECK(txt && strstr(txt, "handtok"), "its contents kept"); free(txt);
     txt = ds_read(sp, &n, 1 << 16); ss_state s; if (txt) ss_state_text(txt, &s); CHECK(txt && s.seq == 7 && s.pending == 1, "sync-state.txt stays as it was"); free(txt);
     CHECK(!ss_revoke(p), "no sync.txt: nothing to do, no error");
-    CHECK(!ss_link_write(p, SS_LINK_URL, "tok_new", "Retroid Pocket Nova") && !ss_revoke(p), "the link's sync.txt refused too: aside again");
+    CHECK(!ss_link_write(p, SS_TEST_URL, "tok_new", "Retroid Pocket Nova") && !ss_revoke(p), "the link's sync.txt refused too: aside again");
     txt = ds_read(rv, &n, 1 << 16); CHECK(txt && strstr(txt, "tok_new") && !strstr(txt, "handtok"), "the last one replaces the one aside before"); free(txt);
 }
 

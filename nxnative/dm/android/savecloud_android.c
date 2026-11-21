@@ -88,6 +88,7 @@ static struct {
     char key[65], model[96], label[160];               // the device link's: the device's key (never logged whole), its model, the app's label
     unsigned cfg_gen;                                  // moves on each time C.cfg changes (a request's hres.gen: which token it was sent with)
     ss_reauth reauth; int reauth_busy;                 // a refused token's link/start (savesync.h ss_reauth_*: once a run); one thread at a time asks it
+    int srv_read; char srv_asset[700];                 // assets/nx2a/savecloud.txt read (server_asset_load); its text, "" without one (the porter had no savecloud.txt)
 } C = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, .mode = SS_RUN_NONE};
 static void st_save_locked(void) { if (C.state_path[0] && ss_state_save(C.state_path, &C.st)) LOG("[RED] cloud: cannot write %s (errno %d)", C.state_path, errno); }
 static void changed_locked(void) { C.ver++; }
@@ -899,8 +900,24 @@ static int android_id(JNIEnv *E, jobject act, char *out, size_t cap) {
     jx(E, NULL, 0); (*E)->PopLocalFrame(E, NULL);
     return out[0] ? 0 : -1;
 }
+// the server (savesync.h ss_link_server): sync.txt's url= while it is read, else env.txt's DM_SAVESYNC_URL, else the APK's assets/nx2a/savecloud.txt. 0, -1 none ("")
+static int link_base_locked(char *o, size_t n) { return ss_link_server(o, n, C.began ? C.cfg.url : NULL, getenv("DM_SAVESYNC_URL"), C.srv_asset); }
+static int link_base(char *o, size_t n) { pthread_mutex_lock(&C.mu); int r = link_base_locked(o, n); pthread_mutex_unlock(&C.mu); return r; }
+// assets/nx2a/savecloud.txt (url=: the cloud save server the porter's savecloud.txt named), read once: without it (and without env.txt's DM_SAVESYNC_URL or a sync.txt)
+// the app has no cloud save server, and the cloud save is off (no link asked, the launcher says so). AAssetManager only: no Java, any thread
+static void server_asset_load(ANativeActivity *act) {
+    pthread_mutex_lock(&C.mu); int done = C.srv_read; pthread_mutex_unlock(&C.mu);
+    if (done || !act || !act->assetManager) return;
+    char t[700] = ""; AAsset *as = AAssetManager_open(act->assetManager, "nx2a/savecloud.txt", AASSET_MODE_BUFFER);
+    if (as) { int k = AAsset_read(as, t, sizeof t - 1); t[k > 0 ? k : 0] = 0; AAsset_close(as); }
+    pthread_mutex_lock(&C.mu); if (!C.srv_read) { snprintf(C.srv_asset, sizeof C.srv_asset, "%s", t); C.srv_read = 1; } pthread_mutex_unlock(&C.mu);
+}
+int dm_cloud_no_server(ANativeActivity *act) {
+    server_asset_load(act); char b[600]; pthread_mutex_lock(&C.mu); int none = link_base_locked(b, sizeof b) != 0; pthread_mutex_unlock(&C.mu); return none;
+}
 void dm_cloud_attach(ANativeActivity *act) {
     if (C.attached) return;
+    server_asset_load(act);
     C.vm = act->vm; C.act = act->clazz;
     int dbg = 0; app_info(act, &dbg);
     AAsset *as = act->assetManager ? AAssetManager_open(act->assetManager, "nx2a/source.bin", AASSET_MODE_UNKNOWN) : NULL; if (as) AAsset_close(as);
@@ -914,6 +931,7 @@ void dm_cloud_attach(ANativeActivity *act) {
     memset(id, 0, sizeof id);
     if (!have_id) LOG("[RED] cloud: the device's ANDROID_ID cannot be read: no device link on this device");
     else LOG("cloud: device link key %.6s... (%s, %s)", C.key, C.model, C.trial_base ? "a trial build: no link" : "the link can run");
+    if (dm_cloud_no_server(act)) LOG("cloud: no cloud save server (no assets/nx2a/savecloud.txt, no DM_SAVESYNC_URL): the cloud save is off unless a sync.txt names one");
 }
 // sync.txt read into C.cfg, with the state it goes with (C.mu held): 1 when the sync is on. The start's (dm_cloud_begin) or, after it, a link's (link_done)
 static int cfg_load_locked(void) {
@@ -942,6 +960,7 @@ int dm_cloud_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(int quit
     if (!C.began && !cfg_load_locked()) {
         // no sync.txt: the start's own link. Another game on this device linked it already: link/start answers with the token at once (3 s at most), sync.txt is written
         // and the check goes on as if it had always been there. A code is not shown (the launcher's Cloud save page links by hand): the start goes on without the sync
+        char sb[600]; if (link_base_locked(sb, sizeof sb)) { pthread_mutex_unlock(&C.mu); dm_start_step(STV_CLOUD, STV_SKIP, korean() ? "클라우드 서버 없음" : "No cloud server"); return 0; }   // (said once, at attach)
         ss_state st; char sp[700]; snprintf(sp, sizeof sp, "%s/sync-state.txt", dm_saves_dir()); int key = C.key[0] != 0, tried = C.auto_tried, trial = C.trial;
         pthread_mutex_unlock(&C.mu);
         ss_state_load(sp, &st);
@@ -982,15 +1001,12 @@ int dm_cloud_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(int quit
 // ---- the device link: the start's (autolink: link/start once, its token only) and the launcher's (link_thread: a code, polled every 3 s, until it is linked, runs
 // out or the player goes back). The key and the token are never logged whole ----
 static struct { int state, gen, limit; char code[16], qr[400], host[160], device[64], poll[128]; int64_t until; } K;   // under C.mu; gen: the page's, a cancel moves it on
-static void link_base(char *o, size_t n) {   // the server: env.txt's DM_SAVESYNC_URL, else rooms
-    const char *e = getenv("DM_SAVESYNC_URL"); int ok = e && (!strncmp(e, "https://", 8) || !strncmp(e, "http://", 7)) && ds_url_text(e) && strlen(e) < n;
-    snprintf(o, n, "%s", ok ? e : SS_LINK_URL); size_t k = strlen(o); while (k && o[k - 1] == '/') o[--k] = 0;
-}
 static int link_start(JNIEnv *E, int conn_ms, int64_t deadline, ss_link *l, char *why, size_t wcap) {   // SS_LK_*, -1 no answer (why)
     char base[600], u[700], body[1400];
     pthread_mutex_lock(&C.mu); int bad = ss_link_body(body, sizeof body, C.key, C.model, C.label, C.pkg); pthread_mutex_unlock(&C.mu);
     if (bad) { snprintf(why, wcap, "the request does not fit"); return -1; }
-    link_base(base, sizeof base); snprintf(u, sizeof u, "%s/api/saves/link/start", base);
+    if (link_base(base, sizeof base)) { snprintf(why, wcap, "no cloud save server"); return -1; }
+    snprintf(u, sizeof u, "%s/api/saves/link/start", base);
     hres r; int got = http_req(E, "POST", u, (const uint8_t *)body, strlen(body), NULL, "application/json", 0, conn_ms, deadline, 64 << 10, &r, NULL);
     memset(body, 0, sizeof body);
     if (got) { snprintf(why, wcap, "%s", r.why); return -1; }
@@ -1000,7 +1016,7 @@ static int link_start(JNIEnv *E, int conn_ms, int64_t deadline, ss_link *l, char
 // a token: sync.txt written (0600), and once the start has reached the cloud, read as the start reads it. 0, -1 (not written)
 static int link_take(const ss_link *l) {
     const char *root = getenv("DM_ROOT"); char p[700], base[600]; if (!root) return -1;
-    snprintf(p, sizeof p, "%s/sync.txt", root); link_base(base, sizeof base);
+    snprintf(p, sizeof p, "%s/sync.txt", root); if (link_base(base, sizeof base)) return -1;
     pthread_mutex_lock(&C.mu); char dev[64]; snprintf(dev, sizeof dev, "%s", l->dev_name[0] ? l->dev_name : C.model); pthread_mutex_unlock(&C.mu);
     if (ss_link_write(p, base, l->token, dev)) { LOG("[RED] cloud: the link's sync.txt cannot be written (errno %d)", errno); return -1; }
     LOG("cloud: this device is linked (%s, device %s, token %.6s...): sync.txt written", base, dev, l->token);
@@ -1083,7 +1099,7 @@ static void *link_thread(void *a) {
         char q[600]; ss_qenc(q, sizeof q, l.poll); snprintf(u, sizeof u, "%s/api/saves/link/poll?poll=%s", base, q);
         pthread_mutex_lock(&C.mu);
         if (K.gen == gen) { K.state = DM_LINK_CODE; snprintf(K.code, sizeof K.code, "%s", l.code); K.until = now_ms() + l.expires * 1000;
-            char lu[300]; snprintf(lu, sizeof lu, "%s", l.url[0] ? l.url : base); if (!l.url[0]) snprintf(lu, sizeof lu, "%s/link", base);
+            char lu[700]; ss_link_page_url(lu, sizeof lu, l.url, base);
             ss_link_qr(K.qr, sizeof K.qr, lu, l.code); ss_link_host(K.host, sizeof K.host, lu); }
         pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke();
         LOG("cloud: link/start: a code for the player, %lld s; polled every 3 s", (long long)l.expires);
@@ -1111,12 +1127,13 @@ static void *link_thread(void *a) {
 void dm_cloud_link_get(dm_cloud_link *o) {
     memset(o, 0, sizeof *o); pthread_mutex_lock(&C.mu);
     o->state = K.state; o->limit = K.limit; snprintf(o->code, sizeof o->code, "%s", K.code); snprintf(o->qr, sizeof o->qr, "%s", K.qr); snprintf(o->host, sizeof o->host, "%s", K.host);
+    if (!o->host[0]) { char b[600], lu[700]; if (!link_base_locked(b, sizeof b)) { ss_link_page_url(lu, sizeof lu, NULL, b); ss_link_host(o->host, sizeof o->host, lu); } }   // (linked at once: no code, no address of the server's)
     snprintf(o->device, sizeof o->device, "%s", K.device); int64_t l = K.until - now_ms(); o->left_s = l > 0 ? (int)((l + 999) / 1000) : 0;
     pthread_mutex_unlock(&C.mu);
 }
 int dm_cloud_link_begin(void) {
     pthread_mutex_lock(&C.mu);
-    int ok = C.attached && C.vm && C.key[0] && !C.trial_base && !C.began && !W.active && K.state != DM_LINK_BUSY && K.state != DM_LINK_CODE, gen = 0;
+    char sb[600]; int ok = C.attached && C.vm && C.key[0] && !C.trial_base && !C.began && !W.active && K.state != DM_LINK_BUSY && K.state != DM_LINK_CODE && !link_base_locked(sb, sizeof sb), gen = 0;
     if (ok) { gen = ++K.gen; K.state = DM_LINK_BUSY; K.limit = 0; K.code[0] = K.qr[0] = K.host[0] = K.device[0] = 0; K.until = 0; }
     pthread_mutex_unlock(&C.mu);
     if (!ok) return -1;
@@ -1163,7 +1180,8 @@ void dm_cloud_info_get(dm_cloud_info *o) {
     o->can_upload = free_ && (o->local == SS_LOCAL_OWED || o->local == SS_LOCAL_PLAYED);
     o->can_restore = free_ && C.meta.seq != 0;
     snprintf(o->result, sizeof o->result, "%s", C.result); o->result_bad = C.result_bad;
-    o->linkable = C.attached && C.vm && C.key[0] && !C.trial_base && !C.began && !W.active;
+    char sb[600]; o->noserver = !C.began && link_base_locked(sb, sizeof sb);
+    o->linkable = C.attached && C.vm && C.key[0] && !C.trial_base && !C.began && !W.active && !o->noserver;
     o->can_unlink = C.began && !C.trial && !C.busy && !W.active && !C.up_started;
     pthread_mutex_unlock(&C.mu);
 }

@@ -867,7 +867,7 @@ class Port:
             say(f'--vulkan-driver: {self.o.vulkan_driver.name} is packed as {driver.name} (Android extracts only lib*.so libraries)')
         nsp.run([PY, DM / 'android/apk/mkapk.py', self.so, self.apk_path, paths.signing_key(), '--package', self.package, '--label', self.app_name, '--lib', 'dmhost',
                  '--version-code', str(code), '--version-name', name]
-                + (['--landscape'] if self.ap.landscape else []) + icon + self.theme() + self.ui_font() + self.data_source() + external + ([] if self.o.debug else ['--release'])
+                + (['--landscape'] if self.ap.landscape else []) + icon + self.theme() + self.ui_font() + self.data_source() + self.savecloud() + external + ([] if self.o.debug else ['--release'])
                 + (['--game-mode-performance'] if getattr(self, 'gl', None) is False else [])   # only NVN implements the mode's pacing policy; GL keeps OEM interventions
                 + [a for f in ([driver] + [self.so.parent / n for n in ADRENOTOOLS_LIBS] if driver else []) for a in ('--extra-so', str(f))],
                 self.logs / 'android_apk.log', env=self.env)
@@ -904,6 +904,16 @@ class Port:
         say(f'data server: {self.o.data_url}' + (' (with credentials)' if self.o.data_cred else ''))   # the credentials themselves are never printed
         if ptr: say(f'data server pointer: {self.o.data_pointer} (the server root it names, then this pack\'s folder {ptr[2] or "(the root itself)"} under it)')   # never the key
         return ['--asset', f'{publish.SOURCE_ASSET}={f}'] + (['--cleartext'] if self.o.data_url.lower().startswith('http://') else [])
+
+    def savecloud(self):
+        """The cloud save server (the porter computer's savecloud.txt: publish.savecloud_url) as the APK's assets/nx2a/savecloud.txt, and cleartext HTTP for an http://
+        address. [] without the file: the app has no cloud save server (its cloud save stays off). The address itself is never printed"""
+        from porter import publish
+        url = publish.savecloud_url()
+        if not url: say(f'cloud save server: none (no {publish.SAVECLOUD_FILE} in the porter folder): the app\'s cloud save is off'); return []
+        f = publish.savecloud_asset(url, self.aw / 'savecloud.txt')
+        say(f'cloud save server: configured ({publish.SAVECLOUD_FILE}) → assets/{publish.SAVECLOUD_ASSET}')
+        return ['--asset', f'{publish.SAVECLOUD_ASSET}={f}'] + (['--cleartext'] if url.startswith('http://') else [])
 
     def theme(self):
         """The on-screen gamepad's theme: only the game's own pack goes in the APK (dm/android/themes/themes.tsv maps title IDs to packs; a game with no row

@@ -265,6 +265,36 @@ class DataPack(unittest.TestCase):
             shutil.rmtree(t, ignore_errors=True)
 
 
+class SaveCloud(unittest.TestCase):   # the cloud save server: the porter computer's savecloud.txt (never the checkout) as the APK's assets/nx2a/savecloud.txt
+    def setUp(self):
+        from porter import paths, publish
+        self.f = paths.user_dir() / publish.SAVECLOUD_FILE; self.addCleanup(lambda: self.f.unlink(missing_ok=True))
+        self.t = Path(tempfile.mkdtemp(prefix='nx2a_test_cloud_')); self.addCleanup(shutil.rmtree, self.t, ignore_errors=True)
+
+    def args(self):
+        from types import SimpleNamespace
+        return pipeline.Port.savecloud(SimpleNamespace(aw=self.t))
+
+    def test_none(self):   # no file: no asset, and the app has no cloud save server
+        from porter import publish
+        self.f.unlink(missing_ok=True); self.assertIsNone(publish.savecloud_url()); self.assertEqual(self.args(), [])
+
+    def test_configured(self):
+        from porter import publish
+        self.f.write_text('# the cloud save server\nurl=https://saves.example.com/\n', encoding='utf-8')
+        self.assertEqual(publish.savecloud_url(), 'https://saves.example.com')
+        a = self.args(); self.assertEqual(a, ['--asset', f'{publish.SAVECLOUD_ASSET}={self.t / "savecloud.txt"}'])
+        self.assertEqual((self.t / 'savecloud.txt').read_text(), 'url=https://saves.example.com\n')
+        self.f.write_text('url=http://lan.example.com:8080\n'); self.assertEqual(self.args()[-1], '--cleartext')   # an http:// server: cleartext HTTP allowed
+
+    def test_refusals(self):
+        from porter import publish
+        from porter.upstream import BuildError
+        for bad in ('saves.example.com', 'url=ftp://saves.example.com', 'url=https://', 'url=https://a b', 'url=https://sav\u00e9s.example.com', ''):
+            self.f.write_text(bad + '\n', encoding='utf-8')
+            with self.assertRaises(BuildError, msg=bad): publish.savecloud_url()
+
+
 class Experimental(unittest.TestCase):
     def test_ios_profile_copied_with_experimental_android_tsv(self):   # an iOS-only profile is copied out of the repository, never edited in place
         ios_only = '010099C022B96000'   # Super Mario Galaxy: an iOS profile without android.tsv or patches.py (it renders with Vulkan itself, which the Android host does not take)

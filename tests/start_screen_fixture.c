@@ -1,6 +1,7 @@
 // The start screen (dm/android/startscreen.c) drawn on the computer: each of the design's screens at a given size, saved as PNG (tests/test_start_screen.py builds and
 // runs it; with an output folder it keeps the pictures to look at). Usage: start_screen_fixture <regular.ttf> <bold.ttf> <pixel font .nxpf> <out dir> <w> <h>
 #include "startscreen.h"
+#include "savesync.h"   // the link page's address and its linked line (ss_link_page_url, ss_link_host, ss_link_foot)
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -198,7 +199,12 @@ int main(int argc, char **argv) {
     // 23. the device link: the QR code, the address, the code and the time left (LinkCode.dc.html)
     { stv_view u; head(&u, icon, ""); u.screen = STV_SCREEN_LINK; stv_linkpage *lp = &u.lk;
       lp->state = STV_LINK_CODE; snprintf(lp->title, sizeof lp->title, "휴대폰으로 이 기기를 연결하세요");
-      snprintf(lp->qr, sizeof lp->qr, "https://saves.example.com/link?code=K7Q-4MP"); snprintf(lp->host, sizeof lp->host, "saves.example.com/link"); snprintf(lp->code, sizeof lp->code, "K7Q-4MP");
+      // (the address from the server's link/start answer, as savecloud_android.c link_thread makes it: its url, the scheme dropped; none in it: <server>/link)
+      { const char *JB = "{\"linked\":false,\"code\":\"K7Q-4MP\",\"poll\":\"p0ll\",\"expiresIn\":600,\"url\":\"https://saves.example.com/link\"}"; ss_link sl; char lu[700];
+        assert(ss_link_read(200, JB, strlen(JB), &sl) == SS_LK_CODE);
+        ss_link_page_url(lu, sizeof lu, sl.url, "https://other.example.com"); ss_link_qr(lp->qr, sizeof lp->qr, lu, sl.code); ss_link_host(lp->host, sizeof lp->host, lu); snprintf(lp->code, sizeof lp->code, "%s", sl.code);
+        assert(!strcmp(lp->host, "saves.example.com/link") && !strcmp(lp->qr, "https://saves.example.com/link?code=K7Q-4MP"));
+        char h2[160]; ss_link_page_url(lu, sizeof lu, "", "http://lan.example.com:8080"); ss_link_host(h2, sizeof h2, lu); assert(!strcmp(h2, "lan.example.com:8080/link")); }
       snprintf(lp->step1, sizeof lp->step1, "1. 휴대폰 카메라로 QR을 찍거나, 아래 주소로 들어가요"); snprintf(lp->step2, sizeof lp->step2, "2. 카카오로 로그인하고 이 코드를 확인해요");
       snprintf(lp->status, sizeof lp->status, "휴대폰에서 연결을 누르길 기다리는 중 · 9:42 남음"); lp->nbtn = 1; lp->sel = -1; snprintf(lp->btn[0], sizeof lp->btn[0], "취소"); snprintf(lp->keys, sizeof lp->keys, "B 취소");
       stv_draw(&c, &u, 0.2); save(&c, argv[4], "23-link-code"); qr_check(&c);
@@ -213,7 +219,7 @@ int main(int argc, char **argv) {
     // 25. linked (LinkDone.dc.html): the check, the device's name, Continue
       memset(lp, 0, sizeof *lp); lp->state = STV_LINK_DONE; snprintf(lp->title, sizeof lp->title, "연결됐어요"); snprintf(lp->line, sizeof lp->line, "이제 저장하면 클라우드에 올라가요.");
       lp->nrow = 2; snprintf(lp->key[0], sizeof lp->key[0], "기기 이름"); snprintf(lp->val[0], sizeof lp->val[0], "Retroid Pocket Nova"); snprintf(lp->key[1], sizeof lp->key[1], "이 게임"); snprintf(lp->val[1], sizeof lp->val[1], "SUPER ROBOT WARS Y");
-      snprintf(lp->foot, sizeof lp->foot, "기기 이름은 웹 saves.example.com/saves 에서 바꾸거나 연결을 끊을 수 있어요"); lp->nbtn = 1; lp->sel = 0; snprintf(lp->btn[0], sizeof lp->btn[0], "계속");
+      ss_link_foot(lp->foot, sizeof lp->foot, "saves.example.com/link", 1); assert(!strcmp(lp->foot, "기기 이름은 웹 saves.example.com/saves 에서 바꾸거나 연결을 끊을 수 있어요")); lp->nbtn = 1; lp->sel = 0; snprintf(lp->btn[0], sizeof lp->btn[0], "계속");
       stv_draw(&c, &u, 0); save(&c, argv[4], "25-link-done"); touch_check(&c, &u, 1, &lp->sel, 1);
       e.lk.state = lp->state; e.lk.nbtn = 1; e.lk.nrow = 2; e.lk.foot[0] = 'x'; for (int y = 0; y < H; y += 7) for (int x = 0; x < W; x += 7) assert(stv_page_hit(&e, W, H, x, y) == stv_page_hit(&u, W, H, x, y));
     // 26. no code came (the server not reached)

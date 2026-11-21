@@ -61,6 +61,7 @@ typedef struct {
     char result[96]; int result_bad;   // the last action's outcome ("" none)
     int linkable;         // no sync.txt, and the device link can run (not a trial build, the app known, no check running): the page offers Link this device
     int can_unlink;       // sync.txt is there and nothing runs: the page offers Unlink this app
+    int noserver;         // no sync.txt, and no cloud save server to link with (no assets/nx2a/savecloud.txt, no DM_SAVESYNC_URL): the cloud save is off, the page says so
 } dm_cloud_info;
 void dm_cloud_info_get(dm_cloud_info *o);
 
@@ -70,6 +71,7 @@ typedef struct { int state, left_s, limit; char code[16], qr[400], host[160], de
 void dm_cloud_link_get(dm_cloud_link *o);
 
 #ifdef __ANDROID__
+int dm_cloud_no_server(ANativeActivity *act);   // 1: no cloud save server but a sync.txt's (savesync.h ss_link_server: env.txt, the APK's assets/nx2a/savecloud.txt)
 // datasync_android.c: the screen (its EGL window picture), shown while the cloud's start runs: 1 when it runs and done() is called on the main thread once it ended
 // (dm_cloud_screen_end); 0: no screen (no looper or thread), the caller goes on at once
 int dm_cloud_screen_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(void));

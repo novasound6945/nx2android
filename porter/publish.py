@@ -24,6 +24,8 @@ from porter.upstream import BuildError
 FILES = 'files.json'
 SOURCE_ASSET = 'nx2a/source.bin'   # in the APK: the server's address and credentials (source_asset)
 SKIP = (FILES,)                    # files of the pack folder that are not data
+SAVECLOUD_ASSET = 'nx2a/savecloud.txt'   # in the APK: the cloud save server's address (savecloud_asset); an APK without it has no cloud save (savesync.h ss_link_server)
+SAVECLOUD_FILE = 'savecloud.txt'         # in the porter's own folder (paths.user_dir), never in the checkout: one line, url=<the server's http(s) address>
 
 
 def check_url(url):   # --data-url as the app joins paths to it: http(s), ending in /
@@ -31,6 +33,25 @@ def check_url(url):   # --data-url as the app joins paths to it: http(s), ending
     if not u.lower().startswith(('http://', 'https://')) or any(c in u for c in '\r\n\0 ') or len(u) > 900:
         raise BuildError(f'--data-url takes the http:// or https:// address of a folder on a web server: {url!r}')
     return u if u.endswith('/') else u + '/'
+
+
+def savecloud_url():
+    """The cloud save server this computer's ports and updates get: <user dir>/savecloud.txt's url= line (blank lines and # comments passed over), its trailing / dropped.
+    None without the file (the APK gets no server, and the app no cloud save). The address is the porter's own: callers log only that one is configured"""
+    from porter import paths
+    f = paths.user_dir() / SAVECLOUD_FILE
+    try: text = f.read_text(encoding='utf-8-sig')
+    except FileNotFoundError: return None
+    except OSError as e: raise BuildError(f'{f}: cannot read it ({e.strerror})') from None
+    url = next((ln.strip()[4:].strip() for ln in text.splitlines() if ln.strip().startswith('url=')), None)
+    u = (url or '').rstrip('/')
+    if not u.startswith(('http://', 'https://')) or not u.split('://', 1)[1] or any(ord(c) <= 0x20 or ord(c) >= 0x7f or c == '\\' for c in u) or len(u) > 500:
+        raise BuildError(f'{f} must hold a line url=<the cloud save server\'s http:// or https:// address>')
+    return u
+
+
+def savecloud_asset(url, out):   # the APK's assets/nx2a/savecloud.txt for url (savecloud_url), written to out → out
+    out = Path(out); out.parent.mkdir(parents=True, exist_ok=True); out.write_text(f'url={url}\n', encoding='ascii', newline='\n'); return out
 
 
 def read_cred(path):   # --data-cred's one line, user:password; the errors never show its content

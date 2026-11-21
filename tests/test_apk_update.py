@@ -205,6 +205,24 @@ class ApkUpdate(unittest.TestCase):
         with zipfile.ZipFile(r['apk']) as z: self.assertEqual(axml.permissions(z.read('AndroidManifest.xml'))[-1], WAKE)
         self.assertEqual(apkupdate.update(self.apk, apkupdate.Pack(d), self.t / 'out2', build=8, jobs=1)['permissions_added'], [])   # (build 8 as the other tests: builds.json is shared)
 
+    def test_update_savecloud(self):   # the cloud save server: an APK without assets/nx2a/savecloud.txt gets the porter's savecloud.txt, one with it keeps its own, none: none
+        d = make_pack(self.t / 'pack'); f = paths.user_dir() / publish.SAVECLOUD_FILE; self.addCleanup(lambda: f.unlink(missing_ok=True)); f.unlink(missing_ok=True)
+        name = 'assets/' + publish.SAVECLOUD_ASSET
+        r = apkupdate.update(self.apk, apkupdate.Pack(d), self.t / 'out', build=8, jobs=1)
+        self.assertIsNone(r['savecloud'])
+        with zipfile.ZipFile(r['apk']) as z: self.assertNotIn(name, z.namelist())
+        f.write_text('url=https://saves.example.com/\n', encoding='utf-8')
+        said = []
+        with mock.patch.object(apkupdate, 'say', side_effect=said.append): r = apkupdate.update(self.apk, apkupdate.Pack(d), self.t / 'out2', build=8, jobs=1)
+        out = '\n'.join(said)
+        self.assertEqual(r['savecloud'], 'added')
+        self.assertIn('cloud save server: configured', out); self.assertNotIn('saves.example.com', out)   # (the address is never printed)
+        with zipfile.ZipFile(r['apk']) as z: self.assertEqual(z.read(name), b'url=https://saves.example.com\n')
+        f.write_text('url=https://other.example.com\n', encoding='utf-8')
+        r2 = apkupdate.update(r['apk'], apkupdate.Pack(d), self.t / 'out3', build=9, jobs=1)
+        self.assertEqual(r2['savecloud'], 'kept')
+        with zipfile.ZipFile(r2['apk']) as z: self.assertEqual(z.read(name), b'url=https://saves.example.com\n')   # the APK's own, not this computer's
+
     @unittest.skipUnless(RELEASED.is_file() and AAPT2.is_file(), 'a released APK and aapt2 (the Android SDK) on this computer')
     def test_released_manifest_permissions(self):   # a released port's manifest (read only) with WAKE_LOCK added: aapt2 reads it as Android would
         with zipfile.ZipFile(RELEASED) as a: man = a.read('AndroidManifest.xml')

@@ -3,7 +3,8 @@
 # font, the data server's address nx2a/source.bin, the Vulkan driver and its hooks, classes.dex), and gets libdmhost.so built from this checkout's profile, a new versionCode and
 # versionName (the game's version and the build number: 1.0.1-8) in its manifest, and the profile's Korean name (game.tsv name_ko) as its label when it has another
 # (the launcher's name and the start screen's; axml.py: the rest of the manifest's bytes kept), the permissions this checkout's mkapk.py asks for that it lacks (permissions:
-# WAKE_LOCK, which an APK released before the save's cloud upload has not), signed again with the player's key, which must
+# WAKE_LOCK, which an APK released before the save's cloud upload has not), the cloud save server as assets/nx2a/savecloud.txt when it has none (from the porter
+# computer's savecloud.txt: publish.savecloud_url; an APK that has one keeps it), signed again with the player's key, which must
 # be the APK's signer (it installs over the released app and keeps its saves). Nothing is uploaded or installed.
 # The pack must fit the new host (judge):
 #   - the rewritten code's contract (dm/host/rewrite_abi.h): a pack's REWRITE_ABI (nx2a-data.json rewrite_abi, each fixups table's # REWRITE_ABI) must be this checkout's. A pack
@@ -349,7 +350,8 @@ def permissions():
 
 def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None):
     """apk (a released port's APK file) with this checkout's host and build number build, judged against its data pack pack, written into the folder out (with a new
-    nx2a-data.json and files.json when the profile's hash changed). → {'apk', 'package', 'version_code', 'version_name', 'label', 'old', 'host', 'permissions_added', 'data_files', 'judgment'}"""
+    nx2a-data.json and files.json when the profile's hash changed). → {'apk', 'package', 'version_code', 'version_name', 'label', 'old', 'host', 'permissions_added',
+    'savecloud' ('kept': the APK's own assets/nx2a/savecloud.txt, 'added': the porter's savecloud.txt, None: no cloud save server), 'data_files', 'judgment'}"""
     from porter import pipeline
     apk, out = Path(apk), Path(out)
     old = axml.apk_info(apk)
@@ -387,6 +389,12 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
     fonts = {n: f for n, f in pipeline.ui_font_assets().items() if f'assets/{n}' not in have}   # the overlay's font, for an APK released before it came; the APK's own is kept
     icon = host.start_icon_asset(apk, cache, pipeline.start_icon)   # the start screen's icon, for an APK released before it came: from its launcher icon
     if icon: fonts[icon[1].split('=', 1)[0]] = icon[1].split('=', 1)[1]
+    if f'assets/{publish.SAVECLOUD_ASSET}' in have: cloud = 'kept'; say(f'cloud save server: kept (the APK\'s assets/{publish.SAVECLOUD_ASSET})')
+    elif (url := publish.savecloud_url()):   # an APK from before the asset (its host had the server built in): the porter's savecloud.txt, so it keeps its cloud save
+        cloud = 'added'; fonts[publish.SAVECLOUD_ASSET] = publish.savecloud_asset(url, cache / 'savecloud.txt')
+        say(f'cloud save server: configured ({publish.SAVECLOUD_FILE}) → assets/{publish.SAVECLOUD_ASSET}')
+        if url.startswith('http://'): say('[RED] the cloud save server is an http:// address: an APK ported without cleartext HTTP cannot reach it (port it again, or use https://)')
+    else: cloud = None; say(f'cloud save server: none (the APK has no assets/{publish.SAVECLOUD_ASSET}, and no {publish.SAVECLOUD_FILE} in the porter folder): the app\'s cloud save is off')
     entries, _, _ = apkdriver.rebuild(str(apk), apkdriver.KEEP, host=str(so), assets=fonts, manifest=axml.set_version(manifest, code, name))
     k = {n: int(v) for n, v in kj.items() if n != 'cert'}
     z, cd, eocd = apksign.build_zip(entries)
@@ -413,4 +421,4 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
         say(f'the host was built from the derived profile {derived_dir(r["title_id"])}; its header is {cache / "gen" / r["title_id"] / "game_profile.h"}: a later update on another '
             f'computer needs it (--profile-header)')
     return {'apk': str(dst), 'package': old['package'], 'version_code': code, 'version_name': name, 'label': new['label'], 'old': {k: old[k] for k in ('version_code', 'version_name', 'label')},
-            'host': so.stat().st_size, 'permissions_added': added, 'data_files': written, 'judgment': {k: v for k, v in r.items() if k != 'manifest'}}
+            'host': so.stat().st_size, 'permissions_added': added, 'savecloud': cloud, 'data_files': written, 'judgment': {k: v for k, v in r.items() if k != 'manifest'}}
