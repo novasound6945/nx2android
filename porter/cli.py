@@ -135,6 +135,13 @@ def _parser():
                     help="the released host's game_profile.h (its port's build folder, android/host/gen/<title ID>/), for a pack whose profile git does not hold (a derived profile's port)")
     au.add_argument('--check', action='store_true', help='only judge whether the data pack fits this version\'s host (same / different / unknown, with the reasons): no build, no APK')
     au.add_argument('--jobs', type=int, default=os.cpu_count() or 8); au.add_argument('--json', action='store_true')
+    pf = sub.add_parser('pack-add-font', help="a published data pack's changed files with the player's shared font added, as porter port --shared-font makes them (standard.ttf, "
+                                              "env.txt's DM_SHARED_FONT row, nx2a-data.json, files.json), without porting the game again; nothing is uploaded")
+    pf.add_argument('data', metavar='URL|FOLDER', help="the data pack: its folder on the web server (http(s)://…/) or a local copy of it (nx2a-data.json, files.json, env.txt)")
+    pf.add_argument('--shared-font', required=True, metavar='FILE', help='the TrueType font, added as it is (standard.ttf)')
+    pf.add_argument('--data-cred', default=None, metavar='FILE', help='a file of one line, user:password, for the server (never printed)')
+    pf.add_argument('-o', '--out', default=None, metavar='FOLDER', help='where the changed files go, to upload into the pack\'s folder, files.json last (default: ./pack-add-font)')
+    pf.add_argument('--json', action='store_true')
     return ap
 
 
@@ -430,7 +437,24 @@ def cmd_apk_update(a):   # porter apk-update: the released APK with this checkou
     return 0 if out.get('ok', True) else 3
 
 
+def cmd_pack_add_font(a):   # porter pack-add-font: the shared font added to a published pack (porter/packfont.py); nothing is uploaded
+    import contextlib
+    from porter import apkupdate, packfont, publish
+    from porter.upstream import BuildError
+    try:
+        with contextlib.redirect_stdout(sys.stderr if a.json else sys.stdout):
+            pack = apkupdate.Pack(a.data, publish.read_cred(a.data_cred) if a.data_cred else '')
+            out = packfont.add_font(pack, a.shared_font, Path(a.out or 'pack-add-font'))
+            if out['same'] and not a.json: print(f'{pack}: has this {packfont.FONT} and its {packfont.KEY} row already: nothing to upload')
+    except BuildError as e:
+        if a.json: _print_json({'error': str(e)})
+        else: print(e, file=sys.stderr)
+        return 1
+    if a.json: _print_json(out)
+    return 0
+
+
 def main(argv):
     if hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8', errors='replace')   # game names and progress bars on a Windows console
     a = _parser().parse_args(argv)
-    return {'doctor': cmd_doctor, 'profiles': cmd_profiles, 'inspect': cmd_inspect, 'port': cmd_port, 'install': cmd_install, 'publish': cmd_publish, 'pointer': cmd_pointer, 'devices': cmd_devices, 'tools': cmd_tools, 'config': cmd_config, 'saves': cmd_saves, 'driver': cmd_driver, 'host': cmd_driver, 'apk-update': cmd_apk_update}[a.cmd](a)
+    return {'doctor': cmd_doctor, 'profiles': cmd_profiles, 'inspect': cmd_inspect, 'port': cmd_port, 'install': cmd_install, 'publish': cmd_publish, 'pointer': cmd_pointer, 'devices': cmd_devices, 'tools': cmd_tools, 'config': cmd_config, 'saves': cmd_saves, 'driver': cmd_driver, 'host': cmd_driver, 'apk-update': cmd_apk_update, 'pack-add-font': cmd_pack_add_font}[a.cmd](a)
