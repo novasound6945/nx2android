@@ -52,6 +52,8 @@ static _Atomic uint64_t g_txn_first_ns;     // time of this transaction's first 
 // and the front end is notified (front_save_failed); the next transaction (the game's next full save rewrite) is attempted as usual and committed if it succeeds. g_save_poison = errno of the first failure in this transaction (0 = none).
 static _Atomic int g_save_poison;
 static void save_poison(int e) { int z = 0; atomic_compare_exchange_strong(&g_save_poison, &z, e ? e : EIO); }
+// Android (perf_android.c): a save write or a commit, so the adaptive frame rate does not judge the long frames of the game's save (no-op on the Mac and iOS hosts)
+__attribute__((weak)) void dm_perf_bg_mark(int delta) { (void)delta; }
 // The default weak implementation only logs (Mac); the iOS front end provides a strong implementation of the same name that shows a native alert. Called on the game thread, the front end switches to the main thread itself
 __attribute__((weak)) void front_save_failed(int err) { LOG("front_save_failed(errno=%d): no front end attached (default weak implementation)", err); }
 // DM_FSLOG=<file>: each ReadFile logs one TSV line "seconds since boot\tguest path\toffset\tlength\tguest buffer address" (which bytes boot read, for offline reverse lookup against the manifest)
@@ -656,6 +658,7 @@ static Result commit_mount_locked(int i, int *notify_error) {
         LOG("save commit #%d: %s swapped atomically into %s (%d save writes so far) (clone + swap %llu us, since this transaction's first write %llu us)", ++n, g_mnt[i].dir, g_mnt[i].commit, atomic_load(&g_save_writes),
             (unsigned long long)((tc2 - tc1) / 1000), (unsigned long long)(tw0 ? (tc2 - tw0) / 1000 : 0)); atomic_fetch_add(&g_save_commits, 1);
     }
+    dm_perf_bg_mark(0);
     return r;
 }
 HLE_FORCE("_ZN2nn2fs6CommitEPKc", "fsp-srv; transactional save: the whole work directory tree is cloned, then swapped atomically with the committed directory (renamex_np RENAME_SWAP)", Result, h_fs_Commit, const char *name) {
@@ -781,6 +784,7 @@ HLE_FORCE("_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", "fsp
             cfg = 1; }
         int n = atomic_fetch_add(&g_save_writes, 1) + 1;
         { uint64_t z = 0; atomic_compare_exchange_strong(&g_txn_first_ns, &z, clock_gettime_nsec_np(CLOCK_MONOTONIC)); }
+        dm_perf_bg_mark(0);
         if (kill_n && n == kill_n) { LOG("DM_TEST_KILL_AT: save write #%d, calling _exit (simulates being killed mid-write)", n); _exit(9); }
         if (fail_n && n == fail_n) { LOG("DM_TEST_FS_FAIL: save write #%d returns failure errno=%d", n, fail_e); errno = fail_e; save_poison(fail_e); return err_res("pwrite (injected)", "fd"); }
     }

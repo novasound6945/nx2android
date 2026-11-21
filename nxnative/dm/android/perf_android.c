@@ -268,6 +268,23 @@ static int g_step = 0; static _Atomic int g_adapt = 1; static int64_t g_work_his
 static int64_t g_last_change, g_last_up, g_up_hold = 2000000000; static int g_ok_frames; static uint64_t g_game_period;   // the period the game asks for, before the adaptive step
 static int g_nshown;
 static int g_read_seen; static unsigned g_no_read, g_held_noread;   // a reading came at least once; presents without one (all time); step-downs held back for want of readings
+// The game's own save and the cloud upload: long frames while either runs, and for BG_TAIL_NS after, are left out of the frames judged, and the rate neither steps down
+// nor up meanwhile (what came just before is judged once the frames after it filled the 64 again). A-Train All Aboard! Tourism (Galaxy, 2026-11-21) saved in a burst of
+// five commits (clone + swap 1-2 ms each; the game's own work between its writes made frames of 50-300 ms for ~3 s), stepped down to 40 fps 7 of 64 late, and climbed
+// back to 60 only 7 s later; the upload after it went with 76-146 ms frames. The marks (dm_perf_bg_mark): every save write and commit (hle_fs.c), an upload's start and end
+// (savecloud_android.c, busy in between). A window held open longer than BG_SPAN_NS (a game that writes its save all the time, an upload that hangs on the network) is a
+// load like any other again, so a scene that is really heavy still steps down
+#define BG_TAIL_NS 1500000000ll
+#define BG_SPAN_NS 10000000000ll
+static _Atomic int g_bg_busy; static _Atomic int64_t g_bg_start, g_bg_last; static unsigned g_bg_skipped, g_bg_held;
+static int bg_active(int busy, int64_t last, int64_t now) { return busy > 0 || (last && now - last < BG_TAIL_NS); }
+static int bg_quiet(int busy, int64_t start, int64_t last, int64_t now) { return bg_active(busy, last, now) && now - start < BG_SPAN_NS; }
+static void bg_mark_at(int delta, int64_t now) {   // delta +1 / -1: a busy span's start / end (an upload); 0: one moment of activity (a save write, a commit)
+    if (!bg_active(atomic_load(&g_bg_busy), atomic_load(&g_bg_last), now)) atomic_store(&g_bg_start, now);
+    if (delta < 0) { int b = atomic_load(&g_bg_busy); while (b > 0 && !atomic_compare_exchange_weak(&g_bg_busy, &b, b - 1)) {} }
+    else if (delta > 0) atomic_fetch_add(&g_bg_busy, 1);
+    atomic_store(&g_bg_last, now);
+}
 static _Atomic int g_android_game_mode, g_game_mode_performance;
 static _Atomic int g_fps_pin = -1;
 void dm_perf_game_mode(int mode) { atomic_store(&g_android_game_mode, mode); }   // main-thread onResume; policy changes stay on the presenting thread
@@ -372,13 +389,16 @@ static int shown_late(void) {   // of the last 64 frames on screen, how many mis
 }
 static void adapt_frame(int64_t work, int64_t now) {
     if (!adaptive_enabled()) return;
+    int quiet = bg_quiet(atomic_load(&g_bg_busy), atomic_load(&g_bg_start), atomic_load(&g_bg_last), now);
     // A long frame in which the replay and the GPU did next to nothing is a load (a loading screen, the game reading files on its main thread), not a frame the
     // rate could fit: it is not judged. Hades II's room changes gave ~10 frames of 28-680 ms with 0.3-0.4 ms of GPU work, the rate stepped down to 40 fps,
     // and each fight began at 40 until it climbed back 4 s later
     if (g_frame_cost > 0 && g_frame_cost < 1500000 && work > STEPS[g_step]) return;
+    // (a frame whose replay or GPU alone is over the period is still judged: that is not the save's)
+    if (quiet && work > STEPS[g_step] && g_frame_cost <= STEPS[g_step]) { g_bg_skipped++; return; }
     if (g_frame_cost > work) work = g_frame_cost;
     g_work_hist[g_nwork++ % 64] = work;
-    { static unsigned k; if (++k % 600 == 0) LOG("[perf] adaptive frame rate: %.0f fps, frame work p50 %.1f / p90 %.1f / p95 %.1f ms (last %.1f ms); late on screen %d of 64, step-downs held back %u (%u for want of readings); presents without a reading %u", 1e9 / STEPS[g_step], work_pct(50) / 1e6, work_pct(90) / 1e6, work_p95() / 1e6, work / 1e6, shown_late(), g_held_back, g_held_noread, g_no_read); }
+    { static unsigned k; if (++k % 600 == 0) LOG("[perf] adaptive frame rate: %.0f fps, frame work p50 %.1f / p90 %.1f / p95 %.1f ms (last %.1f ms); late on screen %d of 64, step-downs held back %u (%u for want of readings, %u during saves and uploads); presents without a reading %u; long frames left out during saves and uploads %u", 1e9 / STEPS[g_step], work_pct(50) / 1e6, work_pct(90) / 1e6, work_p95() / 1e6, work / 1e6, shown_late(), g_held_back, g_held_noread, g_bg_held, g_no_read, g_bg_skipped); }
     int pin = fps_pin(); if (pin >= 0) { if (g_step != pin) { g_step = pin; g_last_change = now; g_nshown = 0; } return; }
     // Judged on the 90th percentile of the last 64 frames' work, from 4 s after a change: the GPU and CPU clocks take a few seconds to rise for a shorter
     // period, and with the 95th percentile against 95% of the period NEO's crowd fell back from 40 to 30 fps within 2 s every time, though pinned at
@@ -386,6 +406,7 @@ static void adapt_frame(int64_t work, int64_t now) {
     if (now - g_last_change < 4000000000ll) return;
     int64_t p90 = work_pct(90); if (!p90) return;
     int nsteps = (int)(sizeof STEPS / sizeof *STEPS);
+    if (quiet) { if (g_step + 1 < nsteps && p90 > STEPS[g_step] * 105 / 100) { g_held_back++; g_bg_held++; } g_ok_frames = 0; return; }
     if (g_step + 1 < nsteps && p90 > STEPS[g_step] * 105 / 100) {
         // only when the frames miss the display too: at least 1 in 10 of the last 64 on screen (as the 90th percentile), or no readings to tell
         int late = shown_late(); if (late >= 0 && late < 7) g_held_back++;   // veto only the downshift: the chosen upshift percentile may still fit
@@ -414,6 +435,7 @@ static void adapt_frame(int64_t work, int64_t now) {
 // it held the rate down for good) but kept in the work the CPU hint gets (with the replay on its own thread it is the replay's and the GPU's time as well:
 // left out, Super Mario Odyssey's hint saw light frames and the clocks stayed at 1-2 GHz). At 60 fps it is not a pace but the display or the swapchain
 // holding the frames back, and it stays in the work, or the rate could not step down for it
+void dm_perf_bg_mark(int delta) { bg_mark_at(delta, perf_now()); }   // hle_fs.c (weak there: the Mac and iOS hosts have none), savecloud_android.c
 static int64_t g_prev_present, g_pace, g_pq;
 void dm_perf_frame_start(uint64_t pace_ns, uint64_t pq_ns) { g_work_start = perf_now(); g_pace = (int64_t)pace_ns; g_pq = (int64_t)pq_ns; }
 // Called on the presenting thread right before a present; period in seconds (1/60, 1/30, ...).

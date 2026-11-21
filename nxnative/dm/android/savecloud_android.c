@@ -56,6 +56,7 @@
 
 uint64_t dm_fs_commit_count(void);       // hle_fs.c
 void dm_perf_background_thread(const char *who);   // perf_android.c: nice 19, the slowest cores, out of the ADPF session
+void dm_perf_bg_mark(int delta);         // perf_android.c: the adaptive frame rate does not judge the long frames of an upload (+1 its start, -1 its end)
 const uint8_t *dm_overlay_font(void);    // overlay_theme.c
 
 static int64_t now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
@@ -647,7 +648,9 @@ static void wake_lock(JNIEnv *E, int on, int ms) {   // a failure (no WAKE_LOCK 
     if (cW) (*E)->DeleteLocalRef(E, cW);
     char why[200] = ""; if (jx(E, why, sizeof why)) LOG("[RED] cloud: the wake lock's %s failed (%s)", on ? "acquire" : "release", why);
 }
-static int upload(JNIEnv *E, int64_t deadline) {
+static int upload_now(JNIEnv *E, int64_t deadline);
+static int upload(JNIEnv *E, int64_t deadline) { dm_perf_bg_mark(1); int r = upload_now(E, deadline); dm_perf_bg_mark(-1); return r; }
+static int upload_now(JNIEnv *E, int64_t deadline) {
     static const int64_t BACKOFF[] = {60000, 120000, 300000, 600000};
     pthread_mutex_lock(&C.mu);
     int skip = C.mode != SS_RUN_SYNC || C.skipped || C.st.mode == SS_MODE_LOCAL || C.st.conflict || C.st.auth || C.st.offline_play, force = C.st.force; uint64_t base = force ? C.st.fbase : C.st.seq; char last[65];
@@ -728,7 +731,7 @@ static void pause_flush(JNIEnv *E, int *dirty, int syncs, const ss_tick_in *ti) 
 }
 // manual: whether the save the game committed is the one the cloud has (owed or not), for the launcher's page and the corner's mark: archived and hashed, nothing sent
 static void check_owed(void) {
-    ss_buf t; char sha[65], err[600]; int64_t nw; int r = snap(&t, sha, &nw, err, sizeof err); if (!r) ss_buf_free(&t);
+    ss_buf t; char sha[65], err[600]; int64_t nw; dm_perf_bg_mark(1); int r = snap(&t, sha, &nw, err, sizeof err); dm_perf_bg_mark(-1); if (!r) ss_buf_free(&t);
     if (r < 0) { LOG("[RED] cloud: the save cannot be archived to compare (%s)", err); return; }
     pthread_mutex_lock(&C.mu);
     int owed = C.st.conflict || C.st.force || (r == 0 ? strcmp(sha, C.st.sha) != 0 : C.st.sha[0] != 0);
