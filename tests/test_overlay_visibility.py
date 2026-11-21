@@ -65,9 +65,7 @@ static void menu_audio(void) {}
 #define LOG(...) ((void)0)   // (until the harness's own, below)
 static void menu_close(void) {}
 static void dm_overlay_redraw(void) {}
-static void dm_cloud_menu_toggle(void) {}   // the Cloud save row (savecloud_android.c)
-static void dm_cloud_menu_press(void) {}
-int dm_menu_audio_available(void) { return 0; } int dm_menu_rate_available(void) { return 0; } int dm_menu_res_available(void) { return 0; } int dm_menu_detail_available(void) { return 0; } int dm_cloud_available(void) { return 0; }   // the menu's rows (a controller opens it on its button row: OVM_ROWS)
+int dm_menu_audio_available(void) { return 0; } int dm_menu_rate_available(void) { return 0; } int dm_menu_res_available(void) { return 0; } int dm_menu_detail_available(void) { return 0; }   // the menu's rows (a controller opens it on its button row: OVM_ROWS)
 // the frame rate limit row (OVM_LIMIT), as in front_android.c; limit_apply only counts
 static _Atomic int g_set_limit;
 static const int LIMIT_STEPS[OVM_LIMITS] = {0, 60, 40, 30};

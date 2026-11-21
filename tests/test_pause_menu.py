@@ -223,10 +223,6 @@ float dm_overlay_scale(void) { return 1; }
 int dm_save_note(char *out, int cap) { snprintf(out, (size_t)cap, "-"); return OVX_IDLE; }
 int dm_menu_audio_available(void) { return 0; }   // no outputs to choose: the Game tab has no audio row (overlay_layout.h ov_menu_item)
 int dm_menu_rate_available(void) { return 0; } int dm_menu_res_available(void) { return 0; } int dm_menu_detail_available(void) { return 0; } int dm_menu_detail_step(void) { return 0; }   // a game without the profile's rows
-#include "savecloud.h"   // the Cloud save row (savecloud_android.c): an app without sync.txt
-int dm_cloud_available(void) { return 0; }
-int dm_cloud_status(char *note, int cap) { if (cap > 0) note[0] = 0; return DM_CLOUD_OFF; }
-int dm_cloud_manual(void) { return 0; }
 static int exit_state; static float exit_f;   // front_android.c: Exit game's hold (overlay_layout.h OV_EXIT_*)
 int dm_menu_exit(float *f, int *chosen) { *f = exit_f; *chosen = 0; return exit_state; }
 ''' + canvas + colours + r'''
@@ -253,7 +249,6 @@ static void rec_text(const ov_canvas *cv, float x, float cy, const char *s, int 
 float dm_overlay_scale(void) { return 1; }
 float dm_menu_row_need(float rh) { (void)rh; return 0; }
 int dm_menu_audio_available(void) { return 0; } int dm_menu_rate_available(void) { return 0; } int dm_menu_res_available(void) { return 0; } int dm_menu_detail_available(void) { return 0; }
-int dm_cloud_available(void) { return 1; }
 ''' + HOLD_MAIN
         self._run(source, None)
 

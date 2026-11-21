@@ -799,8 +799,6 @@ static void menu_do(int item) {
     else if (item == OVM_IMPORT) { dm_haptics_android_tap(); sp_open(); return; }
     else if (item == OVM_AUDIO) { menu_audio(); }
     else if (item == OVM_EXIT) return;   // (only held: exit_press, menu_exit_now)
-    else if (item == OVM_CLOUD) dm_cloud_menu_toggle();     // (savecloud_android.c: this game's sync on or off, kept in its state)
-    else if (item == OVM_CLOUD_UP) dm_cloud_menu_press();    // Upload now, when one is owed
     if (item >= 0 && item < OVM_N) dm_haptics_android_tap();
     if (item == OVM_RESUME) menu_close(); else dm_overlay_redraw();
 }

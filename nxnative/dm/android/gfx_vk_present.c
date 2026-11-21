@@ -86,12 +86,8 @@ __attribute__((weak)) int dm_menu_exit(float *f, int *chosen) { *f = 0; *chosen 
 __attribute__((weak)) unsigned dm_menu_exit_ver(void) { return 0; }
 __attribute__((weak)) int dm_save_note(char *out, int cap) { if (cap > 0) out[0] = 0; return OVX_IDLE; }   // front_android.c: the save manager's rows
 __attribute__((weak)) int dm_save_rows(ov_srow rows[OVM_ROWS_MAX]) { (void)rows; return 0; }
-// savecloud_android.c: the Cloud save rows and the corner note (savecloud.h)
-__attribute__((weak)) int dm_cloud_available(void) { return 0; }
-__attribute__((weak)) int dm_cloud_status(char *note, int cap) { if (cap > 0) note[0] = 0; return DM_CLOUD_OFF; }
-__attribute__((weak)) unsigned dm_cloud_menu_ver(void) { return 0; }
+// savecloud_android.c: the corner note (savecloud.h)
 __attribute__((weak)) int dm_cloud_mark(int64_t *age_ms) { (void)age_ms; return 0; }
-__attribute__((weak)) int dm_cloud_manual(void) { return 0; }
 __attribute__((weak)) int dm_overlay_custom(int layout, int ctl, float *x, float *y, float *s) { (void)layout; (void)ctl; (void)x; (void)y; *s = 1; return 0; }
 __attribute__((weak)) int dm_overlay_custom_ver(void) { return 0; }
 __attribute__((weak)) int dm_overlay_hidden(int layout, int ctl) { (void)layout; (void)ctl; return 0; }
@@ -242,7 +238,7 @@ enum { SP_DISC = OV_N, SP_BLACK, SP_WHITE, SP_ACCENT, SP_N };   // (black, white
 #define OV_FPS_CHARS "0123456789 FPS-CBATO"   // (the temperature rows: "SOC 52C", "BAT 38C")
 static struct { VkImage img; VkDeviceMemory mem; VkImageView view; VkSampler samp; VkDescriptorSetLayout dsl; VkPipelineLayout layout; VkDescriptorPool pool; VkDescriptorSet set;
                 VkPipeline pipe; VkFormat pfmt; uint32_t w, h, sh, pw, ph, prow, gh, gs, mg, mcols, mrows; uint8_t *pbuf; VkBuffer up; VkDeviceMemory upm; uint8_t *px; void *map; int uploaded, panel, lay, cver; float sp[SP_N][4];
-                unsigned cmv, exv;   // the cloud rows' and Exit game's hold's versions the panel was drawn at
+                unsigned exv;   // Exit game's hold's version the panel was drawn at
                 VkRenderPass rp; VkFramebuffer fb[8]; VkImageView fbview[8]; VkExtent2D fbext[8]; } g_ov;
 static struct { const ov_theme *t; VkImage img; VkDeviceMemory mem; VkImageView view; VkDescriptorSet set; VkBuffer up; VkDeviceMemory upm; uint32_t upk; int ready; } g_tt[2];   // per layout
 // Without dynamic rendering (a Vulkan 1.1 / 1.2 device, V.has_dynrender) the overlay draws in a render pass object over the swapchain image: one pass for the swapchain's
@@ -403,9 +399,9 @@ static void cv_button(const ov_canvas *cv, const float b[4], const char *l, int 
 // them: the controls grow to hold their words (ovm_geo), and the panel grows wider where the screen has room (overlay_layout.h ov_menu_rect, dm_menu_row_need);
 // only where that is not enough do the letters get smaller
 static const char *const OVM_LABELS_EN[OVM_N] = {"Show gamepad", "Opacity", "Edit layout", "Rumble", "Show FPS", "Mode", "Export save", "Import save", "Face buttons", "Audio output", "Frame rate", "Resolution",
-                                                  "Detail distance", "Frame rate limit", "Cloud save", "Upload save", "Touch input", "Resume", "Exit game", ""};
+                                                  "Detail distance", "Frame rate limit", "Touch input", "Resume", "Exit game", ""};
 static const char *const OVM_LABELS_ZH[OVM_N] = {"显示手柄", "透明度", "编辑布局", "震动", "显示帧率", "模式", "导出存档", "导入存档", "按键布局", "音频输出", "帧率", "分辨率",
-                                                  "细节距离", "帧率上限", "云存档", "上传存档", "触屏操作", "继续游戏", "退出游戏", ""};
+                                                  "细节距离", "帧率上限", "触屏操作", "继续游戏", "退出游戏", ""};
 #define OVM_LABELS (dm_ui_zh() ? OVM_LABELS_ZH : OVM_LABELS_EN)
 static const char *const OVM_BUTTONS_EN[OVM_N] = {[OVM_EDIT] = "Edit", [OVM_EXPORT] = "Export", [OVM_IMPORT] = "Import", [OVM_AUDIO] = "Select"};   // the rows that are a button: its word
 static const char *const OVM_BUTTONS_ZH[OVM_N] = {[OVM_EDIT] = "编辑", [OVM_EXPORT] = "导出", [OVM_IMPORT] = "导入", [OVM_AUDIO] = "选择"};
@@ -422,8 +418,6 @@ static const char *const OVM_RATES[2] = {"30 fps", "60 fps"};   // the frame ste
 // the frame rate limit (front_android.c limit_apply): only its value, in a pill as wide as the widest (its row steps through them, so the other values are not shown
 // as segments to tap; with four segments beside its label the row would not fit at 1280x960 and every row's letters would halve)
 static const char *const OVM_LIMIT_WORDS[OVM_LIMITS] = {"Auto", "60 fps", "40 fps", "30 fps"};
-static const char *const OVM_CLOUD_WORDS[] = {[DM_CLOUD_OFF] = "Off", [DM_CLOUD_DISABLED] = "Off", [DM_CLOUD_TRIAL] = "Trial", [DM_CLOUD_SKIPPED] = "Skipped", [DM_CLOUD_UPTODATE] = "Synced",
-    [DM_CLOUD_PENDING] = "Not sent", [DM_CLOUD_OFFLINE] = "Waiting", [DM_CLOUD_UPLOADING] = "Uploading", [DM_CLOUD_CONFLICT] = "Conflict", [DM_CLOUD_AUTH] = "Token?"};   // the Cloud save row's status
 static float ovm_limit_w(int is, float sh) { float w = 0; for (int k = 0; k < OVM_LIMITS; k++) w = fmaxf(w, cv_text_w(OVM_LIMIT_WORDS[k], is)); return w + sh; }
 // the letters' size of the half-resolution raster (rh: a row's height in window pixels, rh / 2 texels there): 0.30 of a row, smaller until every row (each item's,
 // shown or not) fitted beside its control in a panel OV_MENU_W window heights wide
@@ -434,8 +428,7 @@ static int ovm_ref_scale(float rh) {
         float need = 0;
         for (int i = 0; i < OVM_RESUME; i++) {
             if (i == OVM_TOUCH) continue;   // (no row)
-            float lw = cv_text_w(OVM_LABELS[i], is), cw = i == OVM_MODE ? 2 * (cv_text_w(OVM_MODES[0], is) + sh) : i == OVM_PAD ? 2 * (cv_text_w(OVM_PADS[0], is) + sh) : i == OVM_RATE ? 2 * (cv_text_w(OVM_RATES[0], is) + sh) : i == OVM_RES ? 3 * (cv_text_w(OVM_RESS[1], is) + sh) : i == OVM_DETAIL ? 3 * (cv_text_w(OVM_DETS[1], is) + sh) : i == OVM_LIMIT ? ovm_limit_w(is, sh)
-                     : i == OVM_CLOUD_UP ? cv_text_w("Upload now", is) + 2 * sh : OVM_BUTTONS[i] ? cv_text_w(OVM_BUTTONS[i], is) + 2 * sh : sw + gap + cv_text_w("OFF", is);
+            float lw = cv_text_w(OVM_LABELS[i], is), cw = i == OVM_MODE ? 2 * (cv_text_w(OVM_MODES[0], is) + sh) : i == OVM_PAD ? 2 * (cv_text_w(OVM_PADS[0], is) + sh) : i == OVM_RATE ? 2 * (cv_text_w(OVM_RATES[0], is) + sh) : i == OVM_RES ? 3 * (cv_text_w(OVM_RESS[1], is) + sh) : i == OVM_DETAIL ? 3 * (cv_text_w(OVM_DETS[1], is) + sh) : i == OVM_LIMIT ? ovm_limit_w(is, sh) : OVM_BUTTONS[i] ? cv_text_w(OVM_BUTTONS[i], is) + 2 * sh : sw + gap + cv_text_w("OFF", is);
             need = fmaxf(need, i == OVM_OPACITY ? fmaxf(lw / 0.38f, cv_text_w("80%", is) / 0.14f) : lw + gap + cw + h * 0.3f);
         }
         if (need <= rw && cv_text_w(OVM_TAB_NAMES[0], is) < rw / 2 - sh) break;
@@ -466,8 +459,6 @@ static float ovm_need(float rh, int is) {
         else if (i == OVM_RES) cw = 3 * (ovm_w3(OVM_RESS, 3, is) + g.sh);
         else if (i == OVM_DETAIL) cw = 3 * (ovm_w3(OVM_DETS, 3, is) + g.sh);
         else if (i == OVM_LIMIT) cw = ovm_limit_w(is, g.sh);
-        else if (i == OVM_CLOUD) cw = ovm_w3(OVM_CLOUD_WORDS, (int)(sizeof OVM_CLOUD_WORDS / sizeof *OVM_CLOUD_WORDS), is) + g.gap + g.sw;
-        else if (i == OVM_CLOUD_UP) cw = cv_text_w("Upload now", is) + 2 * g.sh;
         else if (OVM_BUTTONS[i]) cw = cv_text_w(OVM_BUTTONS[i], is) + 2 * g.sh;
         else cw = g.sw + g.gap + fmaxf(cv_text_w(TR("ON", "开"), is), cv_text_w(TR("OFF", "关"), is));
         need = fmaxf(need, rh * 0.15f + lw + g.gap + cw + rh * 0.15f);
@@ -530,23 +521,6 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             snprintf(v, sizeof v, "%s", x == OVX_BUSY ? TR("Exporting…", "导出中…") : x == OVX_DONE ? nm : x == OVX_NOSAVE ? TR("No save yet", "还没有存档") : TR("Failed", "失败"));
             while (vs > 1 && cv_text_w(v, vs) > rw - cv_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;
             cv_text(cv, x1 - cv_text_w(v, vs), cy, v, vs, x == OVX_FAILED ? C_ACCENT : C_WHITE);
-        } else if (it == OVM_CLOUD) {   // the sync's switch: on unless this game's sync is off (or a trial build), its status beside it in place of ON / OFF
-            char note[32]; int cs = dm_cloud_status(note, sizeof note), on = cs != DM_CLOUD_DISABLED && cs != DM_CLOUD_TRIAL && cs != DM_CLOUD_OFF; float sx0 = x1 - sw;
-            cv_rrect(cv, sx0, cy - sh / 2, x1, cy + sh / 2, sh / 2, on ? C_ACCENT : C_OFF);
-            cv_disc(cv, on ? x1 - sh / 2 : sx0 + sh / 2, cy, sh / 2 - fmaxf(2, sh * 0.1f), on ? C_WHITE : C_KNOB_OFF);
-            const char *word = dm_cloud_manual() && cs != DM_CLOUD_CONFLICT && cs != DM_CLOUD_AUTH && cs != DM_CLOUD_UPLOADING ? "Manual" : OVM_CLOUD_WORDS[cs]; cv_text(cv, sx0 - gap - cv_text_w(word, is), cy, word, is, cs == DM_CLOUD_CONFLICT || cs == DM_CLOUD_AUTH ? C_ACCENT : on ? C_WHITE : C_DIM);   // (manual: on, "Manual")
-        } else if (it == OVM_CLOUD_UP) {   // Upload now while one is owed; else when the last one went up
-            char note[32], v[48]; int cs = dm_cloud_status(note, sizeof note);
-            if (cs == DM_CLOUD_PENDING || cs == DM_CLOUD_OFFLINE) { float bw = cv_text_w("Upload now", is) + 2 * sh, b[4] = {x1 - bw, cy - g.bh / 2, bw, g.bh}; cv_button_s(cv, b, "Upload now", 0, 0, is); }
-            else {
-                if (cs == DM_CLOUD_UPLOADING) snprintf(v, sizeof v, "Uploading...");
-                else if (cs == DM_CLOUD_CONFLICT) snprintf(v, sizeof v, "Restart to choose");
-                else if (cs == DM_CLOUD_DISABLED && note[0]) snprintf(v, sizeof v, "On at next start");
-                else if (cs == DM_CLOUD_UPTODATE || cs == DM_CLOUD_AUTH) snprintf(v, sizeof v, note[0] ? "Last %s" : "Nothing to send", note);
-                else snprintf(v, sizeof v, "-");
-                int vs = is; while (vs > 1 && cv_text_w(v, vs) > rw - cv_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;
-                cv_text(cv, x1 - cv_text_w(v, vs), cy, v, vs, C_DIM);
-            }
         } else if (OVM_BUTTONS[it]) {   // a button
             float bw = cv_text_w(OVM_BUTTONS[it], is) + 2 * sh, b[4] = {x1 - bw, cy - g.bh / 2, bw, g.bh}; cv_button_s(cv, b, OVM_BUTTONS[it], 0, 0, is);
         } else if (it == OVM_MODE || it == OVM_PAD || it == OVM_RATE || it == OVM_RES || it == OVM_DETAIL) {   // two segments, the current one filled: handheld (performance) | docked (resolution); by position | by label
@@ -1020,9 +994,8 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
         g_ov.uploaded = 0; g_ov.panel = -1;
     }
     uint32_t y0 = 0, rows = ov_tex_rows();   // the rows to upload
-    unsigned cmv = dm_cloud_menu_ver();
     unsigned exv = dm_menu_exit_ver();
-    int want_panel = menu >= 0 && (menu != g_ov.panel || cmv != g_ov.cmv || exv != g_ov.exv);   // (the cloud rows and Exit game's hold change without the menu's state)
+    int want_panel = menu >= 0 && (menu != g_ov.panel || exv != g_ov.exv);   // (Exit game's hold changes without the menu's state)
     // (a fence that this device's kgsl holds for ~half a second would freeze the whole menu: wait one frame's worth, and if the copy out of the buffer has not run
     // yet keep the panel as it is this frame — the next redraw, 16 ms later, tries again and the change lands then)
     int panel_ok = 1;
@@ -1031,7 +1004,7 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
         if (vkWaitForFences(V.dev, n, f, 1, 20000000ull) == VK_TIMEOUT) panel_ok = 0;
         else { y0 = g_ov.h + g_ov.sh; rows = g_ov.prow; g_ov.uploaded = 0; }
     }
-    if (panel_ok && want_panel) { ov_panel(menu); g_ov.panel = menu; g_ov.cmv = cmv; g_ov.exv = exv; }
+    if (panel_ok && want_panel) { ov_panel(menu); g_ov.panel = menu; g_ov.exv = exv; }
     // the rows the copy reads go back into the mapped buffer here, in one linear pass (write-combined: the raster above ran in cacheable memory)
     if (g_ov.map && g_ov.px && g_ov.px != (uint8_t *)g_ov.map) memcpy((uint8_t *)g_ov.map + (size_t)y0 * g_ov.w * 4, g_ov.px + (size_t)y0 * g_ov.w * 4, (size_t)rows * g_ov.w * 4);
     if (!g_ov.uploaded) {
