@@ -205,7 +205,10 @@ static int ss_untar(const uint8_t *p, size_t n, const char *dst_save, const char
 }
 
 // ---- sync.txt (the files folder: adb pushes it): url=, token=, device= as KEY=VALUE lines (# comments). Without url or token the sync is off ----
-typedef struct { char url[512], token[512], device[64]; } ss_cfg;
+// device= follows the server's name for this device (you.name in its answers, ss_cfg_renamed); prev_device= (up to two lines, the newest first) keeps the names it had
+// before, so the sessions and uploads this app made under them stay this device's own (ss_name_mine)
+#define SS_PREV_NAMES 2
+typedef struct { char url[512], token[512], device[64], prev[SS_PREV_NAMES][64]; } ss_cfg;
 static void ss_trim(char *s) { char *e = s + strlen(s); while (e > s && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' ' || e[-1] == '\t')) *--e = 0; char *b = s; while (*b == ' ' || *b == '\t') b++; if (b != s) memmove(s, b, strlen(b) + 1); }
 static int ss_cfg_text(const char *txt, ss_cfg *c) {   // 1: on (an http(s):// address and a token), 0: off
     memset(c, 0, sizeof *c); char line[1024];
@@ -217,6 +220,10 @@ static int ss_cfg_text(const char *txt, ss_cfg *c) {   // 1: on (an http(s):// a
         if (!strcmp(line, "url")) snprintf(c->url, sizeof c->url, "%s", v);
         else if (!strcmp(line, "token")) snprintf(c->token, sizeof c->token, "%s", v);
         else if (!strcmp(line, "device")) snprintf(c->device, sizeof c->device, "%s", v);
+        else if (!strcmp(line, "prev_device") && v[0]) {
+            int k = 0; while (k < SS_PREV_NAMES && c->prev[k][0] && strcmp(c->prev[k], v)) k++;
+            if (k < SS_PREV_NAMES && !c->prev[k][0]) snprintf(c->prev[k], sizeof c->prev[k], "%s", v);
+        }
     }
     size_t L = strlen(c->url); while (L && c->url[L - 1] == '/') c->url[--L] = 0;
     for (const char *q = c->token; *q; q++) if ((unsigned char)*q <= 0x20 || (unsigned char)*q >= 0x7f) c->token[0] = 0;   // a header value: printable ASCII
@@ -287,7 +294,9 @@ static int ss_state_save(const char *path, const ss_state *s) { char b[1024]; in
 // session.state: "open" (the start), "alive" (a heartbeat each minute while the game is on screen) or "closed" (onPause); dirty: that device has a save not yet uploaded
 // (an older server sends no dirty: 0). updated: when the server took it
 // time and updated: Unix seconds (milliseconds when the number is that large), or an ISO 8601 text ("2026-11-20T12:34:56Z", "...+09:00", fractions ignored)
-typedef struct { uint64_t seq, size; int64_t files; char sha[65], device[64], game_version[32], build[64]; int64_t time; int session, s_open, s_dirty; char s_device[64]; int64_t s_updated; } ss_meta;   // s_open: open or alive; files: the save's file count (the meta's fileCount), -1 when the server keeps none
+// you: {id, name}, rooms' answer to a linked device's request: the server's name for this device (you.name, ss_dev_clean), "" when the server sends none
+typedef struct { uint64_t seq, size; int64_t files; char sha[65], device[64], game_version[32], build[64]; int64_t time; int session, s_open, s_dirty; char s_device[64]; int64_t s_updated;
+                 char you[64]; } ss_meta;   // s_open: open or alive; files: the save's file count (the meta's fileCount), -1 when the server keeps none
 static int64_t ss_days(int y, int m, int d) { y -= m <= 2; int64_t era = (y >= 0 ? y : y - 399) / 400; int yoe = y - (int)era * 400, doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1, doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; return era * 146097 + doe - 719468; }
 static int ss_iso_time(const char *s, int64_t *out) {
     int Y, M, D, h = 0, mi = 0, se = 0, n = 0;
@@ -331,6 +340,44 @@ static int ss_session_obj(ds_js *j, ss_meta *m) {
         return 0;
     }
 }
+// a device's name as sync.txt keeps it: one line (control bytes and = as spaces), trimmed, no UTF-8 sequence cut short at its end (ds_str cuts at its buffer's size)
+static void ss_dev_clean(char *s) {
+    for (char *q = s; *q; q++) if ((unsigned char)*q < 0x20 || *q == '=' || *q == 0x7f) *q = ' ';
+    size_t n = strlen(s), i = n;
+    while (i > 0 && ((unsigned char)s[i - 1] & 0xC0) == 0x80) i--;   // the last sequence's lead byte
+    if (i > 0 && (unsigned char)s[i - 1] >= 0xC0) { unsigned char c = (unsigned char)s[i - 1]; size_t want = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : 2; if (n - (i - 1) < want) s[i - 1] = 0; }
+    ss_trim(s);
+}
+static int ss_you_obj(ds_js *j, char *name, size_t cap) {   // you: {id, name} (anything else skipped; null: no name)
+    char key[32], b[256]; ds_ws(j); name[0] = 0;
+    if (j->p < j->e && *j->p != '{') return ds_skip(j, 1);
+    if (j->p >= j->e || *j->p++ != '{') return -1;
+    ds_ws(j); if (j->p < j->e && *j->p == '}') { j->p++; return 0; }
+    for (;;) {
+        if (ds_str(j, key, sizeof key)) return -1;
+        ds_ws(j); if (j->p >= j->e || *j->p++ != ':') return -1; ds_ws(j);
+        if (!strcmp(key, "name") && j->p < j->e && *j->p == '"') { if (ds_str(j, b, sizeof b)) return -1; snprintf(name, cap, "%s", b); ss_dev_clean(name); }
+        else if (ds_skip(j, 2)) return -1;
+        ds_ws(j); if (j->p >= j->e) return -1;
+        if (*j->p == ',') { j->p++; continue; }
+        return *j->p++ == '}' ? 0 : -1;
+    }
+}
+// an answer's top-level you.name (PUT data's, POST session's, any object): 1 with the name, 0 none
+static int ss_you_name(const char *txt, size_t n, char *out, size_t cap) {
+    ds_js j = {txt, txt + n}; char key[32]; out[0] = 0;
+    if (!txt) return 0;
+    ds_ws(&j); if (j.p >= j.e || *j.p++ != '{') return 0;
+    ds_ws(&j); if (j.p < j.e && *j.p == '}') return 0;
+    for (;;) {
+        if (ds_str(&j, key, sizeof key)) return 0;
+        ds_ws(&j); if (j.p >= j.e || *j.p++ != ':') return 0;
+        if (!strcmp(key, "you")) { if (ss_you_obj(&j, out, cap)) { out[0] = 0; return 0; } return out[0] != 0; }
+        if (ds_skip(&j, 1)) return 0;
+        ds_ws(&j); if (j.p >= j.e || *j.p != ',') return 0;
+        j.p++;
+    }
+}
 static int ss_meta_obj(ds_js *j, ss_meta *m) {   // an object at j (null: -2)
     memset(m, 0, sizeof *m); m->files = -1; char key[32]; ds_ws(j);
     if (j->e - j->p >= 4 && !memcmp(j->p, "null", 4)) { j->p += 4; return -2; }
@@ -348,6 +395,7 @@ static int ss_meta_obj(ds_js *j, ss_meta *m) {   // an object at j (null: -2)
         else if (!strcmp(key, "gameVersion")) { ds_ws(j); if (j->p < j->e && *j->p == '"') { if (ds_str(j, m->game_version, sizeof m->game_version)) return -1; } else if (ds_skip(j, 1)) return -1; }
         else if (!strcmp(key, "build")) { ds_ws(j); if (j->p < j->e && *j->p == '"') { if (ds_str(j, m->build, sizeof m->build)) return -1; } else if (ds_skip(j, 1)) return -1; }
         else if (!strcmp(key, "session")) { if (ss_session_obj(j, m)) return -1; }
+        else if (!strcmp(key, "you")) { if (ss_you_obj(j, m->you, sizeof m->you)) return -1; }
         else if (ds_skip(j, 1)) return -1;
         ds_ws(j); if (j->p >= j->e) return -1;
         if (*j->p == ',') { j->p++; continue; }
@@ -464,8 +512,16 @@ static int ss_local_state(const ss_state *s, const char *local) {
 enum { SS_OTHER_NONE,         // no session, this device's, closed and clean, or open but silent (killed)
        SS_OTHER_RUNNING,      // running there now, its saves up: a note only, the start goes on
        SS_OTHER_UNSYNCED };   // that device has a save the cloud has not got: the warning before the decision (Start anyway / Cancel)
-static int ss_other_device(const ss_meta *m, const char *me, int64_t now) {
-    if (!m->session || !m->s_device[0] || !strcmp(m->s_device, me) || m->s_updated <= 0) return SS_OTHER_NONE;
+// whether a device name the server recorded (a session's, the meta's device) is this device's: its name now (sync.txt device=, the server's you.name once one came) or one
+// it had before (prev_device=: what this app sent before the server named it, as an app from before you=1 did)
+static int ss_name_mine(const ss_cfg *me, const char *name) {
+    if (!name || !name[0]) return 0;
+    if (!strcmp(name, me->device)) return 1;
+    for (int k = 0; k < SS_PREV_NAMES; k++) if (me->prev[k][0] && !strcmp(name, me->prev[k])) return 1;
+    return 0;
+}
+static int ss_other_device(const ss_meta *m, const ss_cfg *me, int64_t now) {
+    if (!m->session || !m->s_device[0] || ss_name_mine(me, m->s_device) || m->s_updated <= 0) return SS_OTHER_NONE;
     int64_t age = now - m->s_updated;
     if (age <= -86400) return SS_OTHER_NONE;   // (a clock a day or more off: nothing to go by)
     if (m->s_dirty && age < SS_DIRTY_DAYS * 86400) return SS_OTHER_UNSYNCED;
@@ -644,15 +700,56 @@ static int ss_link_cfg(char *o, size_t n, const char *url, const char *token, co
     memset(&c, 0, sizeof c); if (!ok && n) memset(o, 0, n);
     return ok ? 0 : -1;
 }
-static int ss_link_write(const char *path, const char *url, const char *token, const char *device) {   // through <path>.new (0600) and a rename; 0 or -1 (errno)
-    char b[1400], t[1100]; if (ss_link_cfg(b, sizeof b, url, token, device)) { errno = EINVAL; return -1; }
-    snprintf(t, sizeof t, "%s.new", path); unlink(t);
-    int fd = open(t, O_WRONLY | O_CREAT | O_TRUNC, 0600), r = -1;
-    if (fd >= 0) { size_t n = strlen(b); r = write(fd, b, n) == (ssize_t)n && !fchmod(fd, 0600) && !fsync(fd) ? 0 : -1; if (close(fd)) r = -1; }
-    memset(b, 0, sizeof b);
+static int ss_write_private(const char *path, const char *b, size_t n) {   // sync.txt's text through <path>.new (0600) and a rename; 0 or -1 (errno)
+    char t[1100]; if ((size_t)snprintf(t, sizeof t, "%s.new", path) >= sizeof t) { errno = ENAMETOOLONG; return -1; }
+    unlink(t);
+    int fd = open(t, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600), r = -1;
+    if (fd >= 0) { r = write(fd, b, n) == (ssize_t)n && !fchmod(fd, 0600) && !fsync(fd) ? 0 : -1; if (close(fd)) r = -1; }
     if (!r && rename(t, path)) r = -1;
     if (r) { int e = errno; unlink(t); errno = e; }
     return r;
+}
+static int ss_link_write(const char *path, const char *url, const char *token, const char *device) {   // through <path>.new (0600) and a rename; 0 or -1 (errno)
+    char b[1400]; if (ss_link_cfg(b, sizeof b, url, token, device)) { errno = EINVAL; return -1; }
+    int r = ss_write_private(path, b, strlen(b)); int e = errno;
+    memset(b, 0, sizeof b); errno = e;
+    return r;
+}
+// The server named this device (you.name): c's device becomes it and the name before goes first in prev (a name already there moves up; the new one is never in prev)
+static void ss_cfg_rename(ss_cfg *c, const char *name) {
+    if (!name[0] || !strcmp(c->device, name)) return;
+    char keep[1 + SS_PREV_NAMES][64]; int n = 0;
+    snprintf(keep[n++], sizeof keep[0], "%s", c->device);
+    for (int k = 0; k < SS_PREV_NAMES; k++) snprintf(keep[n++], sizeof keep[0], "%s", c->prev[k]);
+    memset(c->prev, 0, sizeof c->prev); int o = 0;
+    for (int i = 0; i < n && o < SS_PREV_NAMES; i++) {
+        if (!keep[i][0] || !strcmp(keep[i], name)) continue;
+        int dup = 0; for (int k = 0; k < o; k++) if (!strcmp(c->prev[k], keep[i])) dup = 1;
+        if (!dup) snprintf(c->prev[o++], sizeof c->prev[0], "%s", keep[i]);
+    }
+    snprintf(c->device, sizeof c->device, "%s", name);
+}
+// sync.txt's text with the server's name: every line as it was (comments, url=, token=) but device= and prev_device=, which follow at its end (ss_cfg_rename).
+// 0 with out, -1 when txt is not a sync.txt that is on, or the result does not fit or would not read back with the same token
+static int ss_cfg_renamed(const char *txt, const char *name, char *out, size_t cap) {
+    ss_cfg c, back; int ok = -1; size_t k = 0;
+    if (!name[0] || !ss_cfg_text(txt, &c)) goto done;
+    ss_cfg_rename(&c, name);
+    for (const char *s = txt; *s;) {
+        const char *e = strchr(s, '\n'); size_t len = e ? (size_t)(e - s) : strlen(s);
+        char key[1024]; size_t m = len < sizeof key ? len : sizeof key - 1; memcpy(key, s, m); key[m] = 0;
+        char *eq = strchr(key, '='); if (eq) *eq = 0;
+        ss_trim(key); int drop = eq && key[0] != '#' && (!strcmp(key, "device") || !strcmp(key, "prev_device"));
+        if (!drop) { int w = snprintf(out + k, cap - k, "%.*s\n", (int)len, s); if (w < 0 || (size_t)w >= cap - k) goto done; k += (size_t)w; }
+        s += len + (e != NULL);
+    }
+    int w = snprintf(out + k, cap - k, "device=%s\n", c.device); if (w < 0 || (size_t)w >= cap - k) goto done; k += (size_t)w;
+    for (int i = 0; i < SS_PREV_NAMES; i++) if (c.prev[i][0]) { w = snprintf(out + k, cap - k, "prev_device=%s\n", c.prev[i]); if (w < 0 || (size_t)w >= cap - k) goto done; k += (size_t)w; }
+    ok = ss_cfg_text(out, &back) && !strcmp(back.token, c.token) && !strcmp(back.device, c.device) ? 0 : -1;
+done:
+    memset(&c, 0, sizeof c); memset(&back, 0, sizeof back);
+    if (ok && cap) memset(out, 0, cap);
+    return ok;
 }
 // the QR code's text (the server's address with the code, so the phone's page opens with it filled in) and the address as the screen writes it (no scheme)
 static void ss_link_qr(char *o, size_t n, const char *url, const char *code) { snprintf(o, n, "%s%scode=%s", url, strchr(url, '?') ? "&" : "?", code); }

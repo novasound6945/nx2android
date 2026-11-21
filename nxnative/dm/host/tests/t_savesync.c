@@ -138,6 +138,7 @@ static void t_files(void) {
 #define A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 #define B "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 #define C "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+static ss_cfg cfg_named(const char *d, const char *p0, const char *p1) { ss_cfg c = {0}; snprintf(c.device, sizeof c.device, "%s", d); snprintf(c.prev[0], sizeof c.prev[0], "%s", p0 ? p0 : ""); snprintf(c.prev[1], sizeof c.prev[1], "%s", p1 ? p1 : ""); return c; }
 static ss_state st_of(int have, uint64_t seq, const char *sha) { ss_state s = {0}; s.have = have; s.seq = seq; snprintf(s.sha, sizeof s.sha, "%s", sha ? sha : ""); return s; }
 static ss_meta meta_of(uint64_t seq, const char *sha) { ss_meta m = {0}; m.seq = seq; snprintf(m.sha, sizeof m.sha, "%s", sha); return m; }
 static void t_decide(void) {
@@ -173,27 +174,28 @@ static void t_decide(void) {
     m = meta_of(6, B); CHECK(ss_decide(SS_NET_OK, &m, &s, C, &p) == SS_GO_CONFLICT, "played without the sync, the server moved too: conflict");
     CHECK(ss_decide(SS_NET_FAIL, NULL, &s, C, &p) == SS_GO_OFFLINE && !p, "played without the sync, then offline: nothing goes up by itself");
     // another device: dirty (a save not yet up) warns, a recent heartbeat is a note, anything else nothing
+    ss_cfg NOVA = cfg_named("nova", NULL, NULL), DECK = cfg_named("deck", NULL, NULL);
     int64_t now = 1795176000; m = meta_of(5, A); m.session = 1; m.s_open = 1; m.s_dirty = 1; snprintf(m.s_device, sizeof m.s_device, "deck"); m.s_updated = now - 3600;
-    CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_UNSYNCED, "dirty on another device an hour ago: the warning");
-    m.s_updated = now - 29 * 86400; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_UNSYNCED, "dirty 29 days ago: the warning");
-    m.s_updated = now - 31 * 86400; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_NONE, "dirty but older than 30 days: none");
-    m.s_updated = now - 3600; m.s_open = 0; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_UNSYNCED, "closed but dirty: the warning");
-    m.s_open = 1; m.s_updated = now - 30; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_UNSYNCED, "alive and dirty: the warning, not the note");
-    CHECK(ss_other_device(&m, "deck", now) == SS_OTHER_NONE, "dirty on this device: none");
-    m.s_dirty = 0; m.s_updated = now - 60; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_RUNNING, "alive a minute ago, clean: a note");
-    m.s_updated = now - 179; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_RUNNING, "alive 179 s ago: a note");
-    m.s_updated = now - 180; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_NONE, "open 3 min ago (killed, its heartbeats stopped): none");
-    m.s_updated = now - 3600; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_NONE, "open an hour ago, clean (killed): none");
-    CHECK(ss_other_device(&m, "deck", now) == SS_OTHER_NONE, "open on this device: none");
-    m.s_updated = now - 10; m.s_open = 0; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_NONE, "closed and clean a moment ago: none");
-    m.session = 0; m.s_open = 1; m.s_dirty = 1; CHECK(ss_other_device(&m, "nova", now) == SS_OTHER_NONE, "no session: none");
+    CHECK(ss_other_device(&m, &NOVA, now) == SS_OTHER_UNSYNCED, "dirty on another device an hour ago: the warning");
+    m.s_updated = now - 29 * 86400; CHECK(ss_other_device(&m, &NOVA, now) == SS_OTHER_UNSYNCED, "dirty 29 days ago: the warning");
+    m.s_updated = now - 31 * 86400; CHECK(ss_other_device(&m, &NOVA, now) == SS_OTHER_NONE, "dirty but older than 30 days: none");
+    m.s_updated = now - 3600; m.s_open = 0; CHECK(ss_other_device(&m, &NOVA, now) == SS_OTHER_UNSYNCED, "closed but dirty: the warning");
+    m.s_open = 1; m.s_updated = now - 30; CHECK(ss_other_device(&m, &NOVA, now) == SS_OTHER_UNSYNCED, "alive and dirty: the warning, not the note");
+    CHECK(ss_other_device(&m, &DECK, now) == SS_OTHER_NONE, "dirty on this device: none");
+    m.s_dirty = 0; m.s_updated = now - 60; CHECK(ss_other_device(&m, &NOVA, now) == SS_OTHER_RUNNING, "alive a minute ago, clean: a note");
+    m.s_updated = now - 179; CHECK(ss_other_device(&m, &NOVA, now) == SS_OTHER_RUNNING, "alive 179 s ago: a note");
+    m.s_updated = now - 180; CHECK(ss_other_device(&m, &NOVA, now) == SS_OTHER_NONE, "open 3 min ago (killed, its heartbeats stopped): none");
+    m.s_updated = now - 3600; CHECK(ss_other_device(&m, &NOVA, now) == SS_OTHER_NONE, "open an hour ago, clean (killed): none");
+    CHECK(ss_other_device(&m, &DECK, now) == SS_OTHER_NONE, "open on this device: none");
+    m.s_updated = now - 10; m.s_open = 0; CHECK(ss_other_device(&m, &NOVA, now) == SS_OTHER_NONE, "closed and clean a moment ago: none");
+    m.session = 0; m.s_open = 1; m.s_dirty = 1; CHECK(ss_other_device(&m, &NOVA, now) == SS_OTHER_NONE, "no session: none");
     // the session as the server says it: alive and dirty read; no dirty (an older server) is clean
     const char *j3 = "{\"seq\":0,\"session\":{\"device\":\"deck\",\"state\":\"alive\",\"updated\":\"2026-11-20T12:00:00.000Z\",\"dirty\":true}}";
     CHECK(ss_meta_parse(j3, strlen(j3), &m) == 0 && m.session && m.s_open && m.s_dirty && m.s_updated == 1795176000, "alive, dirty");
     const char *j4 = "{\"seq\":0,\"session\":{\"device\":\"deck\",\"state\":\"closed\",\"dirty\":false,\"updated\":\"2026-11-20T12:00:00Z\"}}";
     CHECK(ss_meta_parse(j4, strlen(j4), &m) == 0 && m.session && !m.s_open && !m.s_dirty, "closed, clean");
     const char *j5 = "{\"seq\":0,\"session\":{\"device\":\"deck\",\"state\":\"open\",\"updated\":\"2026-11-20T12:00:00Z\"}}";
-    CHECK(ss_meta_parse(j5, strlen(j5), &m) == 0 && m.s_open && !m.s_dirty && ss_other_device(&m, "nova", 1795176000 + 600) == SS_OTHER_NONE, "no dirty field: clean");
+    CHECK(ss_meta_parse(j5, strlen(j5), &m) == 0 && m.s_open && !m.s_dirty && ss_other_device(&m, &NOVA, 1795176000 + 600) == SS_OTHER_NONE, "no dirty field: clean");
     // a trial build, the game's switch, no sync.txt
     CHECK(ss_run_mode(0, 0, 0) == SS_RUN_NONE && ss_run_mode(0, 1, 1) == SS_RUN_NONE, "no sync.txt: nothing");
     CHECK(ss_run_mode(1, 1, 0) == SS_RUN_SUPPRESSED, "a trial build: suppressed");
@@ -451,9 +453,52 @@ static void t_steam(void) {
     t.net = 1; t.was_net = 0; t.next_try = t.now + 60000; t.last_hb = t.now; CHECK(ss_tick(&t) == (SS_DO_RETRY_NOW | SS_DO_UPLOAD), "the network back once due: it goes up at once, the backoff forgotten");
 }
 
+// the server's name for this device (you: {id, name}): read from each answer, sync.txt rewritten with it (the names before kept), and a session or upload this app made
+// under an older name (an app from before you=1: sync.txt's own device=, a link's older name) is this device's, not another's
+static void t_you(void) {
+    ss_meta m; char yn[64];
+    const char *g = "{\"seq\":3,\"sha256\":\"" B "\",\"device\":\"nova\",\"you\":{\"id\":\"d7\",\"name\":\"Retroid Pocket Nova\"},\"time\":1}";
+    CHECK(!ss_meta_parse(g, strlen(g), &m) && m.seq == 3 && !strcmp(m.you, "Retroid Pocket Nova") && !strcmp(m.device, "nova"), "GET meta 200: you.name read (%s)", m.you);
+    const char *nf = "{\"error\":\"none\",\"session\":{\"device\":\"nova\",\"state\":\"open\",\"updated\":1795176000},\"you\":{\"id\":7,\"name\":\"RP Nova\"}}";
+    CHECK(!ss_meta_parse(nf, strlen(nf), &m) && !m.seq && m.session && !strcmp(m.you, "RP Nova"), "GET meta 404's body: you.name read, its id a number");
+    const char *old = "{\"seq\":3,\"sha256\":\"" B "\"}"; CHECK(!ss_meta_parse(old, strlen(old), &m) && !m.you[0], "an older server: no name");
+    const char *nul = "{\"seq\":0,\"you\":null}"; CHECK(!ss_meta_parse(nul, strlen(nul), &m) && !m.you[0], "you null: no name");
+    const char *se = "{\"ok\":true,\"session\":{\"device\":\"RP Nova\",\"state\":\"alive\"},\"you\":{\"name\":\"RP Nova\",\"id\":\"d7\"}}";
+    CHECK(ss_you_name(se, strlen(se), yn, sizeof yn) && !strcmp(yn, "RP Nova"), "POST session 200: you.name read");
+    CHECK(!ss_you_name("{\"ok\":true}", 11, yn, sizeof yn) && !yn[0] && !ss_you_name("nope", 4, yn, sizeof yn) && !ss_you_name(NULL, 0, yn, sizeof yn), "no you: none");
+    const char *bad = "{\"you\":{\"name\":\"a=b\\nc\"}}"; CHECK(ss_you_name(bad, strlen(bad), yn, sizeof yn) && !strcmp(yn, "a b c"), "one line of sync.txt (%s)", yn);
+    char longn[400] = "{\"you\":{\"name\":\""; for (int i = 0; i < 40; i++) strcat(longn, "\xea\xb0\x80"); strcat(longn, "\"}}");   // 40 Hangul syllables: 120 bytes
+    CHECK(ss_you_name(longn, strlen(longn), yn, sizeof yn) && strlen(yn) == 63 && (unsigned char)yn[60] == 0xea, "a long name cut at its buffer, on a whole character (%zu)", strlen(yn));
+    char cut[8] = "ab\xea\xb0"; ss_dev_clean(cut); CHECK(!strcmp(cut, "ab"), "a character cut short is dropped");
+    // sync.txt follows the name; the names before stay as prev_device= (two, the newest first)
+    const char *t0 = "# pushed by hand\nurl=https://rooms.example\ntoken=tok123\ndevice=nova\n";
+    char out[2048]; ss_cfg c;
+    CHECK(!ss_cfg_renamed(t0, "Retroid Pocket Nova", out, sizeof out) && ss_cfg_text(out, &c) && !strcmp(c.device, "Retroid Pocket Nova") && !strcmp(c.prev[0], "nova") && !c.prev[1][0]
+          && !strcmp(c.token, "tok123") && !strcmp(c.url, "https://rooms.example") && strstr(out, "# pushed by hand\n"), "renamed: the comment, url and token kept, the old name in prev (%s)", out);
+    char o2[2048]; CHECK(!ss_cfg_renamed(out, "RP Nova", o2, sizeof o2) && ss_cfg_text(o2, &c) && !strcmp(c.device, "RP Nova") && !strcmp(c.prev[0], "Retroid Pocket Nova") && !strcmp(c.prev[1], "nova"), "again: two names before");
+    CHECK(!ss_cfg_renamed(o2, "X", out, sizeof out) && ss_cfg_text(out, &c) && !strcmp(c.prev[0], "RP Nova") && !strcmp(c.prev[1], "Retroid Pocket Nova"), "a third: the oldest goes");
+    CHECK(!ss_cfg_renamed(out, "Retroid Pocket Nova", o2, sizeof o2) && ss_cfg_text(o2, &c) && !strcmp(c.prev[0], "X") && !strcmp(c.prev[1], "RP Nova"), "back to a name in prev: not in prev twice");
+    CHECK(ss_cfg_renamed("url=https://a\n", "x", out, sizeof out) && !out[0], "a sync.txt without a token: not written");
+    CHECK(ss_cfg_renamed(t0, "x", out, 40) && !out[0], "too small: not written");
+    char sp[1024]; path(sp, sizeof sp, "sync-you.txt"); unlink(sp);
+    CHECK(!ss_cfg_renamed(t0, "Retroid Pocket Nova", out, sizeof out) && !ss_write_private(sp, out, strlen(out)), "written");
+    struct stat st; CHECK(!stat(sp, &st) && (st.st_mode & 0777) == 0600, "sync.txt 0600 (%o)", st.st_mode & 0777);
+    size_t n; char *txt = ds_read(sp, &n, 1 << 16); CHECK(txt && ss_cfg_text(txt, &c) && !strcmp(c.device, "Retroid Pocket Nova"), "it reads back"); free(txt);
+    // the first start after the update: its own session from before (the old app's names) is not another device's
+    ss_cfg me = cfg_named("Retroid Pocket Nova", "nova", "Moorechip Retroid Pocket Nova");
+    int64_t now = 1795176000; m = meta_of(5, A); m.session = 1; m.s_open = 1; m.s_dirty = 1; m.s_updated = now - 60;
+    snprintf(m.s_device, sizeof m.s_device, "nova"); CHECK(ss_other_device(&m, &me, now) == SS_OTHER_NONE, "its own dirty session under sync.txt's old name: no warning");
+    snprintf(m.s_device, sizeof m.s_device, "Moorechip Retroid Pocket Nova"); CHECK(ss_other_device(&m, &me, now) == SS_OTHER_NONE, "under the older link name: none");
+    snprintf(m.s_device, sizeof m.s_device, "Retroid Pocket Nova"); CHECK(ss_other_device(&m, &me, now) == SS_OTHER_NONE, "under the server's name: none");
+    snprintf(m.s_device, sizeof m.s_device, "Odin2"); CHECK(ss_other_device(&m, &me, now) == SS_OTHER_UNSYNCED, "another device's: the warning");
+    CHECK(ss_name_mine(&me, "nova") && ss_name_mine(&me, "Retroid Pocket Nova") && !ss_name_mine(&me, "Odin2") && !ss_name_mine(&me, "") && !ss_name_mine(&me, NULL), "uploaded from this device: any of its names");
+    ss_cfg r = cfg_named("nova", NULL, NULL); ss_cfg_rename(&r, "nova"); CHECK(!r.prev[0][0], "the same name: nothing changes");
+    ss_cfg_rename(&r, ""); CHECK(!strcmp(r.device, "nova"), "no name: nothing changes");
+}
+
 int main(void) {
     snprintf(g_tmp, sizeof g_tmp, "%s/t_savesync.%d", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid()); ss_rm_tree(g_tmp); mkdir(g_tmp, 0755);
-    t_tar(); t_files(); t_decide(); t_ingame(); t_modes(); t_steam(); t_link(); t_reauth();
+    t_tar(); t_files(); t_decide(); t_ingame(); t_modes(); t_steam(); t_you(); t_link(); t_reauth();
     ss_rm_tree(g_tmp);
     printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
     return fails != 0;

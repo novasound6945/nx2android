@@ -57,7 +57,7 @@ typedef struct {
     char cloud_dev[64]; int64_t cloud_time;   // the cloud's save: the device it came from and when (time 0: none known)
     int64_t checked;      // when the server last answered (0: never)
     uint64_t size; int64_t files;   // this device's save as its archive (files -1: not known)
-    char device[64];      // this device's name (sync.txt device=)
+    char device[64];      // this device's name (the server's, as sync.txt device= follows it)
     char result[96]; int result_bad;   // the last action's outcome ("" none)
     int linkable;         // no sync.txt, and the device link can run (not a trial build, the app known, no check running): the page offers Link this device
     int can_unlink;       // sync.txt is there and nothing runs: the page offers Unlink this app
