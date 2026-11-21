@@ -1077,28 +1077,31 @@ static void env_early(void) {   // (the main thread, before the early check's th
 }
 static void local_now(void);
 static int link_start(JNIEnv *E, int conn_ms, int64_t deadline, ss_link *l, char *why, size_t wcap); static int link_take(const ss_link *l);
+enum { PRE_NONE, PRE_NOLINK, PRE_LOCAL, PRE_OFF, PRE_OK };   // the early check's outcome, for the start screen's checklist line (pre_thread)
+static int g_pre_out;
 static void pre_check(JNIEnv *E) {
+    g_pre_out = PRE_NONE;
     pthread_mutex_lock(&C.mu);
     if (!C.began && !cfg_load_locked()) {   // no sync.txt: the start's own link (another game on this device linked it already: the token comes at once)
         char sb[600]; int none = link_base_locked(sb, sizeof sb) != 0, key = C.key[0] != 0, trial = C.trial;
         char sp[700]; snprintf(sp, sizeof sp, "%s/sync-state.txt", dm_saves_dir());
         pthread_mutex_unlock(&C.mu);
-        if (none || !key) return;   // (no server: said at attach; no key: no link on this device)
+        if (none || !key) { g_pre_out = none ? PRE_NONE : PRE_NOLINK; return; }   // (no server: said at attach; no key: no link on this device)
         ss_state st; ss_state_load(sp, &st);
         int net = dm_net_state(E, C.act);
-        if (!ss_link_auto(0, trial, st.mode == SS_MODE_LOCAL, net)) { if (!trial && st.mode != SS_MODE_LOCAL) LOG("cloud: early check: no sync.txt and no network: no link asked now"); return; }
+        if (!ss_link_auto(0, trial, st.mode == SS_MODE_LOCAL, net)) { g_pre_out = trial || st.mode == SS_MODE_LOCAL ? PRE_LOCAL : PRE_OFF; if (!trial && st.mode != SS_MODE_LOCAL) LOG("cloud: early check: no sync.txt and no network: no link asked now"); return; }
         pthread_mutex_lock(&C.mu); C.auto_tried = 1; pthread_mutex_unlock(&C.mu);
         ss_link l; char why[200] = ""; int64_t t0 = now_ms(); int k = link_start(E, 3000, t0 + 3000, &l, why, sizeof why);
         int took = k == SS_LK_LINKED && !link_take(&l); memset(&l, 0, sizeof l);
         if (!took) { LOG("cloud: early check: link/start: %s (%lld ms): not linked (the launcher's Cloud save page links it)", k == SS_LK_CODE ? "no device link yet" : k == SS_LK_LIMIT ? "asked too often (429)"
-                         : k == SS_LK_LINKED ? "linked, but sync.txt could not be written" : why[0] ? why : "no answer", (long long)(now_ms() - t0)); return; }
+                         : k == SS_LK_LINKED ? "linked, but sync.txt could not be written" : why[0] ? why : "no answer", (long long)(now_ms() - t0)); g_pre_out = k == SS_LK_CODE || k == SS_LK_LINKED ? PRE_NOLINK : PRE_OFF; return; }
         LOG("cloud: early check: link/start: linked by the device's key (%lld ms)", (long long)(now_ms() - t0));
         pthread_mutex_lock(&C.mu);
         if (!C.began && !cfg_load_locked()) { pthread_mutex_unlock(&C.mu); return; }
     }
     int sync = C.mode == SS_RUN_SYNC; unsigned gen = C.cfg_gen;
     pthread_mutex_unlock(&C.mu);
-    if (!sync) return;   // this device only, a trial build: nothing asked of the server (the start's check marks the run)
+    if (!sync) { g_pre_out = PRE_LOCAL; return; }   // this device only, a trial build: nothing asked of the server (the start's check marks the run)
     local_now();   // (the launcher's page; the start's check archives it again: the save manager's requests come between)
     int dev_net = dm_net_state(E, C.act), net = SS_NET_FAIL; ss_meta m; memset(&m, 0, sizeof m); m.files = -1; int64_t t0 = now_ms(); char why[200] = "";
     for (int again = 0; dev_net != 0 && again < 2; again++) {   // a refused token: once more with the new one (token_refused)
@@ -1119,16 +1122,25 @@ static void pre_check(JNIEnv *E) {
         PC.have = 1; PC.net = net; PC.m = m; PC.gen = C.cfg_gen; PC.t = now_ms();
     }
     changed_locked(); pthread_mutex_unlock(&C.mu);
+    g_pre_out = net == SS_NET_UNAUTH ? PRE_NOLINK : net == SS_NET_FAIL ? PRE_OFF : PRE_OK;
     if (net == SS_NET_UNAUTH) LOG("cloud: early check: the token was refused and this device is not linked now");
     else if (net == SS_NET_FAIL) LOG("cloud: early check: %s: offline (the start goes on with this device's save)", dev_net == 0 ? "the device has no network" : why[0] ? why : "no answer");
     else LOG("cloud: early check: the server's meta in %lld ms (seq %llu)", (long long)(now_ms() - t0), (unsigned long long)m.seq);
 }
 static void *pre_thread(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "cloudpre");
+    int ko = korean(); dm_start_step(STV_CLOUD, STV_RUN, ko ? "확인 중…" : "Checking…");   // (the checklist shows the early check, not a wait: it runs beside the data)
     JNIEnv *E = jattach();
     if (!E) LOG("[RED] cloud: no Java for the early check: the start's check asks itself");
     else { pre_check(E); (*C.vm)->DetachCurrentThread(C.vm); }
     pthread_mutex_lock(&C.mu); PC.running = 0; changed_locked(); pthread_cond_broadcast(&C.cv); pthread_mutex_unlock(&C.mu);
+    switch (g_pre_out) {   // the line until the start's check (after the data and the shaders) says what it found; that check writes the final word
+    case PRE_OK: dm_start_step(STV_CLOUD, STV_DONE, ko ? "확인됨" : "Checked"); break;
+    case PRE_NOLINK: dm_start_step(STV_CLOUD, STV_SKIP, ko ? "기기 연결 필요" : "Not linked"); break;
+    case PRE_OFF: dm_start_step(STV_CLOUD, STV_SKIP, ko ? "오프라인" : "Offline"); break;
+    case PRE_LOCAL: dm_start_step(STV_CLOUD, STV_WAIT, ko ? "대기" : "Waiting"); break;
+    default: dm_start_step(STV_CLOUD, STV_WAIT, ko ? "대기" : "Waiting"); break;
+    }
     dm_cloud_screen_poke();
     return NULL;
 }
