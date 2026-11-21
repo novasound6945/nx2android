@@ -257,7 +257,8 @@ static struct {
 typedef struct {
     int on, quick, page, sel[4];              // shown (not start at once, or − pressed); the setting; the page (0 the launcher, 1 Cloud save, 2 App settings, 3 the device link), each page's choice
     int64_t unarm;                            // Unlink this app pressed once: the next press until then unlinks
-    int want, nosync, gate, gpipe[2];         // Start pressed (without the sync); the start is ready and waits for it (front_android.c's go, called through gpipe)
+    int want, nosync, gate, gpipe[2];         // Start pressed (without the sync; only once ready, or a card's play without the sync as the start ends); the start is ready and
+                                              // waits for it (front_android.c's go, called through gpipe)
     void (*go)(void);
     int holding, hold_touch; int64_t hold_t0, hint_until;   // Back to the cloud save held (by the finger); "hold it" shown until
     int vrun, vbad; ds_progress vpr; char amsg[160];        // Check the data again runs, failed; its progress; the App page's last outcome
@@ -266,6 +267,8 @@ typedef struct {
 static lnr_t LN = {.gpipe = {-1, -1}, .data_rc = -1};
 static int lnr_input(const AInputEvent *e);
 static int lnr_busy_locked(const dm_cloud_info *ci); static void go_locked(void); static int verify_ok_locked(const dm_cloud_info *ci);
+// the start is ready (front_android.c reached dm_launcher_gate) and no launcher's action runs: Start and Play without the sync can be chosen (else they are off)
+static int lnr_ready(const lnr_t *l, const dm_cloud_info *ci) { return l->gate && !l->vrun && !ci->act && !ci->checking; }
 static uint64_t data_bytes_now(void); static int64_t shader_bytes_now(void); static void lnr_path(char *o, size_t n);
 static struct { uint8_t *ttf[2]; size_t n[2]; uint32_t *icon; int iw, ih; uint32_t glow; int tried; } R;   // the screen thread's own
 static int korean(void) { const pf_index *g = pf_find(dm_overlay_font(), 0xAC00); return g && (g->cp_adv >> 8) == 0xAC00; }   // the APK's font has Hangul (assets/font/ui.bin)
@@ -356,6 +359,26 @@ static void lk_fill(stv_linkpage *p, const dm_cloud_link *k, const char *game, i
         else snprintf(p->status, sizeof p->status, ko ? "휴대폰에서 연결을 누르길 기다리는 중 · %d:%02d 남음" : "Waiting for Link on the phone · %d:%02d left", k->left_s / 60, k->left_s % 60);
     }
 }
+// Start before the start is ready (or while a launcher's action runs, which the game waits for): what runs, in the button, and its share done (*pm 0..1000, -1 none)
+static void start_wait_text(char *o, size_t n, const snap_t *x, const dm_cloud_info *ci, int *pm) {
+    const lnr_t *l = &x->ln; int ko = korean(); const ds_progress *p = &x->p; const char *w = NULL; *pm = -1;
+    if (l->vrun) { w = L("데이터 확인 중", "Checking the data"); if (l->vpr.total) *pm = (int)(l->vpr.done * 1000 / l->vpr.total); }
+    else if (ci->act == DM_CLOUD_ACT_UPLOAD) w = L("클라우드 세이브 올리는 중", "Uploading the cloud save");
+    else if (ci->act == DM_CLOUD_ACT_RESTORE) { w = L("클라우드 세이브 받는 중", "Downloading the cloud save"); *pm = ci->progress; }
+    else if (x->phase == PH_DATA) {
+        if (p->phase == DS_PH_CHECK) w = L("파일 확인 중", "Checking the files");
+        else if (p->phase == DS_PH_DOWNLOAD) w = L("게임 데이터 받는 중", "Downloading the game data");
+        else if (p->phase == DS_PH_UNPACK) w = L("묶음 파일 푸는 중", "Extracting the bundles");
+        else if (p->phase == DS_PH_FINISH) w = L("마무리 중", "Finishing");
+        else w = L("서버 확인 중", "Checking the server");
+        if (p->phase != DS_PH_CONNECT && p->phase != DS_PH_FINISH && p->total) *pm = (int)((p->done < p->total ? p->done : p->total) * 1000 / p->total);
+    }
+    else if (x->phase == PH_PREP) { w = x->pt ? L("셰이더 준비 중", "Preparing the shaders") : L("셰이더 확인 중", "Checking the shaders"); if (x->pt) *pm = (int)((int64_t)x->pd * 1000 / x->pt); }
+    else if (x->phase == PH_CLOUD || ci->checking) { w = L("클라우드 세이브 확인 중", "Checking the cloud save"); if (ci->progress >= 0) *pm = ci->progress; }
+    else w = L("준비 중", "Getting ready");
+    if (*pm > 1000) *pm = 1000;
+    if (*pm >= 0) snprintf(o, n, "%s · %d%%", w, *pm / 10); else snprintf(o, n, "%s", w);
+}
 static void build_launcher(stv_view *v, const snap_t *x, const stv_step *steps, const dm_cloud_info *ci) {
     const lnr_t *n = &x->ln; int ko = korean(); int64_t now = (int64_t)time(NULL), mono = now_ms(); char t[200], a[64], b[64];
     v->screen = n->page == 1 ? STV_SCREEN_CLOUD : n->page == 2 ? STV_SCREEN_APP : n->page == 3 ? STV_SCREEN_LINK : STV_SCREEN_LAUNCHER;
@@ -401,10 +424,11 @@ static void build_launcher(stv_view *v, const snap_t *x, const stv_step *steps, 
         snprintf(l->item[2], sizeof l->item[2], "%s", L("앱 설정", "App settings"));
         if (n->data_known && n->data_bytes) { fmt_gb(a, sizeof a, n->data_bytes); snprintf(l->note[2], sizeof l->note[2], ko ? "데이터 %s · 바로 시작 %s" : "Data %s · start at once %s", a, n->quick ? L("켜짐", "on") : L("꺼짐", "off")); }
         else snprintf(l->note[2], sizeof l->note[2], ko ? "바로 시작 %s" : "Start at once %s", n->quick ? L("켜짐", "on") : L("꺼짐", "off"));
-        snprintf(l->start, sizeof l->start, "%s", L("게임 시작", "Start the game")); l->sel = n->sel[0]; l->waiting = n->want;
-        snprintf(l->start_sub, sizeof l->start_sub, "%s", n->nosync ? L("준비가 끝나면 동기화 없이 시작해요 · B 취소", "Starts without the sync once ready · B cancel") : L("준비가 끝나면 바로 시작해요 · B 취소", "Starts once ready · B cancel"));
-        snprintf(l->keys, sizeof l->keys, "%s", n->want ? L("B 취소", "B cancel") : L("↑↓ 고르기 · A 선택", "↑↓ choose · A select"));
-        v->anim = n->want; for (int i = 0; i < STV_NSTEPS; i++) if (s[i].state == STV_RUN) v->anim = 1;
+        snprintf(l->start, sizeof l->start, "%s", L("게임 시작", "Start the game")); l->sel = n->sel[0];
+        l->start_off = !lnr_ready(n, ci); l->item_off[0] = l->start_off;   // (Start and Play without the sync: only once the start is ready)
+        if (l->start_off) start_wait_text(l->start_sub, sizeof l->start_sub, x, ci, &l->start_permille);
+        snprintf(l->keys, sizeof l->keys, "%s", L("↑↓ 고르기 · A 선택", "↑↓ choose · A select"));
+        v->anim = l->start_off; for (int i = 0; i < STV_NSTEPS; i++) if (s[i].state == STV_RUN) v->anim = 1;
     } else if (v->screen == STV_SCREEN_CLOUD) {
         stv_cloudpage *p = &v->cp;
         snprintf(p->title, sizeof p->title, "%s", L("클라우드 세이브", "Cloud save")); snprintf(p->label[0], sizeof p->label[0], "%s", L("동기화 방식", "How it syncs")); snprintf(p->label[1], sizeof p->label[1], "%s", L("지금 상태", "Now"));
@@ -1163,7 +1187,7 @@ int dm_launcher_gate(void (*go)(void)) {
     pthread_mutex_lock(&S.mu);
     if (!LN.on || !V.open || V.closing) { pthread_mutex_unlock(&S.mu); return 0; }
     dm_cloud_info ci; dm_cloud_info_get(&ci);
-    if (LN.want && !lnr_busy_locked(&ci)) { LN.want = 0; pthread_mutex_unlock(&S.mu); LOG("launcher: ready, Start was pressed before: the game starts"); return 0; }
+    if (LN.want && !lnr_busy_locked(&ci)) { LN.want = 0; pthread_mutex_unlock(&S.mu); LOG("launcher: ready, the player chose to play (a card of the cloud's): the game starts"); return 0; }
     ALooper *lp = ALooper_forThread(); int np[2];
     if (!lp || pipe(np)) { pthread_mutex_unlock(&S.mu); LOG("[RED] launcher: no looper: the game starts"); return 0; }
     if (ALooper_addFd(lp, np[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, gate_ready, NULL) != 1) { close(np[0]); close(np[1]); pthread_mutex_unlock(&S.mu); LOG("[RED] launcher: no looper: the game starts"); return 0; }
@@ -1225,10 +1249,11 @@ static void lnr_activate(int page, int sel, int touch) {   // A (or a touch) on 
     pthread_mutex_lock(&S.mu);
     int act = 0;   // what runs once the lock is let go: 1 play without the sync, 2 a mode, 3 Upload now, 4 verify, 5 shader cache, 6 a link code, 7 unlink, 8 linked: Continue, 9 the link cancelled
     if (page == 0) {
-        if (sel == 0) { LN.want = 1; LN.nosync = 1; act = 1; }
+        int ready = lnr_ready(&LN, &ci);   // (Start and Play without the sync are off until then: nothing happens)
+        if (sel == 0 && ready) { LN.want = 1; LN.nosync = 1; act = 1; }
         else if (sel == 1) { LN.page = 1; LN.sel[1] = cp_link_of(&ci) == 1 ? 5 : ci.mode >= 0 && ci.mode <= 2 ? ci.mode : 0; LN.last_act = 0; LN.unarm = 0; }
         else if (sel == 2) { LN.page = 2; LN.sel[2] = 0; LN.amsg[0] = 0; }
-        else if (sel == 3) { LN.want = 1; LOG("launcher: Start%s", LN.gate ? "" : " (the start is not ready: it starts once it is)"); }
+        else if (sel == 3 && ready) { LN.want = 1; LOG("launcher: Start"); }
     } else if (page == 1) {
         if (sel <= 2) act = 2;
         else if (sel == 3 && ci.can_upload) { act = 3; LN.last_act = DM_CLOUD_ACT_UPLOAD; }
@@ -1265,8 +1290,7 @@ static void lnr_hold_end(int touch) {   // A (or the finger) let go of Back to t
     pthread_mutex_unlock(&S.mu);
 }
 static void lnr_key(int k) {
-    pthread_mutex_lock(&S.mu); int page = LN.page, *sel = &LN.sel[page], s0 = *sel, want = LN.want, go = -1;
-    if (want && page == 0) { if (k == K_B) { LN.want = LN.nosync = 0; LOG("launcher: Start cancelled"); } pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); return; }
+    pthread_mutex_lock(&S.mu); int page = LN.page, *sel = &LN.sel[page], s0 = *sel, go = -1;
     if (LN.holding && k != K_A) LN.holding = 0;
     if (page == 0) { if (k == K_UP && s0 > 0) (*sel)--; else if (k == K_DOWN && s0 < 3) (*sel)++; else if (k == K_A) go = s0; }
     else if (page == 1) {   // the right column top to bottom: linked Unlink (5), Upload now (3), Back (4); not linked Link this device (5) only; else 3, 4
@@ -1304,9 +1328,9 @@ static void lnr_touch(int act, float x, float y) {
     } else if (act == AMOTION_EVENT_ACTION_MOVE) { if (!(page == 1 && i == 4)) { pthread_mutex_lock(&S.mu); if (LN.holding && LN.hold_touch) LN.holding = 0; pthread_mutex_unlock(&S.mu); } }
     else if (act == AMOTION_EVENT_ACTION_CANCEL) { pthread_mutex_lock(&S.mu); if (LN.hold_touch) LN.holding = 0; pthread_mutex_unlock(&S.mu); }
     else if (act == AMOTION_EVENT_ACTION_UP) {
-        pthread_mutex_lock(&S.mu); int held = LN.holding && LN.hold_touch, want = LN.want; pthread_mutex_unlock(&S.mu);
+        pthread_mutex_lock(&S.mu); int held = LN.holding && LN.hold_touch; pthread_mutex_unlock(&S.mu);
         if (held) { lnr_hold_end(1); return; }
-        if (i < 0 || (want && page == 0)) return;
+        if (i < 0) return;
         pthread_mutex_lock(&S.mu); LN.sel[page] = i; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
         lnr_activate(page, i, 1);
     }

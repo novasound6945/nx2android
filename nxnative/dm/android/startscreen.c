@@ -553,25 +553,28 @@ static void draw_launcher(stv_canvas *c, const stv_view *v, double t) {
         for (int i = 0; i < STV_NSTEPS; i++) { status_at(c, &n->status[i], x, y, s, 8, lw - 24, t); y += LHN * 14 + 10; }
     }
     float ls = wide ? 17 : 18, ns = wide ? 13 : 14;
-    for (int i = 0; i < 3; i++) {
-        const float *r = L.r[i]; int sel = n->sel == i && !n->waiting;
+    for (int i = 0; i < 3; i++) {   // an item that is off: its words dimmed, its ring still shown when it is chosen
+        const float *r = L.r[i]; int sel = n->sel == i, off = n->item_off[i];
         if (sel) choice_frame(c, s, r, 14, 1); else rrect(c, r[0] * s, r[1] * s, r[2] * s, r[3] * s, 14 * s, CARD, 0.85f);
-        float lw = line(c, n->item[i], (r[0] + 28) * s, r[1] * s, r[3] * s, 0, ls * s, INK, LEFT, (r[2] - 56) * 0.55f * s, 0) / s;
-        line(c, n->note[i], (r[0] + r[2] - 28) * s, r[1] * s, r[3] * s, 0, ns * s, DIM, RIGHT, (r[2] - 56 - lw - 16) * s, 0);
+        float lw = line(c, n->item[i], (r[0] + 28) * s, r[1] * s, r[3] * s, 0, ls * s, off ? DIM2 : INK, LEFT, (r[2] - 56) * 0.55f * s, 0) / s;
+        line(c, n->note[i], (r[0] + r[2] - 28) * s, r[1] * s, r[3] * s, 0, ns * s, off ? DIM2 : DIM, RIGHT, (r[2] - 56 - lw - 16) * s, 0);
     }
     const float *r = L.r[3]; float k = 22 * s / 24, ix = (r[0] + 28) * s, iy = (r[1] + (r[3] - 22) / 2) * s;
-    if (!n->waiting) {   // Start: the accent's fill, the play icon, the name, A; chosen: the soft ring around it
+    if (!n->start_off) {   // Start: the accent's fill, the play icon, the name, A; chosen: the soft ring around it
         if (n->sel == 3) halo(c, s, r, 16, ACC, 0.18f);
         rrect(c, r[0] * s, r[1] * s, r[2] * s, r[3] * s, 16 * s, ACC, 1);
         float p[6] = {ix + 7 * k, iy + 4.5f * k, ix + 7 * k, iy + 19.5f * k, ix + 20 * k, iy + 12 * k}; tri(c, p, BG);
         line(c, n->start, (r[0] + 28 + 22 + 16) * s, r[1] * s, r[3] * s, 1, 22 * s, BG, LEFT, (r[2] - 28 - 22 - 16 - 28 - 28 - 16) * s, 0);
         badge_a(c, s, r[0] + r[2] - 28 - 14, r[1] + r[3] / 2);
-    } else {   // pressed before the start was ready (LauncherWide.dc.html): the accent's edge, a spinner, the name over the line that says it starts once ready
-        choice_frame(c, s, r, 16, 1);
+    } else {   // the start not ready: a plain button (chosen: the accent's edge) that its progress fills from the left in the accent, faint; a spinner, the name dimmed
+        // over what the start is doing; no A (it does nothing until the start is ready)
+        if (n->sel == 3) edged(c, s, r, 16, 2, ACC, CARD_SEL); else rrect(c, r[0] * s, r[1] * s, r[2] * s, r[3] * s, 16 * s, BTN, 1);
+        if (n->start_permille > 0) { float fw = r[2] * (n->start_permille > 1000 ? 1000 : n->start_permille) / 1000.0f;
+            rrect_clip(c, r[0] * s, r[1] * s, r[2] * s, r[3] * s, 16 * s, ACC, 0.16f, (r[0] + fw) * s); }
         step_icon(c, STV_RUN, ix, iy, 22 * s, t);
         float bh = LHN * 20 + 2 + LHN * 13, ty = r[1] + (r[3] - bh) / 2, tx = r[0] + 28 + 22 + 16;
-        line(c, n->start, tx * s, ty * s, 0, 1, 20 * s, INK, LEFT, (r[2] - tx + r[0] - 28) * s, 0);
-        line(c, n->start_sub, tx * s, (ty + LHN * 20 + 2) * s, 0, 0, 13 * s, DIM, LEFT, (r[2] - tx + r[0] - 28) * s, 0);
+        line(c, n->start, tx * s, ty * s, 0, 1, 20 * s, DIM, LEFT, (r[2] - tx + r[0] - 28) * s, 0);
+        line(c, n->start_sub, tx * s, (ty + LHN * 20 + 2) * s, 0, 0, 13 * s, BODY, LEFT, (r[2] - tx + r[0] - 28) * s, 0);
     }
     if (n->keys[0]) foot_at(c, n->keys, b, wide ? 24 : 36, wide ? 13 : 14);
 }

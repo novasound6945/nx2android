@@ -18,9 +18,11 @@ typedef struct { int state; char text[96]; } stv_status;          // a line of t
 typedef struct {
     stv_status status[STV_NSTEPS];       // the game data, the shaders, the cloud save
     char item[3][48], note[3][96];       // Play without the sync, Cloud save, App settings: the name and the words at its right
-    char start[32], start_sub[96];       // Start's name; while it waits for the start to be ready (waiting): the line under it
+    int item_off[3];                     // an item that cannot be chosen now (dimmed: the start is not ready, the cloud's check runs)
+    char start[32], start_sub[96];       // Start's name; while it is off: what the start is doing, in the button ("Preparing the shaders · 62%")
+    int start_off, start_permille;       // the start is not ready: Start dimmed, a spinner, start_sub, its progress filling it (0..1000, -1 none); A does nothing
     char keys[96];                       // the bottom line
-    int sel, waiting;                    // sel: 0..2 the items, 3 Start
+    int sel;                             // 0..2 the items, 3 Start (an item or Start that is off can be chosen: its ring shows, it does nothing)
 } stv_launcher;
 typedef struct {
     char title[48], label[2][32];        // the page's title; the two columns' small titles

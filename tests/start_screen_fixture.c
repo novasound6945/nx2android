@@ -144,6 +144,13 @@ int main(int argc, char **argv) {
     v.bar = 302; snprintf(v.bar_title, sizeof v.bar_title, "셰이더 준비 중"); snprintf(v.bar_left, sizeof v.bar_left, "1,204 / 3,980"); stv_fmt_eta(v.bar_right, sizeof v.bar_right, 95, 1);
     snprintf(v.hint, sizeof v.hint, "처음 한 번만 해요 · 게임 데이터나 드라이버가 바뀌면 다시 해요");
     stv_draw(&c, &v, 1.1); save(&c, argv[4], "7-offline-shaders");
+    // 8. the files on the device checked by their hashes (a start without the launcher): the bytes so far as the progress block
+    head(&v, icon, "1.0.3 · 빌드 2");
+    step(&v, 0, STV_RUN, "게임 데이터", "파일 확인 중 · 1.2 / 3.1 GB"); step(&v, 1, STV_WAIT, "셰이더 준비", "대기"); step(&v, 2, STV_WAIT, "클라우드 세이브", "대기");
+    v.bar = 387; snprintf(v.bar_title, sizeof v.bar_title, "파일 확인 중"); stv_fmt_bytes(v.bar_left, sizeof v.bar_left, 1288490188ull, 3328599654ull); stv_fmt_eta(v.bar_right, sizeof v.bar_right, 33, 1);
+    assert(!strcmp(v.bar_left, "1.2 / 3.1 GB"));
+    snprintf(v.hint, sizeof v.hint, "기기에 있는 게임 데이터가 맞는지 확인해요");
+    stv_draw(&c, &v, 0.5); save(&c, argv[4], "8-checking-files");
     // 12. the launcher, the start ready: Start chosen (A starts the game)
     stv_launcher *ln = &v.ln;
     head(&v, icon, "1.4.1 · 빌드 3"); v.screen = STV_SCREEN_LAUNCHER;
@@ -160,10 +167,21 @@ int main(int argc, char **argv) {
     snprintf(v.name, sizeof v.name, "슈퍼로봇대전Y"); stv_draw(&c, &v, 0); save(&c, argv[4], "19-launcher-korean-name");
     snprintf(v.name, sizeof v.name, "The Legend of Heroes: Trails through Daybreak II"); stv_draw(&c, &v, 0); save(&c, argv[4], "20-launcher-two-line-name");
     snprintf(v.name, sizeof v.name, "SUPER ROBOT WARS Y");
-    // 13. Start pressed before the shaders were ready: it says it starts once they are (B cancels)
+    // 13. the shaders not ready yet: Start (chosen, as it is at first) and Play without the sync are off, Start says what runs and fills with its progress
     ln->status[1].state = STV_RUN; snprintf(ln->status[1].text, sizeof ln->status[1].text, "셰이더 준비 중 · 62%%");
-    ln->waiting = 1; snprintf(ln->start_sub, sizeof ln->start_sub, "준비가 끝나면 바로 시작해요 · B 취소"); v.anim = 1;
-    stv_draw(&c, &v, 0.4); save(&c, argv[4], "13-launcher-waiting"); assert(stv_animated(&v));
+    ln->start_off = 1; ln->start_permille = 620; snprintf(ln->start_sub, sizeof ln->start_sub, "셰이더 준비 중 · 62%%"); ln->item_off[0] = 1; v.anim = 1;
+    stv_draw(&c, &v, 0.4); save(&c, argv[4], "13-launcher-preparing"); assert(stv_animated(&v));
+    { stv_canvas d = {malloc((size_t)W * H * 4), W, H}; assert(d.px); ln->start_off = 0; ln->item_off[0] = 0; stv_draw(&d, &v, 0.4);   // off and on differ in Start and the item
+      long diff = 0; for (size_t i = 0; i < (size_t)W * H; i++) diff += d.px[i] != c.px[i]; assert(diff > 1000); free(d.px); }
+    ln->start_off = 1; ln->item_off[0] = 1;
+    ln->sel = 1; stv_draw(&c, &v, 0.4); save(&c, argv[4], "13a-launcher-preparing-item"); ln->sel = 3;   // (an item chosen: Start off without its ring)
+    // 13b. the files on the device checked (no list of them on the device): the top line counts the bytes, Start its share
+    ln->status[0].state = STV_RUN; snprintf(ln->status[0].text, sizeof ln->status[0].text, "파일 확인 중 · 1.2 / 3.1 GB");
+    ln->status[1].state = STV_WAIT; snprintf(ln->status[1].text, sizeof ln->status[1].text, "셰이더 준비 대기");
+    ln->start_permille = 387; snprintf(ln->start_sub, sizeof ln->start_sub, "파일 확인 중 · 38%%");
+    stv_draw(&c, &v, 0.7); save(&c, argv[4], "13b-launcher-checking-files");
+    for (int i = 0; i < 3; i++) { ln->status[i].state = STV_DONE; snprintf(ln->status[i].text, sizeof ln->status[i].text, "%s", ST[i]); }
+    ln->start_off = 0; ln->item_off[0] = 0;
     // 14. the cloud save's page
     memset(&v.ln, 0, sizeof v.ln); v.anim = 0; v.screen = STV_SCREEN_CLOUD; stv_cloudpage *cp = &v.cp;
     snprintf(cp->title, sizeof cp->title, "클라우드 세이브"); snprintf(cp->label[0], sizeof cp->label[0], "동기화 방식"); snprintf(cp->label[1], sizeof cp->label[1], "지금 상태");
