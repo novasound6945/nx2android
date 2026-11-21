@@ -236,7 +236,7 @@ static inline int ov_menu_item(int tab, int row) {   // the rows a tab has follo
 int dm_menu_state(void);
 enum { OVX_IDLE, OVX_BUSY, OVX_DONE, OVX_NOSAVE, OVX_FAILED };   // Export save: the button; copying; the export's name; the game has not saved yet; failed
 int dm_save_note(char *out, int cap);   // front_android.c: the outcome (OVX_*) and the last export's name, or why it failed
-static inline float ov_menu_scale(void) { float s = dm_overlay_scale(), fit = 0.92f / (OVM_ROWS * OV_MENU_ROW + 2 * OV_MENU_PAD); return s < fit ? s : fit; }
+static inline float ov_menu_scale(void) { float s = dm_overlay_scale(), fit = 0.92f / (OVM_ROWS_MAX * OV_MENU_ROW + 2 * OV_MENU_PAD); return s < fit ? s : fit; }   // (the most rows: the letters keep one size whichever rows a game shows)
 float dm_menu_row_need(float rh);   // gfx_vk_present.c: the width (window pixels) the menu's rows need at its letters' size, rows rh high (0: none known)
 // the panel: OV_MENU_W window heights wide, or as wide as its rows need (larger letters on a screen that has the room: gfx_vk_present.c ovm_letters), never more than
 // 0.96 of the window's width; the touches (front_android.c) and the drawing both place it here
