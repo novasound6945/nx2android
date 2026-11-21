@@ -235,7 +235,7 @@ static int ss_cfg_text(const char *txt, ss_cfg *c) {   // 1: on (an http(s):// a
 // page; an older state's off=1 reads as SS_MODE_LOCAL, and off= is still written for it). relink: the mode left SS_MODE_LOCAL, so the next
 // check is a first connection (ss_set_mode). m_device, m_time: the cloud's save as the server last told (who uploaded it, when; "" and 0 for none); checked: when the
 // server last answered (Unix seconds), for the launcher while it is offline
-enum { SS_MODE_AUTO,     // each save goes up about 3 s after the game commits it, and when the app leaves the screen or ends (the default)
+enum { SS_MODE_AUTO,     // as Steam Cloud: the save goes up when the app leaves the screen or ends, and once it stayed changed SS_SAFETY_UPLOAD_SECS while the game runs (the default)
        SS_MODE_MANUAL,   // nothing goes up by itself: the player's Upload now (the launcher, the start's question) only; the next start asks about a save not sent
        SS_MODE_LOCAL };  // this device only: nothing downloaded, uploaded or signalled (no network at all): a save kept for testing
 typedef struct { int have; uint64_t seq; char sha[65]; int pending, conflict, force, auth; uint64_t fbase, cseq; int64_t ctime, last_up; char cdevice[64];
@@ -424,10 +424,17 @@ static void ss_set_mode(ss_state *s, int mode) {
     else if (s->mode == SS_MODE_LOCAL) { s->relink = 1; s->seq = s->fbase = 0; s->sha[0] = 0; s->pending = s->conflict = s->force = s->offline_play = 0; s->op_seq = 0; s->op_sha[0] = 0; }
     s->mode = mode; s->have = 1;
 }
-// whether a mode sends this device's save for an event: the game saved (SS_EV_SAVE), the app leaves the screen or ends (SS_EV_LEAVE: onPause, the menu's Exit game),
-// the player asked for it (SS_EV_ASKED: Upload now in the launcher, a card of the start chosen). This device only sends nothing, ever
-enum { SS_EV_SAVE, SS_EV_LEAVE, SS_EV_ASKED };
+// whether a mode sends this device's save for an event: the save stayed changed SS_SAFETY_UPLOAD_SECS while the game runs (SS_EV_SAFETY: the safety net), the app
+// leaves the screen or ends (SS_EV_LEAVE: onPause, the menu's Exit game), the player asked for it (SS_EV_ASKED: Upload now in the launcher, a card of the start chosen).
+// A commit of the game sends nothing by itself (it only makes the save owed). This device only sends nothing, ever
+enum { SS_EV_SAFETY, SS_EV_LEAVE, SS_EV_ASKED };
 static int ss_uploads(int mode, int ev) { return mode == SS_MODE_AUTO || (mode == SS_MODE_MANUAL && ev == SS_EV_ASKED); }
+// automatic: how long a save may stay changed and not sent while the game runs before it goes up by itself (env.txt DM_SAVESYNC_SAFETY_SECS, 10 s to a day)
+#define SS_SAFETY_UPLOAD_SECS 600
+static int ss_safety_secs(const char *env) {
+    if (!env || !*env) return SS_SAFETY_UPLOAD_SECS;
+    char *e; long v = strtol(env, &e, 10); return *e || v < 10 || v > 86400 ? SS_SAFETY_UPLOAD_SECS : (int)v;
+}
 // The server's save is this device's now (the launcher's Back to the cloud save, the start's download): now_sha the archive of the save as it is after the import,
 // srv_sha the server's (they differ only when a device save of this one stayed: that goes up then)
 static void ss_after_restore(ss_state *s, uint64_t seq, const char *now_sha, const char *srv_sha) {
@@ -449,9 +456,9 @@ static int ss_local_state(const ss_state *s, const char *local) {
     if (s->offline_play && changed) return SS_LOCAL_PLAYED;
     return changed || s->pending || s->force ? SS_LOCAL_OWED : SS_LOCAL_SAME;
 }
-// Another device and the game, from the session's last signal (now: this device's clock, Unix seconds). The apps upload each save within seconds, so whether the cloud
-// has the latest progress is whether that device's last save went up (dirty), not whether it closed the game: an app killed before its close leaves an open session
-// that warns nobody once its heartbeats stop.
+// Another device and the game, from the session's last signal (now: this device's clock, Unix seconds). An app marks its session dirty as soon as the game commits a
+// save it has not sent (the heartbeat goes at once), so whether the cloud has the latest progress is whether that device's last save went up (dirty), not whether it
+// closed the game: an app killed before its close leaves an open session that warns nobody once its heartbeats stop, unless it was dirty.
 #define SS_DIRTY_DAYS 30      // a dirty signal older than this: that device is taken as gone
 #define SS_ALIVE_SECS 180     // three heartbeats missed: not running any more
 enum { SS_OTHER_NONE,         // no session, this device's, closed and clean, or open but silent (killed)
@@ -673,8 +680,11 @@ static int ss_revoke(const char *sync_path) {   // sync.txt to <it>.revoked (one
 
 // ---- while the game runs (savecloud_android.c's upload thread): what a tick does, what an upload's answer does to the state, which corner notes show. No question is ever
 // asked once the game runs: a conflict found then is kept for the next start's cards ----
-// A run that started offline (or lost the network) has no open session on the server: once the network is back it opens one (dirty while a save is owed) and the heartbeats
-// follow; an owed upload is tried at once then, its backoff forgotten. A run without the sync (B at the start, a trial build, this device only) sends nothing, ever.
+// SS_MODE_AUTO is Steam Cloud's: a commit of the game sends nothing. It makes the save owed (the session's heartbeat says dirty at once: another device warns before it
+// starts), and the save goes up when the app leaves the screen (onPause), at the menu's Exit game, and by the safety net once it stayed owed SS_SAFETY_UPLOAD_SECS while
+// the game runs (then again that long after its next change). A run that started offline (or lost the network) has no open session on the server: once the network is
+// back it opens one (dirty while a save is owed) and the heartbeats follow; its backoff is forgotten, and a save the safety net made due goes up at once (one not due yet
+// waits for it, or for the app leaving the screen). A run without the sync (B at the start, a trial build, this device only) sends nothing, ever.
 // SS_MODE_MANUAL sends only what the player asks for (kick): a burst of commits is looked at (SS_DO_CHECK: hashed, whether it is owed, for the corner's mark), not sent,
 // and nothing owed is tried again by itself
 typedef struct {
@@ -685,19 +695,27 @@ typedef struct {
     int was_net;             // the last tick's net
     int sess_open;           // the server took this run's open (or a heartbeat)
     int owed, conflict;      // a save the cloud has not got; a conflict waits for the next start
-    int committed;           // a burst of the game's commits ended (no new one for a poll: about 3 s after it saved) and has not gone up
+    int committed;           // manual: a burst of the game's commits ended (no new one for a poll) and was not looked at yet
+    int dirty_sent;          // the dirty the server last got from this run (its open, a heartbeat): when owed or conflict differs, a heartbeat goes at once
     int64_t now, next_try, last_hb;   // monotonic ms: when an owed upload is tried again (the backoff), the last heartbeat
+    int64_t owed_since;      // monotonic ms: since when the save has been owed this run with nothing gone up (0: not owed)
+    int64_t safety_ms;       // automatic: owed this long, it goes up (SS_SAFETY_UPLOAD_SECS, or env.txt DM_SAVESYNC_SAFETY_SECS)
 } ss_tick_in;
 enum { SS_DO_UPLOAD = 1, SS_DO_OPEN = 2, SS_DO_ALIVE = 4, SS_DO_RETRY_NOW = 8, SS_DO_CHECK = 16 };   // SS_DO_RETRY_NOW: the backoff forgotten (the network came back)
+static int ss_safety_due(const ss_tick_in *t) {   // automatic: the save stayed owed safety_ms (the safety net's upload is due, the backoff aside)
+    return ss_uploads(t->mode, SS_EV_SAFETY) && t->owed && t->owed_since > 0 && t->now - t->owed_since >= t->safety_ms;
+}
+// the app leaves the screen (onPause) or ends (the menu's Exit game, dm_cloud_flush): whether what is owed goes up now (automatic; manual and this device only never)
+static int ss_leave_uploads(const ss_tick_in *t) { return t->syncs && ss_uploads(t->mode, SS_EV_LEAVE) && t->owed && !t->conflict; }
 static int ss_tick(const ss_tick_in *t) {
     if (!t->syncs) return 0;
-    int self = ss_uploads(t->mode, SS_EV_SAVE), check = !self && t->committed ? SS_DO_CHECK : 0;   // (a check needs no network)
+    int self = ss_uploads(t->mode, SS_EV_SAFETY), check = !self && t->committed ? SS_DO_CHECK : 0;   // (a check needs no network)
     if (t->net == 0) return check;   // known offline: nothing is tried (no request that can only time out)
     int back = t->net == 1 && t->was_net == 0, act = back ? SS_DO_RETRY_NOW : 0;
-    if (!t->conflict && (t->kick || (self && (t->committed || (t->owed && (back || t->now >= t->next_try)))))) act |= SS_DO_UPLOAD;
+    if (!t->conflict && (t->kick || (ss_safety_due(t) && (back || t->now >= t->next_try)))) act |= SS_DO_UPLOAD;
     else act |= check;
     if (!t->sess_open) act |= SS_DO_OPEN;   // (an open that failed is tried at each tick the network is up, as a heartbeat would be)
-    else if (t->now - t->last_hb >= 60000) act |= SS_DO_ALIVE;
+    else if (t->now - t->last_hb >= 60000 || (t->owed || t->conflict) != (t->dirty_sent != 0)) act |= SS_DO_ALIVE;
     return act;
 }
 // An upload's answer (code: HTTP, 0 no answer) into the state; returns the note it calls for (SS_NOTE_*), the caller passes it to ss_up_end

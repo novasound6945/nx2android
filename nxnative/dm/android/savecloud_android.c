@@ -1,5 +1,5 @@
 // Android port: the save's cloud sync, as Steam Cloud does it for a game: the save is taken from the server before the game starts when the server's is newer, and goes up
-// soon after the game commits it and when the app leaves the screen. The server (rooms: /api/saves/g/<package>/{meta,data,session}, a Bearer token) keeps one save a game,
+// when the app leaves the screen or ends (and, as a safety net, once it stayed changed 10 min while the game runs). The server (rooms: /api/saves/g/<package>/{meta,data,session}, a Bearer token) keeps one save a game,
 // opaque bytes: the deterministic tar of savesync.h, whose SHA-256 is the save's identity. savesync.h holds the parts that need no Android (the archive, sync.txt, the state,
 // the meta, the start's decision; dm/host/tests/t_savesync.c tests them); this file is the transport, the threads, the start screen's content and the corner mark.
 //
@@ -24,16 +24,19 @@
 // about, Start anyway or Cancel; one running the game now (a heartbeat in the last 3 min) is a note on the screen for 1.5 s; one whose heartbeats stopped (killed) is
 // nothing. Then the session is marked open on the server (dirty 0: the start just synced).
 //
-// Uploads (the "savesync" thread): the commit count (hle_fs.c dm_fs_commit_count) is polled every 1.5 s; once a poll sees no new commit after a burst (about 3 s after the
-// game saved) the committed tree is archived (never <DM_SAVE>.work; a commit while it is read reads it again) and, when its hash is not the last synced one, PUT with
-// base = the last synced seq and files = its file count. 409: the server moved (another device): a conflict, kept for the next start's cards, not retried, one corner
-// note; nothing is ever asked while the game runs. No network: retried after 1, 2, 5, 10 min, and at once when the device's network comes back (ConnectivityManager,
-// read at each poll: no request is made while the device has none) or the app is back in front. A run that started offline opens its session once the network is back.
-// onPause (sleep, HOME, the app's end) uploads what is owed at once under a 15 s partial wake lock, then closes the session with dirty = whether a save is still owed
-// (pending or a conflict). While the game is on screen the upload thread sends a heartbeat every 60 s (alive, dirty the same), and one at once after an upload went up;
-// onResume opens it again. A heartbeat that does not go through is dropped (offline). The corner marks, icons only (dm_cloud_mark): every upload's spinner and,
-// when it went up, its check (uploads less than 3 s apart: one spinner, one check); waiting and a conflict a change of state only, none of a kind within 5 min
-// (savesync.h ss_up_begin, ss_up_end, ss_mark_now). Every network failure is a log line: the game never waits for the network once it runs.
+// Uploads (the "savesync" thread): the commit count (hle_fs.c dm_fs_commit_count) is polled every 1.5 s. A commit sends nothing while the game runs (savesync.h ss_tick):
+// it makes the save owed (pending), and the session's heartbeat says dirty at once. The save goes up when the app leaves the screen (onPause: sleep, HOME, the app's
+// end, under a 15 s partial wake lock), at the menu's Exit game (dm_cloud_flush), and by the safety net once it stayed owed SS_SAFETY_UPLOAD_SECS (10 min; env.txt
+// DM_SAVESYNC_SAFETY_SECS) while the game runs, then again that long after its next change. An upload archives the committed tree (never <DM_SAVE>.work; a commit while it
+// is read reads it again) and, when its hash is not the last synced one, PUTs it with base = the last synced seq and files = its file count. 409: the server moved
+// (another device): a conflict, kept for the next start's cards, not retried, one corner note; nothing is ever asked while the game runs. No network: retried after 1, 2,
+// 5, 10 min, and at once when the device's network comes back (ConnectivityManager: no request is made while the device has none) or the app is back in front, once the
+// safety net made it due. A run that started offline opens its session once the network is back. onPause closes the session with dirty = whether a save is still owed
+// (pending or a conflict). While the game is on screen the upload thread sends a heartbeat every 60 s (alive, dirty the same), one at once when dirty changes and one
+// after an upload went up; onResume opens it again. A heartbeat that does not go through is dropped (offline). The corner marks, icons only (dm_cloud_mark): every
+// upload's spinner and, when it went up, its check (uploads less than 3 s apart: one spinner, one check); a save only owed shows nothing (automatic: the normal state);
+// waiting and a conflict a change of state only, none of a kind within 5 min (savesync.h ss_up_begin, ss_up_end, ss_mark_now). Every network failure is a log line:
+// the game never waits for the network once it runs.
 //
 // The mode (savesync.h SS_MODE_*, the game's own, in its state): automatic as above; manual sends only what the player asks for (the launcher's Upload now,
 // a card of the start), a burst of commits is only hashed (owed or not: the struck-through cloud stays in the corner while a save is owed), and the next start asks
@@ -483,7 +486,7 @@ static void start_check(JNIEnv *E, int recheck) {
             if (c == 1) { LOG("cloud: the player cancelled the %s (%s has a save not yet uploaded)", recheck ? "check" : "start", m.s_device); finish(!recheck, 0, 0); break; }
         } else if (other == SS_OTHER_RUNNING) {   // running there now, its saves up: a note under the steps, no choice
             pthread_mutex_lock(&C.mu); wait_locked("맞추는 중…", "Syncing…");
-            snprintf(W.v.hint, sizeof W.v.hint, ko ? "%s에서 지금 실행 중이에요 · 그 기기의 진행은 저장할 때마다 올라가요" : "Running on %s right now · its progress goes up each time it saves", m.s_device);
+            snprintf(W.v.hint, sizeof W.v.hint, ko ? "%s에서 지금 실행 중이에요 · 그 기기의 진행은 끌 때 올라가요" : "Running on %s right now · its progress goes up when it closes", m.s_device);
             pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke();
             LOG("cloud: the game runs on %s now (a heartbeat %lld s ago): a note only", m.s_device, (long long)((int64_t)time(NULL) - m.s_updated));
             int64_t until = now_ms() + 1500;
@@ -719,10 +722,11 @@ static void check_owed(void);
 static void pause_flush(JNIEnv *E, int *dirty, int syncs, const ss_tick_in *ti) {
     int self = ss_uploads(ti->mode, SS_EV_LEAVE);
     if (syncs && !self && *dirty) { *dirty = 0; check_owed(); }   // manual: what the game saved is only looked at (the session closes dirty when it is owed)
+    // (automatic: the tick before made each commit owed, so ti->owed has it)
     int64_t dl = now_ms() + 15000;
     if ((!syncs && !ti->sess_open) || dm_net_state(E, C.act) == 0) { if (syncs) LOG("cloud: the app leaves the screen without a network: what is owed goes up once it is back"); return; }
     wake_lock(E, 1, 15000);
-    if (self && (*dirty || ti->owed)) { *dirty = 0; upload(E, dl - 1000); }
+    if (ss_leave_uploads(ti)) { *dirty = 0; upload(E, dl - 1000); }
     int owed = owed_now();
     if (owed) LOG("cloud: a save is still owed (it could not go up): the session closes dirty, another device warns before it starts");
     session_post(E, SESS_CLOSED, owed, dl);   // (no answer: the session's last signal stands, and stops being "running" within 3 min)
@@ -738,26 +742,35 @@ static void check_owed(void) {
     if (owed != C.st.pending) { C.st.pending = owed; st_save_locked(); changed_locked(); LOG("cloud: manual: %s", owed ? "a save not sent (Upload now sends it)" : "the save is the cloud's again"); }
     pthread_mutex_unlock(&C.mu);
 }
-// The upload thread: the commit count polled every 1.5 s; a burst of commits goes up once a poll saw none (about 3 s after the game saved). Each tick asks savesync.h
-// ss_tick what to do: with no network on the device nothing is tried; when it comes back an owed save goes up at once (its backoff forgotten) and a session that never
+// The upload thread: the commit count polled every 1.5 s. Each tick asks savesync.h ss_tick what to do: automatic, a commit only makes the save owed (the heartbeat
+// says dirty at once) and it goes up when the app leaves the screen, or once it stayed owed SS_SAFETY_UPLOAD_SECS; manual, a burst of commits is hashed (owed or not).
+// With no network on the device nothing is tried; when it comes back the backoff is forgotten (a save the safety net made due goes up then) and a session that never
 // opened (an offline start) opens, then the heartbeats every 60 s
 static void *up_thread(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "savesync");
     JNIEnv *E = jattach(); if (!E) { LOG("[RED] cloud: no Java for the uploads: the save does not go up this run"); return NULL; }
     // it lives as long as the game plays: below the game's threads, on the slowest cores (after the attach, which makes it a Java thread too)
     dm_perf_background_thread("cloud upload (savesync)");
-    uint64_t lastc = dm_fs_commit_count(); int dirty = 0, paused = 0, was_net = -1; int64_t changed_t = 0, last_hb = now_ms();   // (the start just opened the session, if it could)
-    LOG("cloud: uploads on (about 3 s after the game commits its save, at once when the network comes back, and when the app leaves the screen); a heartbeat every 60 s while on screen");
+    int safety_s = ss_safety_secs(getenv("DM_SAVESYNC_SAFETY_SECS"));
+    // dirty_sent: the start opened the session clean (dirty 0), if it could; owed_since: when the save became owed with nothing gone up since (the safety net's clock)
+    uint64_t lastc = dm_fs_commit_count(); int dirty = 0, paused = 0, was_net = -1, dirty_sent = 0; int64_t changed_t = 0, last_hb = now_ms(), owed_since = 0;
+    LOG("cloud: uploads on (automatic: when the app leaves the screen or ends, and %d s after the save changed while the game runs; a commit itself sends nothing); a heartbeat"
+        " every 60 s while on screen, and at once when a save becomes owed", safety_s);
     for (;;) {
         pthread_mutex_lock(&C.mu);
         if (!C.kick && !C.pause_ev && !C.resume_ev) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 500 * 1000000; ts.tv_sec += 1; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
             pthread_cond_timedwait(&C.cv, &C.mu, &ts); }   // 1.5 s
         int kick = C.kick, pause = C.pause_ev, resume = C.resume_ev; C.kick = C.pause_ev = C.resume_ev = 0;
         int syncs = C.mode == SS_RUN_SYNC && !C.skipped && C.st.mode != SS_MODE_LOCAL && !C.st.auth && !C.st.offline_play;
-        ss_tick_in ti = {.syncs = syncs, .mode = C.st.mode, .sess_open = C.sess_open, .owed = C.st.pending, .conflict = C.st.conflict, .next_try = C.next_try};
-        pthread_mutex_unlock(&C.mu);
         uint64_t c = dm_fs_commit_count(); int64_t t = now_ms();
         if (c != lastc) { lastc = c; dirty = 1; changed_t = t; }
+        if (syncs && dirty && ss_uploads(C.st.mode, SS_EV_SAFETY)) {   // automatic: the commit is owed, not sent (it goes up when the app leaves the screen, or by the safety net)
+            dirty = 0; if (!C.st.pending) { C.st.pending = 1; st_save_locked(); changed_locked(); }
+        }
+        if (!C.st.pending) owed_since = 0; else if (!owed_since) owed_since = t;
+        ss_tick_in ti = {.syncs = syncs, .mode = C.st.mode, .sess_open = C.sess_open, .owed = C.st.pending, .conflict = C.st.conflict, .next_try = C.next_try,
+                         .dirty_sent = dirty_sent, .owed_since = owed_since, .safety_ms = (int64_t)safety_s * 1000};
+        pthread_mutex_unlock(&C.mu);
         if (pause) {   // the app leaves the screen (sleep, HOME, its end, the menu's Exit game): what is owed goes up now, then the session closes (pause_flush)
             paused = 1; pause_flush(E, &dirty, syncs, &ti);
             pthread_mutex_lock(&C.mu); C.pause_done++; pthread_cond_broadcast(&C.cv); pthread_mutex_unlock(&C.mu);   // (dm_cloud_flush waits for it)
@@ -766,21 +779,23 @@ static void *up_thread(void *a) {
         if (resume) paused = 0;
         if (paused) continue;
         ti.kick = kick; ti.committed = dirty && t - changed_t >= 1500; ti.now = t; ti.last_hb = last_hb;
-        // the device's network is read only when this tick may send something or it was down (a game that saves rarely, online, with its session open asks Java nothing
-        // between its heartbeats; manual sends only what is asked for)
-        int self = ss_uploads(ti.mode, SS_EV_SAVE);
-        int ask_net = syncs && (kick || (self && (ti.committed || ti.owed)) || !ti.sess_open || resume || was_net == 0 || t - last_hb >= 60000);
+        // the device's network is read only when this tick may send something or it was down (a save owed but not due yet, online, with its session open asks Java
+        // nothing between its heartbeats; manual sends only what is asked for)
+        int due = ss_safety_due(&ti), dirty_now = ti.owed || ti.conflict;
+        int ask_net = syncs && (kick || due || dirty_now != dirty_sent || !ti.sess_open || resume || was_net == 0 || t - last_hb >= 60000);
         ti.net = ask_net ? dm_net_state(E, C.act) : syncs ? was_net : -1; ti.was_net = was_net; if (ask_net) was_net = ti.net;
-        if (resume && ti.net != 0) { ti.owed = ti.owed || dirty; ti.next_try = 0; }   // back in front: what is owed is tried now
+        if (resume && ti.net != 0) ti.next_try = 0;   // back in front: the backoff forgotten (a save the safety net made due is tried now)
         int act = ss_tick(&ti);
-        if (act & SS_DO_RETRY_NOW) { LOG("cloud: the network is back%s", ti.owed || dirty ? ": what is owed goes up now" : ""); pthread_mutex_lock(&C.mu); C.next_try = 0; C.fails = 0; pthread_mutex_unlock(&C.mu); }
+        if (act & SS_DO_RETRY_NOW) { LOG("cloud: the network is back%s", due ? ": what is owed goes up now" : ti.owed ? " (what is owed goes up when the app leaves the screen, or by the safety net)" : "");
+                                     pthread_mutex_lock(&C.mu); C.next_try = 0; C.fails = 0; pthread_mutex_unlock(&C.mu); }
         int up = UP_NOTHING;
-        if (act & SS_DO_UPLOAD) { dirty = 0; up = upload(E, now_ms() + 60000); }
+        if (act & SS_DO_UPLOAD) { dirty = 0; if (due && !kick) LOG("cloud: the save stayed owed %d s while the game runs: the safety net sends it", safety_s); up = upload(E, now_ms() + 60000); }
         else if (act & SS_DO_CHECK) { dirty = 0; check_owed(); }
         if ((act & SS_DO_OPEN) || resume) {   // an offline start, or the app back in front: the session opens (dirty while a save is owed)
-            if (syncs && ti.net != 0 && !session_post(E, SESS_OPEN, owed_now(), now_ms() + 5000)) { pthread_mutex_lock(&C.mu); C.sess_open = 1; pthread_mutex_unlock(&C.mu); }
+            int d = owed_now();
+            if (syncs && ti.net != 0) { if (!session_post(E, SESS_OPEN, d, now_ms() + 5000)) { pthread_mutex_lock(&C.mu); C.sess_open = 1; pthread_mutex_unlock(&C.mu); } dirty_sent = d; }
             last_hb = now_ms();
-        } else if ((act & SS_DO_ALIVE) || (up == UP_OK && ti.sess_open)) { session_post(E, SESS_ALIVE, owed_now(), now_ms() + 5000); last_hb = now_ms(); }
+        } else if ((act & SS_DO_ALIVE) || (up == UP_OK && ti.sess_open)) { int d = owed_now(); session_post(E, SESS_ALIVE, d, now_ms() + 5000); dirty_sent = d; last_hb = now_ms(); }
     }
     return NULL;
 }

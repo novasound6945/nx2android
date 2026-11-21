@@ -381,8 +381,8 @@ static void build_launcher(stv_view *v, const snap_t *x, const stv_step *steps, 
     } else if (v->screen == STV_SCREEN_CLOUD) {
         stv_cloudpage *p = &v->cp;
         snprintf(p->title, sizeof p->title, "%s", L("클라우드 세이브", "Cloud save")); snprintf(p->label[0], sizeof p->label[0], "%s", L("동기화 방식", "How it syncs")); snprintf(p->label[1], sizeof p->label[1], "%s", L("지금 상태", "Now"));
-        static const char *const DKO[3] = {"저장하면 바로 올리고, 게임을 끌 때도 올려요", "올리기는 내가 정해요. 시작할 때 올릴지 물어봐요", "받지도 올리지도 않아요. 이 기기 세이브로만 테스트해요"},
-                          *const DEN[3] = {"Each save goes up, and when the game closes", "You decide when it goes up; the start asks", "Nothing down or up: this device's save only, for tests"};
+        static const char *const DKO[3] = {"게임을 끄거나 나갈 때 올려요. 켜 둔 동안은 10분마다", "올리기는 내가 정해요. 시작할 때 올릴지 물어봐요", "받지도 올리지도 않아요. 이 기기 세이브로만 테스트해요"},
+                          *const DEN[3] = {"Up when the game closes or leaves; every 10 min while on", "You decide when it goes up; the start asks", "Nothing down or up: this device's save only, for tests"};
         for (int i = 0; i < 3; i++) { snprintf(p->mode[i], sizeof p->mode[i], "%s", ko ? MKO[i] : MEN[i]); snprintf(p->desc[i], sizeof p->desc[i], "%s", ko ? DKO[i] : DEN[i]); }
         p->checked = ci->mode; p->modes_off = !ci->avail || ci->trial || ci->act || ci->checking;
         p->link = cp_link_of(ci);

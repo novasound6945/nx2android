@@ -2,7 +2,8 @@
 // it reads back to the same tree, an archive with a path that leaves its folder (.., an absolute path, a link) is refused before anything is written, sync.txt and the
 // state read back, the server's meta is read, and the start's decision (ss_decide) for each case: offline, a token refused, nothing on the server, the same save, the server
 // newer with this device's save unchanged, a conflict, a first setup with a save on both, the player's choice of this device's save, a run played without the sync, another
-// device's session (a save not yet up, running now, killed), and a trial build, and the start that asks no server (ss_start_offline). No game profile: make -C dm/host/tests build/t_savesync && build/t_savesync
+// device's session (a save not yet up, running now, killed), and a trial build, and the start that asks no server (ss_start_offline),
+// and when the game's saves go up (automatic as Steam Cloud: the app leaving, Exit game, the safety net; manual unchanged). No game profile: make -C dm/host/tests build/t_savesync && build/t_savesync
 #include "../../android/savesync.h"
 #include <sys/time.h>
 
@@ -258,15 +259,17 @@ static void t_ingame(void) {
     ss_state s = st_of(1, 4, B), s2; ss_meta m = meta_of(4, B); int p;
     CHECK(ss_decide(SS_NET_FAIL, &m, &s, A, &p) == SS_GO_OFFLINE && p, "an offline start with a changed save: owed");
     s.pending = 1; s2 = s;
-    ss_tick_in t = {.syncs = 1, .net = 0, .was_net = 1, .sess_open = 0, .owed = 1, .now = 10000, .next_try = 70000};
+    ss_tick_in t = {.syncs = 1, .net = 0, .was_net = 1, .sess_open = 0, .owed = 1, .dirty_sent = 1, .now = 10000, .next_try = 70000, .owed_since = 1, .safety_ms = 600000};
     CHECK(ss_tick(&t) == 0, "known offline: nothing is tried, not even the open");
     t.was_net = 0; t.net = 1; int a = ss_tick(&t);
-    CHECK(a == (SS_DO_RETRY_NOW | SS_DO_UPLOAD | SS_DO_OPEN), "the network back: the owed save goes up at once (backoff forgotten) and the session opens (%d)", a);
-    t.was_net = 1; t.now = 20000; CHECK(ss_tick(&t) == SS_DO_OPEN, "the next tick, still within the backoff, an open that did not go through: tried again");
-    t.sess_open = 1; t.last_hb = 20000; t.now = 50000; CHECK(ss_tick(&t) == 0, "open, no save owed due: nothing");
-    t.now = 81000; CHECK(ss_tick(&t) == (SS_DO_UPLOAD | SS_DO_ALIVE), "past the backoff and a minute on: the upload and a heartbeat");
-    t.last_hb = 81000; t.committed = 1; t.owed = 0; t.now = 82000; CHECK(ss_tick(&t) == SS_DO_UPLOAD, "a fresh commit goes up");
+    CHECK(a == (SS_DO_RETRY_NOW | SS_DO_OPEN), "the network back before the safety net's time: the session opens, the owed save waits (%d)", a);
+    t.now = 700000; a = ss_tick(&t);
+    CHECK(a == (SS_DO_RETRY_NOW | SS_DO_UPLOAD | SS_DO_OPEN), "the network back after it: the owed save goes up at once (backoff forgotten) and the session opens (%d)", a);
+    t.was_net = 1; t.next_try = 760000; t.now = 710000; CHECK(ss_tick(&t) == SS_DO_OPEN, "the next tick, within the backoff, an open that did not go through: tried again");
+    t.sess_open = 1; t.last_hb = 710000; t.now = 740000; CHECK(ss_tick(&t) == 0, "open, within the backoff: nothing");
+    t.now = 771000; CHECK(ss_tick(&t) == (SS_DO_UPLOAD | SS_DO_ALIVE), "past the backoff and a minute on: the upload and a heartbeat");
     ss_tick_in off = t; off.syncs = 0; off.was_net = 0; CHECK(ss_tick(&off) == 0, "a run without the sync (B, a trial build, switched off) sends nothing when the network comes back");
+    CHECK(!ss_leave_uploads(&off), "nor when the app leaves the screen");
     ss_notes n = {0};
     // the upload goes up
     CHECK(ss_after_put(&s, 200, 5, A, NULL, 1795176000) == SS_NOTE_SAVED && !s.pending && s.seq == 5 && !strcmp(s.sha, A) && s.last_up == 1795176000, "200: saved, nothing owed");
@@ -287,16 +290,19 @@ static void t_ingame(void) {
 // the modes: which events send the save, the upload thread's ticks, this device only and back, manual's question (17), the question after a run without the sync (16),
 // and the state after Back to the cloud save
 static void t_modes(void) {
-    CHECK(ss_uploads(SS_MODE_AUTO, SS_EV_SAVE) && ss_uploads(SS_MODE_AUTO, SS_EV_LEAVE) && ss_uploads(SS_MODE_AUTO, SS_EV_ASKED), "automatic: a save, the app leaving and the player's ask all go up");
-    CHECK(!ss_uploads(SS_MODE_MANUAL, SS_EV_SAVE) && !ss_uploads(SS_MODE_MANUAL, SS_EV_LEAVE) && ss_uploads(SS_MODE_MANUAL, SS_EV_ASKED), "manual: only what the player asks for");
-    CHECK(!ss_uploads(SS_MODE_LOCAL, SS_EV_SAVE) && !ss_uploads(SS_MODE_LOCAL, SS_EV_LEAVE) && !ss_uploads(SS_MODE_LOCAL, SS_EV_ASKED), "this device only: nothing, ever");
+    CHECK(ss_uploads(SS_MODE_AUTO, SS_EV_SAFETY) && ss_uploads(SS_MODE_AUTO, SS_EV_LEAVE) && ss_uploads(SS_MODE_AUTO, SS_EV_ASKED), "automatic: the safety net, the app leaving and the player's ask all go up");
+    CHECK(!ss_uploads(SS_MODE_MANUAL, SS_EV_SAFETY) && !ss_uploads(SS_MODE_MANUAL, SS_EV_LEAVE) && ss_uploads(SS_MODE_MANUAL, SS_EV_ASKED), "manual: only what the player asks for");
+    CHECK(!ss_uploads(SS_MODE_LOCAL, SS_EV_SAFETY) && !ss_uploads(SS_MODE_LOCAL, SS_EV_LEAVE) && !ss_uploads(SS_MODE_LOCAL, SS_EV_ASKED), "this device only: nothing, ever");
     ss_tick_in t = {.syncs = 1, .mode = SS_MODE_MANUAL, .net = 1, .was_net = 1, .sess_open = 1, .committed = 1, .now = 10000, .last_hb = 9000};
     CHECK(ss_tick(&t) == SS_DO_CHECK, "manual: a commit is looked at (owed or not), not sent (%d)", ss_tick(&t));
-    t.committed = 0; t.owed = 1; t.next_try = 0; CHECK(ss_tick(&t) == 0, "manual: an owed save is not tried again by itself");
+    t.committed = 0; t.owed = 1; t.next_try = 0; CHECK(ss_tick(&t) == SS_DO_ALIVE, "manual: an owed save is not tried again by itself (the heartbeat says dirty)");
+    t.dirty_sent = 1; CHECK(ss_tick(&t) == 0, "manual: an owed save is not tried again by itself");
     t.was_net = 0; CHECK(!(ss_tick(&t) & SS_DO_UPLOAD), "manual: nor when the network comes back");
     t.was_net = 1; t.kick = 1; CHECK(ss_tick(&t) == SS_DO_UPLOAD, "manual: Upload now sends it");
-    t.kick = 0; t.committed = 1; t.net = 0; CHECK(ss_tick(&t) == SS_DO_CHECK, "manual offline: the commit is still looked at (the corner's mark)");
-    t.mode = SS_MODE_AUTO; t.net = 1; CHECK(ss_tick(&t) == SS_DO_UPLOAD, "automatic: the commit goes up");
+    t.kick = 0; t.owed_since = 1; t.safety_ms = 1000; t.now = t.last_hb = 900000; CHECK(ss_tick(&t) == 0, "manual: no safety net (owed a long time, nothing goes up)");
+    CHECK(!ss_leave_uploads(&t), "manual: nor when the app leaves the screen or ends");
+    t.committed = 1; t.net = 0; CHECK(ss_tick(&t) == SS_DO_CHECK, "manual offline: the commit is still looked at (the corner's mark)");
+    t.mode = SS_MODE_AUTO; t.net = 1; t.owed_since = 0; CHECK(ss_tick(&t) == 0, "automatic: a commit is not sent (owed until the app leaves or the safety net)");
     t.syncs = 0; CHECK(ss_tick(&t) == 0, "this device only (the run does not sync): nothing");
     int p; ss_state s; ss_meta m;
     // this device only, a test played, then automatic again: the next check is a first connection, so the test save is asked about, never sent over the cloud's
@@ -417,9 +423,37 @@ static void t_reauth(void) {
     txt = ds_read(rv, &n, 1 << 16); CHECK(txt && strstr(txt, "tok_new") && !strstr(txt, "handtok"), "the last one replaces the one aside before"); free(txt);
 }
 
+// automatic as Steam Cloud: commits send nothing (owed, the heartbeat dirty at once); the save goes up once owed SS_SAFETY_UPLOAD_SECS (then that long after its
+// next change), and at once when the app leaves the screen (onPause) or ends (Exit game's dm_cloud_flush: the same leave)
+static void t_steam(void) {
+    CHECK(ss_safety_secs(NULL) == SS_SAFETY_UPLOAD_SECS && ss_safety_secs("") == 600 && ss_safety_secs("120") == 120 && ss_safety_secs("5") == 600
+          && ss_safety_secs("9x") == 600 && ss_safety_secs("86401") == 600, "the safety net's time: 10 min, env.txt's from 10 s to a day");
+    int64_t S = (int64_t)SS_SAFETY_UPLOAD_SECS * 1000, t0 = 20000; int ups = 0, hbs = 0;
+    ss_tick_in t = {.syncs = 1, .mode = SS_MODE_AUTO, .net = 1, .was_net = 1, .sess_open = 1, .now = 10000, .last_hb = 10000, .safety_ms = S};
+    CHECK(ss_tick(&t) == 0 && !ss_leave_uploads(&t), "nothing owed: nothing, also when the app leaves");
+    t.owed = 1; t.owed_since = t0; t.now = t0; CHECK(ss_tick(&t) == SS_DO_ALIVE, "the first commit: owed, not sent; a heartbeat at once says dirty");
+    t.dirty_sent = 1; t.last_hb = t0;
+    for (t.now = t0 + 1500; t.now < t0 + S; t.now += 1500) {   // the game commits all through (owed_since stays the first one's)
+        int a = ss_tick(&t); if (a & SS_DO_UPLOAD) ups++; if (a & SS_DO_ALIVE) { hbs++; t.last_hb = t.now; }
+    }
+    CHECK(ups == 0, "commits for 10 min less a tick: nothing went up (%d)", ups);
+    CHECK(hbs == 9, "the heartbeats every minute only (%d)", hbs);
+    t.now = t0 + S; CHECK(ss_tick(&t) & SS_DO_UPLOAD, "owed 10 min: the safety net sends it");
+    t.owed = 0; t.owed_since = 0; t.now += 1500; CHECK(ss_tick(&t) == SS_DO_ALIVE, "it went up: nothing owed, the heartbeat clean at once");
+    t.dirty_sent = 0; t.last_hb = t.now;
+    int64_t t1 = t.now + 30000; t.owed = 1; t.owed_since = t1; t.dirty_sent = 1;
+    t.now = t1 + S - 1500; CHECK(!(ss_tick(&t) & SS_DO_UPLOAD), "changed again: not before another 10 min");
+    t.now = t1 + S; CHECK(ss_tick(&t) & SS_DO_UPLOAD, "then once more");
+    // the app leaving the screen, or the menu's Exit game: what is owed goes up at once, whatever the safety net's clock
+    t.owed_since = t.now; t.now += 3000; CHECK(!(ss_tick(&t) & SS_DO_UPLOAD) && ss_leave_uploads(&t), "a commit 3 s ago: onPause (and Exit game) sends it now");
+    t.conflict = 1; CHECK(!ss_leave_uploads(&t), "a conflict: not when leaving either (the next start's cards)");
+    t.conflict = 0; t.net = 0; t.now = t.owed_since + S; CHECK(ss_tick(&t) == 0, "due but offline: nothing tried");
+    t.net = 1; t.was_net = 0; t.next_try = t.now + 60000; t.last_hb = t.now; CHECK(ss_tick(&t) == (SS_DO_RETRY_NOW | SS_DO_UPLOAD), "the network back once due: it goes up at once, the backoff forgotten");
+}
+
 int main(void) {
     snprintf(g_tmp, sizeof g_tmp, "%s/t_savesync.%d", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid()); ss_rm_tree(g_tmp); mkdir(g_tmp, 0755);
-    t_tar(); t_files(); t_decide(); t_ingame(); t_modes(); t_link(); t_reauth();
+    t_tar(); t_files(); t_decide(); t_ingame(); t_modes(); t_steam(); t_link(); t_reauth();
     ss_rm_tree(g_tmp);
     printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
     return fails != 0;
