@@ -80,7 +80,7 @@ static struct {
     ss_notes notes;                      // the corner marks (savesync.h ss_up_begin, ss_up_end, ss_mark_now)
     int64_t next_try;                    // when an owed upload is tried again (monotonic ms)
     unsigned ver;                        // moves on with each change of the state (changed_locked)
-    JavaVM *vm; jobject act;             // the NativeActivity (a global reference, ANativeActivity.clazz)
+    JavaVM *vm; jobject act;             // the application's Context (a global reference: app_context), what the threads ask the system with
     ss_meta meta; int meta_ok;           // the server's meta as this run's check (or a launcher's) last read it
     int lknown; char lsha[65]; uint64_t lsize; int64_t lfiles, lt;   // this device's save as its archive, before the game (the launcher's page)
     int busy, prog; char result[96]; int result_bad;   // the launcher's action (DM_CLOUD_ACT_*) and its download's progress; its outcome
@@ -915,10 +915,20 @@ static void server_asset_load(ANativeActivity *act) {
 int dm_cloud_no_server(ANativeActivity *act) {
     server_asset_load(act); char b[600]; pthread_mutex_lock(&C.mu); int none = link_base_locked(b, sizeof b) != 0; pthread_mutex_unlock(&C.mu); return none;
 }
+static jobject app_context(ANativeActivity *act) {   // the application's Context, a global reference (none: the activity's own, kept)
+    JNIEnv *E = act->env; jobject r = NULL;
+    jclass c = (*E)->GetObjectClass(E, act->clazz); jmethodID m = c ? (*E)->GetMethodID(E, c, "getApplicationContext", "()Landroid/content/Context;") : NULL;
+    if (m && !(*E)->ExceptionCheck(E)) r = (*E)->CallObjectMethod(E, act->clazz, m);
+    if ((*E)->ExceptionCheck(E)) { (*E)->ExceptionClear(E); r = NULL; }
+    jobject g = (*E)->NewGlobalRef(E, r ? r : act->clazz);
+    if (r) (*E)->DeleteLocalRef(E, r);
+    if (c) (*E)->DeleteLocalRef(E, c);
+    return g;
+}
 void dm_cloud_attach(ANativeActivity *act) {
     if (C.attached) return;
     server_asset_load(act);
-    C.vm = act->vm; C.act = act->clazz;
+    C.vm = act->vm; C.act = app_context(act);   // (not the activity: the background download can keep the process past it, datasync_android.c dm_sync_detach)
     int dbg = 0; app_info(act, &dbg);
     AAsset *as = act->assetManager ? AAssetManager_open(act->assetManager, "nx2a/source.bin", AASSET_MODE_UNKNOWN) : NULL; if (as) AAsset_close(as);
     char id[128] = "", br[PROP_VALUE_MAX] = "", mf[PROP_VALUE_MAX] = "", md[PROP_VALUE_MAX] = "";

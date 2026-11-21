@@ -276,7 +276,13 @@ static void activity_game_mode(ANativeActivity *a) {
     dm_perf_game_mode(mode);   // absent service / older Android keeps the standard policy
 }
 static void on_resume(ANativeActivity *a) { if (g_quit) { act_finish(a); return; } activity_game_mode(a); go_foreground(); dm_cloud_resume(); }
-static void on_destroy(ANativeActivity *a) { (void)a; dm_perf_gpu_release(); _exit(0); }   // one game per process
+int dm_sync_detach(ANativeActivity *act); int dm_sync_reattach(ANativeActivity *act); void dm_sync_visible(int on);   // datasync_android.c: the background download
+static void on_destroy(ANativeActivity *a) {   // one game per process; while the data downloads in its service (datasync_android.c), the process stays for it
+    if (dm_sync_detach(a)) return;
+    dm_perf_gpu_release(); _exit(0);
+}
+static void on_start(ANativeActivity *a) { (void)a; dm_sync_visible(1); }   // (the background download: the start goes on once the app is back)
+static void on_stop(ANativeActivity *a) { (void)a; dm_sync_visible(0); }
 
 // ---- input ----
 static AInputQueue *g_queue; static ALooper *g_ilooper;
@@ -1631,8 +1637,11 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
     act->callbacks->onNativeWindowCreated = on_window_created; act->callbacks->onNativeWindowDestroyed = on_window_destroyed;
     act->callbacks->onInputQueueCreated = on_queue_created; act->callbacks->onInputQueueDestroyed = on_queue_destroyed;
     act->callbacks->onPause = on_pause; act->callbacks->onResume = on_resume; act->callbacks->onWindowFocusChanged = on_window_focus; act->callbacks->onDestroy = on_destroy; act->callbacks->onLowMemory = on_low_memory;
+    act->callbacks->onStart = on_start; act->callbacks->onStop = on_stop;
     ANativeActivity_setWindowFlags(act, AWINDOW_FLAG_KEEP_SCREEN_ON | AWINDOW_FLAG_FULLSCREEN, 0);
-    static int started; if (started++) return;   // a second onCreate (configuration change) keeps the running game
+    static int started;
+    if (started++) { dm_sync_reattach(act); return; }   // a second onCreate (configuration change) keeps the running game; after the activity was destroyed while the data downloaded
+                                                       // (the process kept by its service), the new one takes the download's screen (g_act above)
     JNIEnv *env = act->env;
     jclass activity_class = (*env)->GetObjectClass(env, act->clazz);
     if (activity_class) g_audio_menu_method = (*env)->GetMethodID(env, activity_class, "openAudioMenu", "()V");

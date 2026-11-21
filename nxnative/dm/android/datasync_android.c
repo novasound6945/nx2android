@@ -15,8 +15,15 @@
 // internal storage, encrypted as it came); without that, the asset's own address. An asset of version 1 never goes that way
 // The same screen shows the save's cloud sync at the start (savecloud_android.c dm_cloud_begin, after the shader preparation): its view (savecloud.h dm_cloud_view, which
 // that file fills) is the third step, or a question of its own; the screen shows only once the start took 300 ms, or at once for a question
+// The background download (bgdl.h decides, java_service/org/nx2a/DownloadService.java keeps the process alive): once bytes come, the download is a foreground
+// service's whose notification shows the game, the progress and the time left, with Pause / Cancel; the screen off, HOME or another app in front, it goes on (a wake lock
+// and a Wi-Fi lock while bytes come). Without a network it waits for one (the service's ConnectivityManager callback, no timed retries); the activity destroyed while it
+// runs (Back, swiped from Recents), the process stays for it, and the app opened again takes the same download's screen back (dm_sync_reattach). It ends: in front, the
+// start goes on; in the background, "Download complete · tap to start" and the start goes on once the app is back (its activity gone: the process ends, the next start
+// is a new one). An APK without the service's dex (released before it, not updated) downloads as before: only while it is on the screen
 #include "dm.h"
 #include "datasync.h"
+#include "bgdl.h"
 #include "savesync.h"   // (the launcher's times and sizes: ss_fmt_when, ss_fmt_ago, ss_fmt_size)
 #include "savecloud.h"
 #include "pixel_font.h"
@@ -40,12 +47,19 @@
 const uint8_t *dm_overlay_font(void);   // overlay_theme.c
 static struct {
     pthread_mutex_t mu; pthread_cond_t cv;
-    ANativeActivity *act; char root[512], package[256], base[1024], auth[600];
+    ANativeActivity *act; JavaVM *vm; char root[512], package[256], base[1024], auth[600];
     ANativeWindow *win; int lost, released;           // the window (on_window_created / destroyed: dm_sync_window), and a destroy waiting for the screen to let it go
     ds_progress pr; int status, wait_s, wait_tot; char msg[256];   // status: -1 working, else the last error (DS_ERR_*); wait_s: seconds to the next try (of wait_tot)
     int retry_now, netdown; int64_t deadline;   // Retry pressed; the device has no network (nothing is asked); the time the server's answer is given up at (0: none)
     void (*done)(void); int pipe[2];
-} S = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, .status = -1, .pipe = {-1, -1}};
+    char internal[512];                               // the app's internal storage (the activity's own string goes with the activity)
+    jobject app;                                      // the application's Context (a global reference): what the threads ask the system with, activity or not
+    // the background download (bgdl.h): DownloadService (NULL: an APK without its dex), its static methods; Pause / Cancel; the service's word on the network
+    jclass svc_cls; jmethodID mUpdate, mStop, mAllowed, mAsk, mClear, mAttach;
+    int paused, cancelled, net_cb, net_up;
+    int visible, detached;                            // the activity is on the screen (onStart .. onStop); it was destroyed while the download ran (the process kept for it)
+    int svc, svc_used, svc_failed, notif_off;         // the service runs; it ran in this download; it cannot be started now; notifications are off
+} S = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, .status = -1, .pipe = {-1, -1}, .visible = 1};
 static struct { int on, done, total; } P;   // the shader preparation (dm_prep_begin), under S.mu
 static struct { char ko[3][200], en[3][200], detail[300]; } NT;   // a notice the start stops at (dm_notice_begin, PH_NOTICE), under S.mu: shown until the app ends
 // the pointer (an asset of version 2): its address, key and the pack's folder under the root; the asset's own server (base, auth) for when neither the pointer nor the
@@ -92,6 +106,7 @@ static void jheader(jhttp *h, jobject C, const char *k, char *out, size_t cap) {
     (*E)->ReleaseStringUTFChars(E, v, s);
 }
 // What is left of the time the server gets (ms): none when the device has no network; S.deadline (3 s from the first try when the folder has a pack) else 3 s a request
+static int bg_stopped(void) { pthread_mutex_lock(&S.mu); int v = S.paused || S.cancelled; pthread_mutex_unlock(&S.mu); return v; }
 static int64_t budget_left(void) {
     pthread_mutex_lock(&S.mu); int down = S.netdown; int64_t d = S.deadline; pthread_mutex_unlock(&S.mu);
     if (down) return 0;
@@ -135,6 +150,7 @@ static int http_fetch(void *u, const char *rel, uint64_t from, uint64_t *start, 
     else { rc = DS_ERR_SERVER; snprintf(why, sizeof why, "HTTP %d", code); goto out; }
     in = (*E)->CallObjectMethod(E, C, h->mIn); if (!in || jx(E, why, sizeof why)) goto out;
     for (;;) {
+        if (bg_stopped()) { snprintf(why, sizeof why, "paused (the download's notification)"); goto out; }   // (the part so far is kept: Resume goes on from it)
         jint n = (*E)->CallIntMethod(E, in, h->mRead, h->buf); if (jx(E, why, sizeof why)) goto out;
         if (n < 0) break;
         if (!n) continue;
@@ -221,7 +237,8 @@ static void pointer_resolve(jhttp *h) {
     memset(line, 0, sizeof line); memset(cred, 0, sizeof cred);
 }
 static uint64_t free_bytes(void *u, const char *root) { (void)u; struct statvfs v; return statvfs(root, &v) ? (uint64_t)-1 : (uint64_t)v.f_bavail * v.f_frsize; }
-static void sync_note(void *u, const ds_progress *p) { (void)u; pthread_mutex_lock(&S.mu); S.pr = *p; pthread_mutex_unlock(&S.mu); }
+static void bg_progress(const ds_progress *p);   // (below: the notification)
+static void sync_note(void *u, const ds_progress *p) { (void)u; pthread_mutex_lock(&S.mu); S.pr = *p; pthread_mutex_unlock(&S.mu); bg_progress(p); }
 static void sync_log(void *u, const char *m) { (void)u; LOG("%s", m); }
 
 // ---- the screen: one for the whole start (V), from onCreate (dm_start_screen_open) through the data, the shader preparation and the cloud's start, to the game's first
@@ -294,10 +311,18 @@ static void need_net_view(dm_cloud_view *q, int ws, int wtot) {
     snprintf(q->line[0], sizeof q->line[0], "%s", V.first_run ? L("처음 한 번 게임 데이터를 받아야 해요. 연결되면 바로 이어서 받아요.", "The game data has to be downloaded once. It starts as soon as there is a connection.")
                                                               : L("남은 게임 데이터를 받아야 해요. 연결되면 바로 이어서 받아요.", "The rest of the game data has to be downloaded. It goes on as soon as there is a connection."));
     snprintf(q->btn[0], sizeof q->btn[0], "%s", L("다시 시도", "Retry"));
-    snprintf(q->count, sizeof q->count, korean() ? "%d초 뒤 다시 확인해요" : "Trying again in %d s", ws);
-    q->count_permille = wtot > 0 ? (wtot - ws) * 1000 / wtot : -1;
+    if (ws > 0) snprintf(q->count, sizeof q->count, korean() ? "%d초 뒤 다시 확인해요" : "Trying again in %d s", ws);
+    else snprintf(q->count, sizeof q->count, "%s", L("연결을 기다리는 중", "Waiting for a connection"));   // (no timer: the network's callback goes on with it)
+    q->count_permille = wtot > 0 && ws > 0 ? (wtot - ws) * 1000 / wtot : -1;
 }
-typedef struct { int phase, status, wait_s, wait_tot, need_net, pd, pt; ds_progress p; char msg[256], nt_ko[3][200], nt_en[3][200], nt_detail[300]; lnr_t ln; } snap_t;
+// the download paused (the notification's Pause, or its Cancel with the app in front): Resume on the screen
+static void paused_view(dm_cloud_view *q) {
+    memset(q, 0, sizeof *q); q->ask = 1; q->urgent = 1; q->icon = DM_CLOUD_ICON_NONE; q->progress = -1; q->nbtn = 1;
+    snprintf(q->title, sizeof q->title, "%s", L("받기를 일시정지했어요", "The download is paused"));
+    snprintf(q->line[0], sizeof q->line[0], "%s", L("받은 파일은 그대로예요. 이어 받으면 멈춘 곳부터 받아요.", "What was downloaded stays. It goes on from where it stopped."));
+    snprintf(q->btn[0], sizeof q->btn[0], "%s", L("이어 받기", "Resume"));
+}
+typedef struct { int phase, status, wait_s, wait_tot, need_net, pd, pt; ds_progress p; char msg[256], nt_ko[3][200], nt_en[3][200], nt_detail[300]; lnr_t ln; int paused, notif_off, bg; } snap_t;
 // the picture's state, from what the phases left (under no lock: snap and cv are copies)
 // the launcher's picture: its statuses, items and pages from the start's state (x), the launcher's (x->ln) and the cloud's (ci)
 static void fmt_gb(char *o, size_t n, uint64_t b) { if (b >= 1024ull << 20) snprintf(o, n, "%.1f GB", b / 1073741824.0); else snprintf(o, n, "%.0f MB", b / 1048576.0); }
@@ -469,10 +494,13 @@ static void build_view(stv_view *v, const snap_t *x, const stv_rate *rate, dm_cl
             char e[64]; stv_fmt_eta(e, sizeof e, rate->eta, ko);
             if (p->phase == DS_PH_DOWNLOAD && rate->speed > 0) { char sp[32]; stv_fmt_speed(sp, sizeof sp, rate->speed); snprintf(v->bar_right, sizeof v->bar_right, e[0] ? "%s · %s" : "%s", sp, e); }
             else snprintf(v->bar_right, sizeof v->bar_right, "%s", e);
-            if (p->phase == DS_PH_DOWNLOAD) snprintf(v->hint, sizeof v->hint, "%s", L("와이파이에서 받는 걸 권해요 · 중간에 꺼도 받은 파일은 그대로예요", "Wi-Fi is best · what was downloaded stays if the app is closed"));
+            if (p->phase == DS_PH_DOWNLOAD) snprintf(v->hint, sizeof v->hint, "%s", x->bg ? L("와이파이에서 받는 걸 권해요 · 다른 앱으로 가도 알림에서 계속 받아요", "Wi-Fi is best · it goes on in the notification while you use other apps")
+                                                                       : L("와이파이에서 받는 걸 권해요 · 중간에 꺼도 받은 파일은 그대로예요", "Wi-Fi is best · what was downloaded stays if the app is closed"));
             else v->hint[0] = 0;
+            if (p->phase == DS_PH_DOWNLOAD && x->notif_off) snprintf(v->hint2, sizeof v->hint2, "%s", L("알림이 꺼져 있어서 다른 앱으로 가면 받기가 멈출 수 있어요", "Notifications are off: the download may stop while another app is in front"));
         }
-        if (x->status >= 0) {
+        if (x->paused) { paused_view(dq); v->ask = dq; }
+        else if (x->status >= 0) {
             if (x->need_net) { need_net_view(dq, x->wait_s, x->wait_tot); v->ask = dq; }
             else { s->state = STV_FAIL; snprintf(s->note, sizeof s->note, ko ? "%d초 뒤 다시 시도" : "again in %d s", x->wait_s);
                    v->hint_warn = 1; snprintf(v->hint, sizeof v->hint, "%s", ds_error_text(x->status)); snprintf(v->hint2, sizeof v->hint2, "%s", x->msg); }
@@ -577,7 +605,7 @@ static void *screen_thread(void *a) {
             if (LN.want && LN.gate && !lnr_busy_locked(&ci)) go_locked();
             LN.verify_ok = verify_ok_locked(&ci);
         }
-        snap_t x = {V.phase, S.status, S.wait_s, S.wait_tot, V.need_net, P.done, P.total}; x.p = S.pr; snprintf(x.msg, sizeof x.msg, "%s", S.msg); x.ln = LN;
+        snap_t x = {V.phase, S.status, S.wait_s, S.wait_tot, V.need_net, P.done, P.total}; x.p = S.pr; snprintf(x.msg, sizeof x.msg, "%s", S.msg); x.ln = LN; x.paused = S.paused; x.notif_off = S.notif_off; x.bg = S.svc_cls != NULL;
         if (x.phase == PH_NOTICE) { memcpy(x.nt_ko, NT.ko, sizeof NT.ko); memcpy(x.nt_en, NT.en, sizeof NT.en); memcpy(x.nt_detail, NT.detail, sizeof NT.detail); }
         stv_step steps[STV_NSTEPS]; memcpy(steps, V.step, sizeof steps); ANativeWindow *w = S.win; int64_t t = now_ms();
         dm_cloud_view cv; memset(&cv, 0, sizeof cv); cv.progress = -1;
@@ -616,7 +644,7 @@ static void *screen_thread(void *a) {
     return NULL;
 }
 void dm_sync_window(ANativeWindow *w) {   // on_window_created (w) and on_window_destroyed (NULL): a destroyed window is let go before the callback returns
-    if (!S.act) return;
+    if (!S.act && !S.detached) return;
     pthread_mutex_lock(&S.mu);
     if (w) S.win = w;
     else if (S.win) {
@@ -652,14 +680,15 @@ static void app_names(ANativeActivity *act, char *label, size_t lcap, char *ver,
     jx(E, NULL, 0); (*E)->PopLocalFrame(E, NULL);
 }
 __attribute__((weak)) int vk_gpl_prepare(void (*note)(void *u, int done, int total), void *u);   // (a build without the Vulkan backend has none)
-static void checked_path(char *o, size_t n) { if (S.act && S.act->internalDataPath) snprintf(o, n, "%s/nx2a_data_checked.txt", S.act->internalDataPath); else o[0] = 0; }   // when the server last answered
+static void checked_path(char *o, size_t n) { if (S.internal[0]) snprintf(o, n, "%s/nx2a_data_checked.txt", S.internal); else o[0] = 0; }   // when the server last answered
 // The start screen, opened in onCreate before anything of the start runs: its steps as they stand, its thread waiting to show (it draws nothing in the first 300 ms)
 void dm_start_screen_open(ANativeActivity *act, const char *root) {
     if (V.open) return;
     char label[160], vn[96], p[1100]; struct stat st; app_names(act, label, sizeof label, vn, sizeof vn);
     int noserver = dm_cloud_no_server(act);   // (before S.mu: it takes the cloud's lock)
     pthread_mutex_lock(&S.mu);
-    S.act = act; V.t0 = now_ms(); V.closing = V.closed = V.shown = 0; V.phase = PH_NONE;
+    S.act = act; S.vm = act->vm; V.t0 = now_ms(); V.closing = V.closed = V.shown = 0; V.phase = PH_NONE;
+    if (act->internalDataPath) snprintf(S.internal, sizeof S.internal, "%s", act->internalDataPath);
     snprintf(V.name, sizeof V.name, "%s", label); version_line(V.version, sizeof V.version, vn);
     AAsset *as = act->assetManager ? AAssetManager_open(act->assetManager, "nx2a/source.bin", AASSET_MODE_UNKNOWN) : NULL; if (as) AAsset_close(as);
     V.has_server = as != NULL; snprintf(p, sizeof p, "%s/%s", root, DS_LIST); V.first_run = V.has_server && stat(p, &st);
@@ -696,7 +725,7 @@ void dm_start_screen_close(void) {
 }
 // The input before the game that is not the cloud's (front_android.c on_input_early): the first start's Retry when it has no network. 1 when it was the screen's
 int dm_start_input(const AInputEvent *e) {
-    pthread_mutex_lock(&S.mu); int on = V.phase == PH_DATA && V.need_net && S.status >= 0; ANativeWindow *w = S.win; int ws = S.wait_s, wt = S.wait_tot; pthread_mutex_unlock(&S.mu);
+    pthread_mutex_lock(&S.mu); int paused = V.phase == PH_DATA && S.paused, on = paused || (V.phase == PH_DATA && V.need_net && S.status >= 0); ANativeWindow *w = S.win; int ws = S.wait_s, wt = S.wait_tot; pthread_mutex_unlock(&S.mu);
     if (!on) return lnr_input(e);   // (the launcher's, and − at a start without it)
     int go = 0;
     if (AInputEvent_getType(e) == AINPUT_EVENT_TYPE_KEY) {
@@ -704,10 +733,11 @@ int dm_start_input(const AInputEvent *e) {
         if (k == AKEYCODE_VOLUME_UP || k == AKEYCODE_VOLUME_DOWN || k == AKEYCODE_VOLUME_MUTE) return 0;
         go = AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_DOWN && !AKeyEvent_getRepeatCount(e) && (k == AKEYCODE_BUTTON_A || k == AKEYCODE_DPAD_CENTER || k == AKEYCODE_ENTER || k == AKEYCODE_BUTTON_START);
     } else if (AInputEvent_getType(e) == AINPUT_EVENT_TYPE_MOTION && (AMotionEvent_getAction(e) & AMOTION_EVENT_ACTION_MASK) == AMOTION_EVENT_ACTION_UP && w) {
-        dm_cloud_view q; need_net_view(&q, ws, wt); int kind = 0;
+        dm_cloud_view q; if (paused) paused_view(&q); else need_net_view(&q, ws, wt); int kind = 0;
         go = stv_hit(&q, ANativeWindow_getWidth(w), ANativeWindow_getHeight(w), AMotionEvent_getX(e, 0), AMotionEvent_getY(e, 0), &kind) == 0;
     }
-    if (go) { LOG("data: the player asked to try again now"); pthread_mutex_lock(&S.mu); S.retry_now = 1; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); }
+    if (go && paused) { LOG("data: the player resumed the download"); pthread_mutex_lock(&S.mu); S.paused = S.cancelled = 0; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); }
+    else if (go) { LOG("data: the player asked to try again now"); pthread_mutex_lock(&S.mu); S.retry_now = 1; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); }
     return 1;
 }
 // 1: the device has a connected network (ConnectivityManager.getActiveNetworkInfo), 0: none, -1: not known (a Java failure). ctx: the activity
@@ -731,31 +761,188 @@ int dm_net_state(JNIEnv *E, jobject ctx) {
     return r;
 }
 
+// ---- the background download: DownloadService through JNI (bgdl.h decides what to do) ----
+static JNIEnv *BE;   // the sync thread's JNI while it runs: bg_post and bg_progress run on that thread only
+static struct { int state, permille; int64_t t, check_t; stv_rate rate; int started; } BP;   // the last notification posted, the speed (the sync thread's)
+static const char *bg_cmd_name(int c) { return c == BG_CMD_PAUSE ? "Pause" : c == BG_CMD_RESUME ? "Resume" : c == BG_CMD_CANCEL ? "Cancel" : c == BG_CMD_NET_UP ? "network up"
+                                               : c == BG_CMD_NET_DOWN ? "network lost" : c == BG_CMD_STOPPED ? "stopped by the system" : "?"; }
+static void JNICALL bg_command(JNIEnv *E, jclass k, jint cmd) {   // DownloadService.nativeCommand: the notification's buttons and the network callback (a Java thread)
+    (void)E; (void)k;
+    pthread_mutex_lock(&S.mu);
+    if (cmd == BG_CMD_PAUSE) S.paused = 1;
+    else if (cmd == BG_CMD_RESUME) S.paused = S.cancelled = 0;
+    else if (cmd == BG_CMD_CANCEL) { S.cancelled = 1; S.svc = 0; }   // (the service ended itself: its notification is gone)
+    else if (cmd == BG_CMD_NET_UP) { S.net_cb = 1; S.net_up = 1; }
+    else if (cmd == BG_CMD_NET_DOWN) { S.net_cb = 1; S.net_up = 0; }
+    else if (cmd == BG_CMD_STOPPED) { S.svc = 0; S.svc_failed = 1; S.net_cb = 0; }
+    pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+    if (cmd != BG_CMD_NET_UP && cmd != BG_CMD_NET_DOWN) LOG("data: the download's notification: %s", bg_cmd_name(cmd));
+}
+static void bg_attach(JNIEnv *E, jobject activity) {   // DownloadService.attach: where the notification permission is asked from (NULL: none)
+    if (!S.svc_cls || !E) return;
+    (*E)->CallStaticVoidMethod(E, S.svc_cls, S.mAttach, activity); jx(E, NULL, 0);
+}
+static void bg_call(JNIEnv *E, jmethodID m) { if (S.svc_cls && E && m && S.app) { (*E)->CallStaticVoidMethod(E, S.svc_cls, m, S.app); jx(E, NULL, 0); } }   // stop, askNotifications, clearDone
+// On the main thread, before the sync thread starts: the application's Context, DownloadService from the APK's class loader (the system's does not have the app's
+// classes), its native method, its static methods. An APK without the service's dex: the download runs as before, only while the app is on the screen
+static void bg_java_init(ANativeActivity *act) {
+    JNIEnv *E = act->env; char why[256] = "";
+    if ((*E)->PushLocalFrame(E, 24)) { jx(E, NULL, 0); return; }
+    jobject a = act->clazz; jclass cA = (*E)->GetObjectClass(E, a);
+    jmethodID mApp = cA ? (*E)->GetMethodID(E, cA, "getApplicationContext", "()Landroid/content/Context;") : NULL;
+    jobject app = mApp && !jx(E, NULL, 0) ? (*E)->CallObjectMethod(E, a, mApp) : NULL; jx(E, NULL, 0);
+    if (!S.app) S.app = (*E)->NewGlobalRef(E, app ? app : a);   // (none: the activity itself, kept)
+    jmethodID mCl = cA ? (*E)->GetMethodID(E, cA, "getClassLoader", "()Ljava/lang/ClassLoader;") : NULL;
+    jobject cl = mCl && !jx(E, NULL, 0) ? (*E)->CallObjectMethod(E, a, mCl) : NULL;
+    jclass cCl = cl && !jx(E, NULL, 0) ? (*E)->FindClass(E, "java/lang/ClassLoader") : NULL;
+    jmethodID mLoad = cCl && !jx(E, NULL, 0) ? (*E)->GetMethodID(E, cCl, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;") : NULL;
+    jstring nm = mLoad && !jx(E, NULL, 0) ? (*E)->NewStringUTF(E, "org.nx2a.DownloadService") : NULL;
+    jclass k = nm ? (jclass)(*E)->CallObjectMethod(E, cl, mLoad, nm) : NULL;
+    if (jx(E, why, sizeof why) || !k) { LOG("data: the APK has no background download service (%s): the download runs while the app is on the screen", why[0] ? why : "no class loader"); goto out; }
+    static const JNINativeMethod nat[] = {{"nativeCommand", "(I)V", (void *)bg_command}};
+    if ((*E)->RegisterNatives(E, k, nat, 1) || jx(E, why, sizeof why)) { LOG("[RED] data: DownloadService.nativeCommand cannot be registered (%s): no background download", why); goto out; }
+    S.mUpdate = (*E)->GetStaticMethodID(E, k, "update", "(Landroid/content/Context;ILjava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)Z");
+    S.mStop = S.mUpdate ? (*E)->GetStaticMethodID(E, k, "stop", "(Landroid/content/Context;)V") : NULL;
+    S.mAllowed = S.mStop ? (*E)->GetStaticMethodID(E, k, "notificationsAllowed", "(Landroid/content/Context;)Z") : NULL;
+    S.mAsk = S.mAllowed ? (*E)->GetStaticMethodID(E, k, "askNotifications", "(Landroid/content/Context;)V") : NULL;
+    S.mClear = S.mAsk ? (*E)->GetStaticMethodID(E, k, "clearDone", "(Landroid/content/Context;)V") : NULL;
+    S.mAttach = S.mClear ? (*E)->GetStaticMethodID(E, k, "attach", "(Landroid/app/Activity;)V") : NULL;
+    if (jx(E, why, sizeof why) || !S.mAttach) { LOG("[RED] data: DownloadService lacks a method this host calls (%s): no background download", why); goto out; }
+    S.svc_cls = (*E)->NewGlobalRef(E, k);
+    bg_attach(E, a); bg_call(E, S.mClear);   // (a finished download's notification of an earlier run goes: the app is open)
+    LOG("data: a download goes on off the screen (DownloadService: a foreground service while bytes come)");
+out:
+    jx(E, NULL, 0); (*E)->PopLocalFrame(E, NULL);
+}
+// The notification of state, through DownloadService.update (the sync thread): when bgdl.h bg_due says so, or force. Only a download starts the service, and only with
+// the app on the screen (Android 12+ refuses a start from the background); after Cancel nothing is posted until Resume
+static void bg_post(int state, int wait_s, int force) {
+    JNIEnv *E = BE; if (!E || !S.svc_cls || !S.app) return;
+    pthread_mutex_lock(&S.mu);
+    int svc = S.svc, used = S.svc_used, can = !S.cancelled && (svc || (S.visible && !S.detached && (state == BG_ST_RUN || used))); ds_progress p = S.pr;
+    pthread_mutex_unlock(&S.mu);
+    if (state == BG_ST_DONE ? !used : !can) return;
+    bg_note_t n; bg_note(&n, korean(), V.name, state, p.done, p.total, BP.rate.eta, wait_s);
+    int64_t t = now_ms();
+    if (!force && !bg_due(t, BP.t, state, BP.state, n.permille, BP.permille)) return;
+    if ((*E)->PushLocalFrame(E, 16)) { jx(E, NULL, 0); return; }
+    jstring a = (*E)->NewStringUTF(E, n.title), b = (*E)->NewStringUTF(E, n.text), c = (*E)->NewStringUTF(E, n.b_pause), d = (*E)->NewStringUTF(E, n.b_cancel);
+    jboolean ok = a && b && c && d && !jx(E, NULL, 0) ? (*E)->CallStaticBooleanMethod(E, S.svc_cls, S.mUpdate, S.app, state, a, b, n.permille, c, d) : JNI_FALSE;
+    char why[200] = ""; if (jx(E, why, sizeof why)) ok = JNI_FALSE;
+    int allowed = -1;
+    if (t - BP.check_t > 5000 || !BP.check_t) { BP.check_t = t; jboolean al = (*E)->CallStaticBooleanMethod(E, S.svc_cls, S.mAllowed, S.app); if (!jx(E, NULL, 0)) allowed = al != JNI_FALSE; }
+    (*E)->PopLocalFrame(E, NULL);
+    pthread_mutex_lock(&S.mu);
+    if (state == BG_ST_DONE) S.svc = 0;
+    else if (ok) { if (!S.svc) LOG("data: the download's notification is up (DownloadService runs: the download goes on off the screen)"); S.svc = 1; S.svc_used = 1; }
+    else if (!S.svc_failed) { S.svc_failed = 1; LOG("[RED] data: the download's service cannot start%s%s: the download runs while the app is on the screen", why[0] ? ": " : "", why); }
+    if (allowed >= 0 && S.notif_off != !allowed) { S.notif_off = !allowed; LOG("data: notifications %s", allowed ? "allowed" : "are off (the download may stop in the background)"); }
+    pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+    BP.t = t; BP.state = state; BP.permille = n.permille;
+}
+static void bg_progress(const ds_progress *p) {   // (sync_note, the sync thread) bytes came: the notification's bar, the speed and the time left
+    if (!BE || !S.svc_cls || (p->phase != DS_PH_DOWNLOAD && p->phase != DS_PH_UNPACK) || !p->total) return;
+    pthread_mutex_lock(&S.mu); int used = S.svc_used, visible = S.visible && !S.detached; pthread_mutex_unlock(&S.mu);
+    if (p->phase == DS_PH_UNPACK && !used) return;   // (only a download starts the service: bundles the folder had are taken out on the screen)
+    uint64_t d = p->done < p->total ? p->done : p->total;
+    stv_rate_feed(&BP.rate, now_ms(), p->phase == DS_PH_DOWNLOAD ? (double)p->net : (double)p->done, (double)(p->total - d));
+    if (!BP.started && p->phase == DS_PH_DOWNLOAD && visible) { BP.started = 1; bg_call(BE, S.mAsk); }   // Android 13+: the notification permission, once, as the first download starts
+    bg_post(BG_ST_RUN, 0, 0);
+}
+static void bg_stop_service(void) {   // the service ends, its notification goes (the sync thread)
+    pthread_mutex_lock(&S.mu); int on = S.svc || S.svc_used; S.svc = 0; pthread_mutex_unlock(&S.mu);
+    if (on) bg_call(BE, S.mStop);
+}
+// Before each try: paused (the notification's Pause, or Cancel with the app in front) waits for Resume; Cancel with the app off the screen ends the process (what was
+// downloaded stays, the next start resumes it)
+static void bg_hold(void) {
+    pthread_mutex_lock(&S.mu);
+    if (!S.paused && !S.cancelled) { pthread_mutex_unlock(&S.mu); return; }
+    int was_cancel = 0, posted = 0;
+    while (S.paused || S.cancelled) {
+        if (S.cancelled && !was_cancel) {
+            was_cancel = 1;
+            if (bg_cancel(S.visible, S.detached) == BG_CANCEL_EXIT) {
+                pthread_mutex_unlock(&S.mu);
+                LOG("data: the download was cancelled with the app off the screen: the app ends (what was downloaded stays: the next start goes on from it)");
+                bg_stop_service(); _exit(0);
+            }
+            S.paused = 1; LOG("data: the download was cancelled with the app on the screen: paused there (Resume goes on)");
+        }
+        if (!S.cancelled && !posted) { posted = 1; pthread_mutex_unlock(&S.mu); bg_post(BG_ST_PAUSED, 0, 1); pthread_mutex_lock(&S.mu); continue; }
+        pthread_cond_wait(&S.cv, &S.mu);
+    }
+    pthread_mutex_unlock(&S.mu);
+    LOG("data: the download goes on (Resume)");
+}
+// The activity on the screen or not (front_android.c onStart / onStop)
+void dm_sync_visible(int on) {
+    pthread_mutex_lock(&S.mu); S.visible = on; if (on) S.svc_failed = 0; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+}
+// The activity destroyed (front_android.c on_destroy): 1 when the process stays for the download (bgdl.h bg_keep_alive: it runs, in its service), else it ends as before.
+// Nothing of the activity is used after: the threads ask the system with the application's Context, and the window went before
+int dm_sync_detach(ANativeActivity *act) {
+    pthread_mutex_lock(&S.mu); int keep = bg_keep_alive(V.phase == PH_DATA, S.svc);
+    if (keep) { S.detached = 1; S.visible = 0; S.act = NULL; pthread_cond_broadcast(&S.cv); }
+    pthread_mutex_unlock(&S.mu);
+    if (keep) { bg_attach(act->env, NULL); LOG("data: the activity was destroyed while the data downloads: the process stays for it (the notification); opening the app takes it back"); }
+    return keep;
+}
+// The app opened again while detached (front_android.c ANativeActivity_onCreate's second call): the new activity takes the download's screen. 1 when it was detached
+int dm_sync_reattach(ANativeActivity *act) {
+    pthread_mutex_lock(&S.mu); int was = S.detached;
+    if (was) { S.act = act; S.detached = 0; S.visible = 1; S.svc_failed = 0; pthread_cond_broadcast(&S.cv); }
+    pthread_mutex_unlock(&S.mu);
+    if (was) { bg_attach(act->env, act->clazz); LOG("data: the app is open again: the running download's screen"); }
+    return was;
+}
+// The download ended (the sync thread, before the start goes on): with the service used, bgdl.h bg_finish says what follows
+static void bg_finish_download(void) {
+    pthread_mutex_lock(&S.mu); int used = S.svc_used, fin = bg_finish(S.visible, S.detached); pthread_mutex_unlock(&S.mu);
+    if (!used) return;
+    if (fin == BG_FIN_GO) { bg_stop_service(); return; }
+    bg_post(BG_ST_DONE, 0, 1);   // the service ends; "Download complete · tap to start" stays
+    if (fin == BG_FIN_WAIT) {
+        LOG("data: downloaded in the background: the start goes on once the app is back");
+        pthread_mutex_lock(&S.mu); while (!S.visible && !S.detached) pthread_cond_wait(&S.cv, &S.mu); fin = S.detached ? BG_FIN_EXIT : BG_FIN_GO; pthread_mutex_unlock(&S.mu);
+        if (fin == BG_FIN_GO) { bg_call(BE, S.mClear); return; }
+    }
+    LOG("data: downloaded with the app's activity gone: the app ends; the notification starts it again");
+    _exit(0);
+}
+
 // ---- the sync thread ----
 // Without a network the start does not wait: a device with none (ConnectivityManager) asks no server at all; one with a network the server does not answer from gives it 3 s
 // in all (the pointer and the list together) when the files folder holds a pack, which the game then starts with (the data's step says offline, and when the server
-// last answered). A folder without a whole pack cannot start: the screen asks for a connection (Retry), and tries again after 2, 4, 8 … 60 s, at once when the device's
-// network comes back
+// last answered). A folder without a whole pack cannot start: the screen asks for a connection (Retry). Without a network it waits for one (bgdl.h bg_plan: the service's
+// network callback, else the device's state every 2 s: nothing is asked of the server meanwhile); with one the server does not answer, it tries again after 2, 4, 8 … 60 s
 static void phase_end(void) { char b = 1; if (write(S.pipe[1], &b, 1) != 1) LOG("[RED] start: cannot wake the main thread"); }   // the main thread's sync_ready runs the next step
 static void *sync_thread(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "datasync");
-    JavaVM *vm = S.act->vm; jhttp h = {0}; int rc = DS_OFFLINE, net = S.base[0] != 0, unreached = 0;   // !net: no server, only the folder's bundles to unpack (dm_sync_begin)
+    JavaVM *vm = S.vm; jhttp h = {0}; int rc = DS_OFFLINE, net = S.base[0] != 0, unreached = 0;   // !net: no server, only the folder's bundles to unpack (dm_sync_begin)
     int64_t t_start = now_ms(); struct stat lst; char lp[1100]; snprintf(lp, sizeof lp, "%s/%s", S.root, DS_LIST); int have_list = !stat(lp, &lst);
     if (net && ((*vm)->AttachCurrentThread(vm, &h.E, NULL) != JNI_OK || jhttp_init(&h))) LOG("[RED] data: no Java for the download: the game starts with the data the app has");
     else {
         ds_ctx c = {.root = S.root, .package = S.package, .fetch = net ? http_fetch : NULL, .fu = &h, .free_bytes = free_bytes, .note = sync_note, .log = sync_log};
+        BE = net ? h.E : NULL; stv_rate_reset(&BP.rate);
         int delay = 2, last_net = -1;
         for (int round = 1;; round++) {
-            int ns = net ? dm_net_state(h.E, S.act->clazz) : -1;
-            pthread_mutex_lock(&S.mu); S.status = -1; S.msg[0] = 0; S.retry_now = 0; S.netdown = ns == 0;
+            bg_hold();
+            int ns = net ? dm_net_state(h.E, S.app) : -1;
+            pthread_mutex_lock(&S.mu); S.status = -1; S.msg[0] = 0; S.retry_now = 0; S.netdown = ns == 0; V.need_net = 0;
             S.deadline = round == 1 && have_list ? now_ms() + 3000 : 0;   // the folder has a pack: the server gets 3 s in all, then the game starts with it
             pthread_mutex_unlock(&S.mu);
+            pthread_mutex_lock(&S.mu); int used = S.svc_used; pthread_mutex_unlock(&S.mu);
+            if (round > 1 && used) bg_post(BG_ST_RUN, 0, 1);   // (out of a wait: the notification says it downloads again)
             if (ns == 0 && round == 1) LOG("data: the device has no network: the server is not asked");
             if (net && PT.on && !PT.fresh) pointer_resolve(&h);   // (again at each try until the pointer itself answers: a launch before the network is up reaches it later)
             rc = ds_sync(&c); unreached = rc == DS_OFFLINE && c.unreached;
             if (rc == DS_DONE || rc == DS_UPTODATE || rc == DS_OFFLINE) break;
-            if (c.pr.phase == DS_PH_DOWNLOAD && c.pr.done) delay = 2;   // it moved on: the next break waits from the start again
-            LOG("[RED] data: try %d failed (%d): %s; again in %d s", round, rc, c.err, delay);
+            int ns2 = net ? dm_net_state(h.E, S.app) : -1;   // the network now: a break of the download is the network gone more often than the server
+            pthread_mutex_lock(&S.mu); int paused = S.paused, cancelled = S.cancelled; pthread_mutex_unlock(&S.mu);
+            bg_plan_t pl = bg_plan(rc, ns2, paused, cancelled, delay, c.pr.phase == DS_PH_DOWNLOAD && c.pr.done);
+            delay = pl.delay;
+            if (pl.next == BG_NEXT_RESUME || pl.next == BG_NEXT_CANCEL) { LOG("data: try %d stopped: %s", round, cancelled ? "cancelled" : "paused"); continue; }   // (bg_hold)
             char msg[256]; snprintf(msg, sizeof msg, "%s", c.err);   // (the log keeps c.err in English; the screen says how much space in the app's language)
             if (rc == DS_ERR_SPACE) {   // (under 0.1 GB short: MB, else it would say 0.0 GB more)
                 double more = c.space_need / 1073741824.0, fr = c.space_free / 1073741824.0;
@@ -763,17 +950,38 @@ static void *sync_thread(void *a) {
                 else if (korean()) snprintf(msg, sizeof msg, "%.1fGB가 더 필요해요 (남은 공간 %.1fGB)", more, fr);
             }
             int need_net = rc == DS_ERR_NET && net;   // (DS_ERR_NET with a server: the folder has no whole pack, so the game cannot start without it)
-            pthread_mutex_lock(&S.mu); V.need_net = need_net; pthread_mutex_unlock(&S.mu);
-            last_net = ns;
-            for (int s = delay; s > 0; s--) {   // the countdown, a second a step; Retry, or the device's network coming back, ends it
-                pthread_mutex_lock(&S.mu); S.status = rc; S.wait_s = s; S.wait_tot = delay; snprintf(S.msg, sizeof S.msg, "%s", need_net ? "" : msg); pthread_cond_broadcast(&S.cv);
-                struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 1; int now_retry = S.retry_now;
-                while (!S.retry_now && pthread_cond_timedwait(&S.cv, &S.mu, &ts) == 0) {}
-                now_retry = S.retry_now; pthread_mutex_unlock(&S.mu);
-                if (now_retry) break;
-                if (need_net) { int n2 = dm_net_state(h.E, S.act->clazz); if (n2 == 1 && last_net == 0) { LOG("data: the device's network is back: trying again now"); break; } if (n2 >= 0) last_net = n2; }
+            if (pl.next == BG_NEXT_NET) {   // no network: no timed tries, the next one when it is back (the service's callback; without the service, the device's state every 2 s)
+                LOG("[RED] data: try %d failed (%d): %s; the device has no network: waiting for it", round, rc, c.err);
+                pthread_mutex_lock(&S.mu); S.status = rc; S.wait_s = S.wait_tot = 0; S.msg[0] = 0; V.need_net = need_net; S.net_up = 0; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+                bg_post(BG_ST_WAIT_NET, 0, 1);
+                for (;;) {
+                    pthread_mutex_lock(&S.mu);
+                    int cb = S.net_cb && S.svc;
+                    if (!S.retry_now && !S.paused && !S.cancelled && !(cb && S.net_up)) {
+                        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += cb ? 30 : 2; pthread_cond_timedwait(&S.cv, &S.mu, &ts);
+                    }
+                    int stop = S.retry_now || S.paused || S.cancelled, up = cb && S.net_up; pthread_mutex_unlock(&S.mu);
+                    if (stop) break;
+                    int n2 = dm_net_state(h.E, S.app);   // (the device's own state: nothing goes to the server)
+                    if (n2 == 1) { LOG("data: the device's network is back: trying again now"); break; }
+                    if (up) { pthread_mutex_lock(&S.mu); S.net_up = 0; pthread_mutex_unlock(&S.mu); }   // (a callback for a network not connected yet: wait for the next)
+                }
+                last_net = 1; continue;
             }
-            delay = rc == DS_ERR_PACKAGE || rc == DS_ERR_SPACE || rc == DS_ERR_LOCAL ? 30 : delay * 2 > 60 ? 60 : delay * 2;   // (DS_ERR_LOCAL: until an install pushes what is missing)
+            LOG("[RED] data: try %d failed (%d): %s; again in %d s", round, rc, c.err, pl.wait_s);
+            pthread_mutex_lock(&S.mu); V.need_net = need_net; pthread_mutex_unlock(&S.mu);
+            last_net = ns2;
+            for (int s = pl.wait_s; s > 0; s--) {   // the countdown, a second a step; Retry, Pause, or the device's network coming back, ends it
+                pthread_mutex_lock(&S.mu); S.status = rc; S.wait_s = s; S.wait_tot = pl.wait_s; snprintf(S.msg, sizeof S.msg, "%s", need_net ? "" : msg); pthread_cond_broadcast(&S.cv);
+                pthread_mutex_unlock(&S.mu);
+                bg_post(BG_ST_WAIT, s, 1);
+                pthread_mutex_lock(&S.mu);
+                struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 1;
+                while (!S.retry_now && !S.paused && !S.cancelled && pthread_cond_timedwait(&S.cv, &S.mu, &ts) == 0) {}
+                int now_retry = S.retry_now || S.paused || S.cancelled; pthread_mutex_unlock(&S.mu);
+                if (now_retry) break;
+                if (need_net) { int n2 = dm_net_state(h.E, S.app); if (n2 == 1 && last_net == 0) { LOG("data: the device's network is back: trying again now"); break; } if (n2 >= 0) last_net = n2; }
+            }
         }
         LOG("%s (%lld ms)", rc == DS_DONE ? c.pr.net ? "data: downloaded, the files folder holds the server's pack"
             : "data: unpacked the bundles in the folder, the files folder holds the server's pack" : rc == DS_UPTODATE ? "data: the files folder holds the server's pack already"
@@ -783,6 +991,8 @@ static void *sync_thread(void *a) {
             if (p[0] && ds_write(p, t, (size_t)n)) LOG("[RED] data: cannot write %s (errno %d)", p, errno);
         }
         if (net) {
+            bg_finish_download();   // (the service's end; off the screen, the start waits for the app, or the process ends)
+            BE = NULL;
             if (h.buf) (*h.E)->DeleteGlobalRef(h.E, h.buf);
             (*vm)->DetachCurrentThread(vm);
         }
@@ -839,6 +1049,8 @@ int dm_sync_begin(ANativeActivity *act, const char *root, void (*done)(void)) {
     }
     if (package_name(act, S.package, sizeof S.package)) { LOG("[RED] data: the app's package is not known: the game starts with the data the app has"); return 0; }
     snprintf(S.root, sizeof S.root, "%s", root);
+    S.vm = act->vm; if (act->internalDataPath) snprintf(S.internal, sizeof S.internal, "%s", act->internalDataPath);
+    if (S.base[0]) bg_java_init(act);   // (the application's Context for the download's thread, and the background download's service)
     pthread_mutex_lock(&S.mu); S.done = done; S.act = act; int ok = !phase_pipe("data"); pthread_mutex_unlock(&S.mu);
     if (!ok) { LOG("[RED] data: the game starts with the data the app has"); return 0; }
     if (S.base[0] && PT.on) LOG("data: the data server is read from the pointer %s first (else the last one read, else %s)", PT.pointer, S.base);
@@ -917,7 +1129,7 @@ int dm_cloud_screen_hit(float x, float y, int *kind) {
 // start is ready (dm_launcher_gate, front_android.c, where the game would start). Off when the game's "start at once" is on (nx2a_launcher.txt in the app's storage):
 // then the start is as it was (the steps, nothing drawn in the first 300 ms), unless − (Select) is pressed while it runs. A question of the start (the cloud's cards,
 // the first start's download) is drawn over it; everything it loaded goes with the screen (dm_start_screen_close) ----
-static void lnr_path(char *o, size_t n) { if (S.act && S.act->internalDataPath) snprintf(o, n, "%s/nx2a_launcher.txt", S.act->internalDataPath); else o[0] = 0; }
+static void lnr_path(char *o, size_t n) { if (S.internal[0]) snprintf(o, n, "%s/nx2a_launcher.txt", S.internal); else o[0] = 0; }
 static void lnr_save_quick(int on) {
     char p[700]; lnr_path(p, sizeof p); if (!p[0]) return;
     char t[32]; int n = snprintf(t, sizeof t, "quick=%d\n", on ? 1 : 0); if (ds_write(p, t, (size_t)n)) LOG("[RED] launcher: cannot write %s (errno %d)", p, errno);
@@ -974,7 +1186,7 @@ static void shader_clear(void) {   // the next start prepares the shaders again 
 static void verify_note(void *u, const ds_progress *p) { (void)u; pthread_mutex_lock(&S.mu); LN.vpr = *p; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); }
 static void *verify_thread(void *a) {   // Check the data again: every file's SHA-256 against the server's list, what is damaged downloaded again (datasync.h ds_ctx.verify)
     (void)a; pthread_setname_np(pthread_self(), "dataverify");
-    JavaVM *vm = S.act->vm; jhttp h = {0}; int rc = DS_ERR_NET, fixed = 0; char err[256] = "";
+    JavaVM *vm = S.vm; jhttp h = {0}; int rc = DS_ERR_NET, fixed = 0; char err[256] = "";
     if ((*vm)->AttachCurrentThread(vm, &h.E, NULL) != JNI_OK || jhttp_init(&h)) LOG("[RED] launcher: no Java for the data's check");
     else {
         pthread_mutex_lock(&S.mu); S.deadline = 0; S.netdown = 0; pthread_mutex_unlock(&S.mu);
