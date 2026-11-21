@@ -45,25 +45,31 @@ ADAPTIVE_ICON = ('adaptive-icon', [], [('background', [(True, 'drawable', ('ref'
 GAME_MODE_ID = 0x7f020000   # xml/game_mode_config; drawable IDs stay unchanged
 GAME_MODE_CONFIG = ('game-mode-config', [(True, 'supportsPerformanceGameMode', True)], [])
 
-# (tag, [(ns_android?, name, value)], children)
-MANIFEST = ('manifest', [(False, 'package', PKG), (True, 'versionCode', ARGS.version_code), (True, 'versionName', ARGS.version_name)], [
-    ('uses-sdk', [(True, 'minSdkVersion', MIN_SDK), (True, 'targetSdkVersion', TARGET_SDK)], []),
-    ('uses-permission', [(True, 'name', 'android.permission.VIBRATE')], []),   # rumble and the touch gamepad's taps (a normal permission: granted at install)
+# (the permission, [(another android: attribute, value)]): the manifest's uses-permission elements, in order. A literal, read by porter apk-update (porter/apkupdate.py
+# permissions) with ast.literal_eval, which gives a released APK the ones it lacks: keep it a plain list of strings and ints
+PERMISSIONS = [
+    ('android.permission.VIBRATE', []),   # rumble and the touch gamepad's taps (a normal permission: granted at install)
     # Local play over the LAN (env.txt's DM_LAN=1, hle_ldn.c / hle_socket.c): sockets, the Wi-Fi address, and a multicast lock without which the Wi-Fi driver drops the broadcasts
     # other players scan with. All normal permissions (granted at install); a game with DM_LAN off opens no socket
-    ('uses-permission', [(True, 'name', 'android.permission.INTERNET')], []),
-    ('uses-permission', [(True, 'name', 'android.permission.ACCESS_NETWORK_STATE')], []),
-    ('uses-permission', [(True, 'name', 'android.permission.ACCESS_WIFI_STATE')], []),
-    ('uses-permission', [(True, 'name', 'android.permission.CHANGE_WIFI_MULTICAST_STATE')], []),
+    ('android.permission.INTERNET', []),
+    ('android.permission.ACCESS_NETWORK_STATE', []),
+    ('android.permission.ACCESS_WIFI_STATE', []),
+    ('android.permission.CHANGE_WIFI_MULTICAST_STATE', []),
     # The save's cloud sync (savecloud_android.c, a files folder with sync.txt): a partial wake lock held up to 15 s while the save goes up as the app leaves the screen
     # (sleep, HOME). A normal permission (granted at install); without sync.txt nothing takes it
-    ('uses-permission', [(True, 'name', 'android.permission.WAKE_LOCK')], []),
+    ('android.permission.WAKE_LOCK', []),
     # A RomFS read from a folder outside the app's files folder (porter install --romfs-at: a game dump another app also reads, a folder on the SD card; env.txt's DM_ROMFS):
     # All files access from Android 11 (an appop, off until porter's `appops set` or the player's switch in Settings turns it on), and on Android 10, which has no
     # All files access, READ_EXTERNAL_STORAGE in the legacy storage view (requestLegacyExternalStorage below; `pm grant`). Neither is asked for at run time, so a port
     # that reads its RomFS from its files folder runs as before; requestLegacyExternalStorage is ignored from Android 11 with this target SDK
-    ('uses-permission', [(True, 'name', 'android.permission.MANAGE_EXTERNAL_STORAGE')], []),
-    ('uses-permission', [(True, 'name', 'android.permission.READ_EXTERNAL_STORAGE'), (True, 'maxSdkVersion', 29)], []),
+    ('android.permission.MANAGE_EXTERNAL_STORAGE', []),
+    ('android.permission.READ_EXTERNAL_STORAGE', [('maxSdkVersion', 29)]),
+]
+
+# (tag, [(ns_android?, name, value)], children)
+MANIFEST = ('manifest', [(False, 'package', PKG), (True, 'versionCode', ARGS.version_code), (True, 'versionName', ARGS.version_name)], [
+    ('uses-sdk', [(True, 'minSdkVersion', MIN_SDK), (True, 'targetSdkVersion', TARGET_SDK)], []),
+    *[('uses-permission', [(True, 'name', n)] + [(True, a, v) for a, v in more], []) for n, more in PERMISSIONS],   # (PERMISSIONS above)
     ('application', [(True, 'label', LABEL)] + ([(True, 'icon', ('ref', ICON_ID))] if ARGS.icon else []) + [(True, 'hasCode', bool(ARGS.dex)), (True, 'debuggable', not ARGS.release), (True, 'isGame', True), (True, 'extractNativeLibs', True),
         (True, 'requestLegacyExternalStorage', True),
         *([(True, 'usesCleartextTraffic', True)] if ARGS.cleartext else []),   # --cleartext: the data server's http:// (front_android.c sync_fetch); off by default from target SDK 28

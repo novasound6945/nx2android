@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # axml.py: read and change an APK's binary AndroidManifest.xml (AXML, as mkapk.py writes it: one UTF-16 string pool, a resource map, the element tree), and read the signer
 # certificates of its APK Signature Scheme v2 block, with the Python standard library only. porter apk-update (porter/apkupdate.py) gives a released APK a new versionCode and
-# versionName (and its label, set_label) this way: every other byte of the manifest stays as the APK's port wrote it (the package, the label, the activity, the permissions of that port's mkapk.py).
+# versionName (and its label, set_label, and the permissions this checkout's mkapk.py asks for that it lacks, add_permissions) this way: every other byte of the manifest stays as
+# the APK's port wrote it (the package, the label, the activity, the permissions of that port's mkapk.py).
 # Usage: axml.py <app.apk>   → prints the manifest's package, versionCode, versionName, debuggable, label and the signer certificates' SHA-256 (JSON)
 import hashlib, json, struct, sys, zipfile
 
 ANDROID_NS = 'http://schemas.android.com/apk/res/android'
 T_STRING, T_INT_DEC, T_BOOL = 0x03, 0x10, 0x12
-RES_STRING_POOL, RES_XML, RES_START_ELEMENT = 0x0001, 0x0003, 0x0102
+RES_STRING_POOL, RES_XML, RES_START_ELEMENT, RES_END_ELEMENT, RES_RESOURCE_MAP = 0x0001, 0x0003, 0x0102, 0x0103, 0x0180
 
 
 def _chunks(data, start, end):   # (offset, type, header size, size) of the chunks between start and end
@@ -128,6 +129,57 @@ def set_label(data, label):
     data, idx, at = _with_string(data, m, label); out = bytearray(data)
     a = at(app['android:label'][0]); struct.pack_into('<IHBBI', out, a + 8, idx, 8, 0, T_STRING, idx)
     return bytes(out)
+
+
+def permissions(data):
+    """The android:name of each <uses-permission> of the manifest, in order"""
+    m = parse(data)
+    return [_value(m['strings'], a['android:name']) for tag, a in m['elements'] if tag == 'uses-permission' and 'android:name' in a]
+
+
+def add_permissions(data, wanted):
+    """data with a <uses-permission> for each (permission, [(android: attribute, value: str or int)]) of wanted that the manifest has not (by android:name), in wanted's
+    order, put right before <application> (after the uses-permission elements mkapk.py writes there); → (data, [the permissions added]). The same bytes when none is
+    missing. Strings the pool lacks are appended (indexes before them, the resource map's among them, do not move); each attribute's name must be one the resource
+    map has already (mkapk.py's name and maxSdkVersion are): adding one there would move every later string"""
+    m = parse(data); strings = list(m['strings'])
+    have = set(permissions(data))
+    todo = [(n, more) for n, more in wanted if n not in have]
+    if not todo: return data, []
+    hs = struct.unpack_from('<H', data, 2)[0]
+    rmap, app = None, None
+    for o, ct, chs, csize in _chunks(data, hs, len(data)):
+        if ct == RES_RESOURCE_MAP: rmap = struct.unpack_from(f'<{(csize - chs) // 4}I', data, o + chs)
+        elif ct == RES_START_ELEMENT and app is None and strings[struct.unpack_from('<I', data, o + chs + 4)[0]] == 'application': app = o
+    if app is None: raise ValueError('AXML: the manifest has no <application>')
+    if rmap is None: raise ValueError('AXML: no resource map')
+    if ANDROID_NS not in strings: raise ValueError('AXML: no android namespace in the string pool')
+    ns = strings.index(ANDROID_NS)
+    def mapped(attr):   # the pool index of the android: attribute name the resource map gives an ID; → (index, ID)
+        i = next((i for i, x in enumerate(strings[:len(rmap)]) if x == attr and rmap[i]), None)
+        if i is None: raise ValueError(f'AXML: android:{attr} is not in the resource map (adding it would move the strings after it)')
+        return i, rmap[i]
+    def s(x):
+        if x not in strings: strings.append(x)
+        return strings.index(x)
+    line = struct.unpack_from('<I', data, app + 8)[0]   # (the <application>'s line: a line number is only shown in errors)
+    tag = s('uses-permission'); els = b''
+    for n, more in todo:
+        attrs = []
+        for attr, v in [('name', n)] + list(more):
+            i, rid = mapped(attr)
+            if isinstance(v, str): raw, dt, val = s(v), T_STRING, s(v)
+            elif isinstance(v, int) and not isinstance(v, bool): raw, dt, val = 0xffffffff, T_INT_DEC, v & 0xffffffff
+            else: raise ValueError(f'{n}: android:{attr} = {v!r}: not a string or an int')
+            attrs.append((rid, struct.pack('<IIIHBBI', ns, i, raw, 8, 0, dt, val)))
+        attrs.sort(key=lambda a: a[0])   # by resource ID, as aapt2 and mkapk.py order them
+        body = struct.pack('<II', line, 0xffffffff) + struct.pack('<IIHHHHHH', 0xffffffff, tag, 20, 20, len(attrs), 0, 0, 0) + b''.join(a for _, a in attrs)
+        els += struct.pack('<HHI', RES_START_ELEMENT, 16, 8 + len(body)) + body
+        els += struct.pack('<HHI', RES_END_ELEMENT, 16, 24) + struct.pack('<IIII', line, 0xffffffff, 0xffffffff, tag)
+    po, psize = m['pool']
+    out = bytearray(data[:po] + pool_chunk(strings) + data[po + psize:app] + els + data[app:])
+    struct.pack_into('<I', out, 4, len(out))
+    return bytes(out), [n for n, _ in todo]
 
 
 def signer_certs(apk):

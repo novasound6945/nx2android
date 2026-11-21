@@ -16,6 +16,9 @@ APK = REPO / 'nxnative/dm/android/apk'
 TOOLS = REPO / 'nxnative/dm/tools'
 ATRAIN, PKG = '0100A3E010E56000', 'org.nx2a.t0100a3e010e56000'   # a profile without patches.py, version v65536 registered
 KO = 'A열차로 가자: 시작해요 관광지 개발'   # its name_ko (the Korean name in its control data)
+WAKE = 'android.permission.WAKE_LOCK'
+RELEASED = Path.home() / 'd2rm/ports/release-2026-11-21/OnePieceGrandGourmet/OnePieceGrandGourmet.apk'   # a released port (read only), when this computer has it
+AAPT2 = Path.home() / 'Library/Android/sdk/build-tools/32.1.0-rc1/aapt2'
 HAS_GIT = subprocess.run(['git', 'rev-parse', '--git-dir'], cwd=TOOLS, capture_output=True).returncode == 0
 
 
@@ -125,10 +128,11 @@ class ApkUpdate(unittest.TestCase):
         so.write_bytes(b'\x7fELF old host' * 64); dex.write_bytes(b'dex\n035\0' * 16); drv.write_bytes(b'\x7fELF driver' * 64); asset.write_text('theme\n'); icon.write_bytes(b'\x89PNG fake')
         src = self.t / 'source.bin'; src.write_bytes(publish.source_asset('https://example.invalid/pack/', 'u:p'))
         self.apk = self.t / 'ATrain.apk'
-        subprocess.run([sys.executable, str(APK / 'mkapk.py'), str(so), str(self.apk), str(paths.signing_key()), '--package', PKG, '--label', 'A-Train', '--lib', 'dmhost',
-                        '--version-code', '65542', '--version-name', '1.0.1-5', '--release', '--landscape', '--icon', str(icon), '--dex', str(dex), '--activity', 'org.nx2a.GameActivity',
-                        '--asset', f'overlay/theme.tsv={asset}', '--asset', f'nx2a/source.bin={src}', '--extra-so', str(drv)]
-                       + [a for k, f in pipeline.ui_font_assets().items() for a in ('--asset', f'{k}={f}')], check=True, capture_output=True)   # (a released APK has the overlay font)
+        self.mkapk_args = ([str(paths.signing_key()), '--package', PKG, '--label', 'A-Train', '--lib', 'dmhost',
+                            '--version-code', '65542', '--version-name', '1.0.1-5', '--release', '--landscape', '--icon', str(icon), '--dex', str(dex), '--activity', 'org.nx2a.GameActivity',
+                            '--asset', f'overlay/theme.tsv={asset}', '--asset', f'nx2a/source.bin={src}', '--extra-so', str(drv)]
+                           + [a for k, f in pipeline.ui_font_assets().items() for a in ('--asset', f'{k}={f}')])   # (a released APK has the overlay font)
+        subprocess.run([sys.executable, str(APK / 'mkapk.py'), str(so), str(self.apk)] + self.mkapk_args, check=True, capture_output=True)
         self.builds = []
         def build_host(package, title_id, debug, out, jobs=1, games_dir=None):   # build.py stood in for
             self.builds.append((title_id, debug, games_dir)); p = Path(out) / 'libdmhost.so'; p.write_bytes(b'\x7fELF new host' * 64); return p
@@ -159,6 +163,63 @@ class ApkUpdate(unittest.TestCase):
         ref = bytearray(m); struct.pack_into('<IHBBI', ref, off + 8, 0xffffffff, 8, 0, 0x01, 0x7f030000)   # @string/app_name: not one mkapk.py writes
         with self.assertRaises(ValueError) as e: axml.set_label(bytes(ref), KO)
         self.assertIn('resource reference', str(e.exception))
+
+    def old_apk(self, name='old.apk', without=(WAKE,)):   # the APK of an older mkapk.py, one that did not ask for the permissions without (a copy with them left out)
+        d = self.t / 'oldmkapk'; d.mkdir(exist_ok=True)
+        shutil.copy(APK / 'apksign.py', d)
+        src = (APK / 'mkapk.py').read_text(encoding='utf-8')
+        for p in without:
+            line = f"    ('{p}', []),\n"; self.assertIn(line, src); src = src.replace(line, '')
+        (d / 'mkapk.py').write_text(src, encoding='utf-8')
+        out = self.t / name
+        subprocess.run([sys.executable, str(d / 'mkapk.py'), str(self.t / 'libdmhost.so'), str(out)] + self.mkapk_args, check=True, capture_output=True)
+        return out
+
+    def test_manifest_permissions(self):   # a permission the APK lacks put in before <application>: the pool appended to, every other element and attribute as it was
+        want = apkupdate.permissions()
+        self.assertIn((WAKE, []), want); self.assertIn(('android.permission.READ_EXTERNAL_STORAGE', [('maxSdkVersion', 29)]), want)
+        with zipfile.ZipFile(self.apk) as z: cur = z.read('AndroidManifest.xml')
+        with zipfile.ZipFile(self.old_apk()) as z: old = z.read('AndroidManifest.xml')
+        self.assertEqual(axml.add_permissions(cur, want), (cur, []))   # this mkapk.py's: the same bytes
+        self.assertNotIn(WAKE, axml.permissions(old))
+        n, added = axml.add_permissions(old, want)
+        self.assertEqual(added, [WAKE])
+        self.assertEqual(axml.permissions(n), axml.permissions(old) + [WAKE])   # after the others
+        self.assertEqual(axml.parse(n)['strings'], axml.parse(old)['strings'] + [WAKE])   # appended: the resource map's indexes do not move
+        self.assertEqual(axml.info(n), axml.info(old))
+        el = lambda m: [(tag, {k: axml._value(axml.parse(m)['strings'], v) for k, v in a.items()}) for tag, a in axml.parse(m)['elements']]
+        eo, en = el(old), el(n); i = next(k for k, (tag, _) in enumerate(eo) if tag == 'application')
+        self.assertEqual(en, eo[:i] + [('uses-permission', {'android:name': WAKE})] + eo[i:])   # one element more, right before <application>
+        self.assertEqual(sorted(el(n), key=repr), sorted(el(cur), key=repr))   # what this mkapk.py writes, but for the order
+        self.assertEqual(axml.add_permissions(n, want), (n, []))   # once only
+        self.assertEqual(axml.info(axml.set_version(n, 65545, '1.0.1-8'))['version_name'], '1.0.1-8')   # changed further after it
+        n2, added = axml.add_permissions(old, [('org.nx2a.TEST', [('maxSdkVersion', 33)])])   # with an int attribute
+        self.assertEqual((added, el(n2)[i][1]), (['org.nx2a.TEST'], {'android:name': 'org.nx2a.TEST', 'android:maxSdkVersion': 33}))
+        with self.assertRaises(ValueError) as e: axml.add_permissions(old, [('org.nx2a.TEST', [('protectionLevel', 1)])])   # an attribute the map has not
+        self.assertIn('resource map', str(e.exception))
+
+    def test_update_adds_permissions(self):   # an APK released before WAKE_LOCK: apk-update gives it the permission, and nothing more for one that has it
+        d = make_pack(self.t / 'pack')
+        r = apkupdate.update(self.old_apk(), apkupdate.Pack(d), self.t / 'out', build=8, jobs=1)
+        self.assertEqual(r['permissions_added'], [WAKE])
+        with zipfile.ZipFile(r['apk']) as z: self.assertEqual(axml.permissions(z.read('AndroidManifest.xml'))[-1], WAKE)
+        self.assertEqual(apkupdate.update(self.apk, apkupdate.Pack(d), self.t / 'out2', build=8, jobs=1)['permissions_added'], [])   # (build 8 as the other tests: builds.json is shared)
+
+    @unittest.skipUnless(RELEASED.is_file() and AAPT2.is_file(), 'a released APK and aapt2 (the Android SDK) on this computer')
+    def test_released_manifest_permissions(self):   # a released port's manifest (read only) with WAKE_LOCK added: aapt2 reads it as Android would
+        with zipfile.ZipFile(RELEASED) as a: man = a.read('AndroidManifest.xml')
+        n, added = axml.add_permissions(man, apkupdate.permissions())
+        if WAKE in axml.permissions(man): self.skipTest(f'{RELEASED} has {WAKE} already')
+        self.assertEqual(added, [WAKE])
+        out = self.t / 'released.apk'
+        with zipfile.ZipFile(RELEASED) as a, zipfile.ZipFile(out, 'w') as b:
+            for i in a.infolist():
+                b.writestr(i, n if i.filename == 'AndroidManifest.xml' else a.read(i))
+        dump = lambda what, apk: subprocess.run([str(AAPT2), 'dump', what, str(apk)], capture_output=True, text=True, check=True).stdout
+        self.assertIn(f"uses-permission: name='{WAKE}'", dump('permissions', out))
+        before, after = dump('badging', RELEASED), dump('badging', out)
+        self.assertEqual([x for x in after.splitlines() if WAKE not in x], before.splitlines())   # the label, the version, the rest as they were
+        self.assertIn("application-label:", after)
 
     def test_mkapk_korean_label(self):   # mkapk.py's pool: the label's length in UTF-16 units
         out = self.t / 'ko.apk'

@@ -2,7 +2,8 @@
 # The data pack (mods/, RomFS, shaders.dmsv, ...) stays on the server as it is; the APK keeps every entry it has (the package, the icon, the gamepad theme, the
 # font, the data server's address nx2a/source.bin, the Vulkan driver and its hooks, classes.dex), and gets libdmhost.so built from this checkout's profile, a new versionCode and
 # versionName (the game's version and the build number: 1.0.1-8) in its manifest, and the profile's Korean name (game.tsv name_ko) as its label when it has another
-# (the launcher's name and the start screen's; axml.py: the rest of the manifest's bytes kept), signed again with the player's key, which must
+# (the launcher's name and the start screen's; axml.py: the rest of the manifest's bytes kept), the permissions this checkout's mkapk.py asks for that it lacks (permissions:
+# WAKE_LOCK, which an APK released before the save's cloud upload has not), signed again with the player's key, which must
 # be the APK's signer (it installs over the released app and keeps its saves). Nothing is uploaded or installed.
 # The pack must fit the new host (judge):
 #   - the rewritten code's contract (dm/host/rewrite_abi.h): a pack's REWRITE_ABI (nx2a-data.json rewrite_abi, each fixups table's # REWRITE_ABI) must be this checkout's. A pack
@@ -15,7 +16,7 @@
 #   - the patch files (sdk_patches.py, the games' patches.py): the cuts and observation gates this checkout gives each module's build are compared with its .cuts.tsv / .obs.tsv.
 #     A difference does not refuse (it is not the contract: the pack keeps the code it was rewritten with), it is reported: a port again takes the new patches.
 # --check prints the judgment only (no APK, no build): "same", "different" or "unknown" with its reasons; the update refuses all but "same".
-import base64, hashlib, json, os, re, shutil, subprocess, sys, tempfile, urllib.error, urllib.parse, urllib.request, zipfile
+import ast, base64, hashlib, json, os, re, shutil, subprocess, sys, tempfile, urllib.error, urllib.parse, urllib.request, zipfile
 from pathlib import Path
 
 from porter import datapack, host, paths, publish
@@ -337,9 +338,18 @@ def profile_label(title_id):   # the profile's Korean name of the game (game.tsv
     return game.load(title_id).get('name_ko', '') or ''
 
 
+def permissions():
+    """[(permission, [(android: attribute, value)])] mkapk.py gives a new port (its PERMISSIONS literal, read without running mkapk.py, which parses its arguments when
+    imported): the list apk-update gives a released APK the missing ones of"""
+    src = DM / 'android/apk/mkapk.py'
+    for n in ast.parse(src.read_text(encoding='utf-8')).body:
+        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'PERMISSIONS' for t in n.targets): return [(p, list(more)) for p, more in ast.literal_eval(n.value)]
+    raise BuildError(f'{src}: no PERMISSIONS list')
+
+
 def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None):
     """apk (a released port's APK file) with this checkout's host and build number build, judged against its data pack pack, written into the folder out (with a new
-    nx2a-data.json and files.json when the profile's hash changed). → {'apk', 'package', 'version_code', 'version_name', 'host', 'data_files', 'judgment'}"""
+    nx2a-data.json and files.json when the profile's hash changed). → {'apk', 'package', 'version_code', 'version_name', 'label', 'old', 'host', 'permissions_added', 'data_files', 'judgment'}"""
     from porter import pipeline
     apk, out = Path(apk), Path(out)
     old = axml.apk_info(apk)
@@ -371,6 +381,9 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
     if want and want != label:   # the profile's Korean name (name_ko): the launcher's label and the start screen's name (it reads the label)
         try: manifest = axml.set_label(manifest, want); say(f'label: {old["label"]!r} → {want!r} (the profile\'s name_ko)'); label = want
         except ValueError as e: say(f'label: {old["label"]!r} kept, not the profile\'s name_ko {want!r}: {e}')
+    want_perms = permissions()   # a permission a later mkapk.py asks for (WAKE_LOCK: the save's cloud upload as the app leaves the screen), for an APK released before it
+    manifest, added = axml.add_permissions(manifest, want_perms)
+    if added: say(f'permissions added (this checkout\'s mkapk.py asks for them): {", ".join(added)}')
     fonts = {n: f for n, f in pipeline.ui_font_assets().items() if f'assets/{n}' not in have}   # the overlay's font, for an APK released before it came; the APK's own is kept
     icon = host.start_icon_asset(apk, cache, pipeline.start_icon)   # the start screen's icon, for an APK released before it came: from its launcher icon
     if icon: fonts[icon[1].split('=', 1)[0]] = icon[1].split('=', 1)[1]
@@ -381,6 +394,8 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
     new = axml.apk_info(tmp)
     if (new['package'], new['version_code'], new['version_name'], new['signers'], new['label']) != (old['package'], code, name, old['signers'], label if label is not None else old['label']):
         tmp.unlink(); raise BuildError(f'the APK written does not read back as {old["package"]} {code} ({name}) labelled {label!r} with the same signer')
+    with zipfile.ZipFile(tmp) as z: missing = [p for p, _ in want_perms if p not in axml.permissions(z.read('AndroidManifest.xml'))]
+    if missing: tmp.unlink(); raise BuildError(f'the APK written lacks the permissions {", ".join(missing)}')
     os.replace(tmp, dst)
     pipeline.build_number(old['package'], offset)   # remembered: the next port or update counts on from it
     say(f'{dst}: {old["version_name"]} ({old["version_code"]}) → {name} ({code}), host {so.stat().st_size / 2**20:.1f} MB, signer {old["signers"][0][:16]}…')
@@ -398,4 +413,4 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
         say(f'the host was built from the derived profile {derived_dir(r["title_id"])}; its header is {cache / "gen" / r["title_id"] / "game_profile.h"}: a later update on another '
             f'computer needs it (--profile-header)')
     return {'apk': str(dst), 'package': old['package'], 'version_code': code, 'version_name': name, 'label': new['label'], 'old': {k: old[k] for k in ('version_code', 'version_name', 'label')},
-            'host': so.stat().st_size, 'data_files': written, 'judgment': {k: v for k, v in r.items() if k != 'manifest'}}
+            'host': so.stat().st_size, 'permissions_added': added, 'data_files': written, 'judgment': {k: v for k, v in r.items() if k != 'manifest'}}
