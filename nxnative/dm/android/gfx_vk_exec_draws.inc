@@ -215,8 +215,12 @@ static int prepare_draw(int prim, int indexed) {
     k.raster_discard = S.rast_discard; k.alt = (uint32_t)g_spv_alt; k.gs_split = (uint32_t)g_gs_split_mode; k.cull = g_no_cull ? 0 : S.poly.cull;
     // counter-clockwise front faces in Vulkan's framebuffer: Vulkan's clip space has y down, Metal's up (nvn_mtl.m: CCW when (front == CCW) != lower left), and the
     // lower-left origin mode flips the viewport again, so CCW when (front == CCW) == lower left. Taken as given, upper-left games (NEO) culled their ground and walls
-    // the lower-left term is the queue's raster origin (g_queue_ll), as nvn_mtl.m's winding upstream: the same as the device's unless the queue was made before a change
-    k.front = g_front_ovr == 0 || g_front_ovr == 1 ? (uint32_t)g_front_ovr : (((S.poly.front == NVN_FRONT_FACE_CCW) == (g_queue_ll != 0)) != (g_flipy != 0)) ^ (g_front_ovr == 2);
+    // the lower-left term is the queue's raster origin (g_queue_ll), as nvn_mtl.m's winding upstream: the same as the device's unless the queue was made before a change.
+    // DM_VK_FRONT=2 inverts the rule as it was when every =2 setting was tuned, by the device's origin (g_lower_left; nvn_mtl.m's Metal winding still is): Disgaea 4
+    // Return makes its queue before it switches the device to upper left, so the queue's term alone gives its floors' winding, and =2 over it culled them again (the lava
+    // under the hub showed through, from the merge that brought the queue's term in). Where both origins agree (Burnout Paradise, NFS Hot Pursuit) nothing changes
+    { int ll = g_front_ovr == 2 ? g_lower_left != 0 : g_queue_ll != 0;
+      k.front = g_front_ovr == 0 || g_front_ovr == 1 ? (uint32_t)g_front_ovr : (((S.poly.front == NVN_FRONT_FACE_CCW) == ll) != (g_flipy != 0)) ^ (g_front_ovr == 2); }
     static int plog = -1; if (plog < 0) plog = getenv("DM_VK_PIPE_LOG") ? atoi(getenv("DM_VK_PIPE_LOG")) > 0 : 0;   // the polygon-state lines come with DM_VK_PIPE_LOG: unset costs one branch per draw
     if (plog) { static int n; if (n < 16) { static int seen[16]; int b = (S.poly.cull & 3) << 2 | (S.poly.front & 1) << 1 | (g_queue_ll != 0); if (!seen[b]) { seen[b] = 1; n++;
         VKLOG("polygon state: cull %d, front %d, lower-left origin %d (queue %d), flipy %d → Vulkan cull %u front %u (DM_VK_FRONT=%d, DM_VK_NOCULL=%d)",

@@ -276,7 +276,7 @@ DM_VK_DRIVER	str		porter	start	gfx_vk_core.c	the Vulkan driver library in the AP
 DM_VK_DYN_UBO	bool		profile	start	gfx_vk_shader.c	no dynamic uniform-buffer offsets (descriptor reuse drops)
 DM_VK_FDZ	bool	1	profile	live	gfx_vk_exec.c	no fragment-depth variants: draws that test a depth buffer a fragment shader wrote through `gl_FragDepth` (in the last two presents) normally get a variant of their fragment shader that writes `gl_FragDepth = gl_FragCoord.z`, the same depth tested after the shader, out of Adreno's early culling, whi
 DM_VK_FLIPY	bool		debug	live	gfx_vk_exec.c	the old clip-space y convention (pictures flip)
-DM_VK_FRONT	int		profile	start	gfx_vk_exec.c	2`
+DM_VK_FRONT	int		profile	start	gfx_vk_exec.c	the Vulkan front face for every draw: 0 clockwise, 1 counter-clockwise; 2 inverts the winding rule by the device's window origin (not the queue's; Disgaea 4 Return, Burnout Paradise)
 DM_VK_FRONT_INVERT	bool		profile	?	gfx_vk_exec.c	the name DM_VK_FRONT=2 had in data packs made before (Disgaea 4 Return's)
 DM_VK_FS_NOKILL	hex		profile	start	gfx_vk_shader.c	pixel shader keys whose discards are left out (comma-separated)
 DM_VK_GPL	str		profile	start	gfx_vk_core.c gfx_vk_gpl.inc	graphics pipeline libraries (VK_EXT_graphics_pipeline_library); 0 = off

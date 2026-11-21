@@ -3,7 +3,9 @@
 # Two fixes in the core brought it up: nvnTextureBuilderGetSparseTileLayout (the game sizes a buffer from the tile shape; the stub crashed its pool allocator
 # when the opening movie ended) and SDK 7.4's DeviceSink command ID 0x10 (the first menu sound crashed the audio render thread).
 # The map's floor panels are drawn with back faces culled and came out culled with the winding as given: the lava sea under the hub showed through the floor.
-# With the winding inverted every floor draws and culling stays on (25 of ~100 map draws cull back). Why this game differs from the other upper-left games is not known
+# With the winding inverted every floor draws and culling stays on (25 of ~100 map draws cull back).
+# Why: the game makes its NVN queue while the device is still lower left, then switches to upper left. Upstream's winding by the queue's origin (66e5ea3f) gets
+# that right by itself, and =2 over it culled the floors again; =2 now inverts the device-origin rule it was tuned against (gfx_vk_exec_draws.inc), the same answer
 # Upstream's DM_VK_FRONT=2 is the same switch, so the row now uses that name (the old name, DM_VK_FRONT_INVERT=1, still works as an alias)
 env	DM_VK_FRONT=2
 # Retroid Pocket 6, 2026-11-15 (Turnip T30): title, new game, the opening, the hub at 60 fps (GPU 2.2 ms, frame p95 16.9 ms, no drops); battles not checked yet
