@@ -12,7 +12,7 @@ enum { STV_WAIT, STV_RUN, STV_DONE, STV_SKIP, STV_FAIL };   // a step's state
 enum { STV_DATA, STV_SHADERS, STV_CLOUD, STV_NSTEPS };
 typedef struct { int state; char name[48], note[96]; } stv_step;
 // ---- the launcher (Launcher.dc.html, LauncherWide.dc.html) and its two pages (CloudSettings.dc.html, AppSettings.dc.html) ----
-enum { STV_SCREEN_STEPS, STV_SCREEN_LAUNCHER, STV_SCREEN_CLOUD, STV_SCREEN_APP };
+enum { STV_SCREEN_STEPS, STV_SCREEN_LAUNCHER, STV_SCREEN_CLOUD, STV_SCREEN_APP, STV_SCREEN_LINK };   // LINK: the device link's page (LinkCode / LinkDone.dc.html)
 enum { STV_COL_INK, STV_COL_GOOD, STV_COL_WARN, STV_COL_DIM };   // a value's colour
 typedef struct { int state; char text[96]; } stv_status;          // a line of the launcher's top: its icon (STV_DONE a check, STV_RUN a spinner, STV_SKIP a dash, ...) and its words
 typedef struct {
@@ -29,7 +29,10 @@ typedef struct {
     int nrow; char key[4][32], val[4][96]; int col[4];      // the state's card: a name, its value (STV_COL_*)
     char up[48], up_note[64]; int up_off;                   // Upload now, the words at its right; up_off: nothing to send (or it cannot be now)
     char back[48], back_note[64]; int back_off, hold;       // Back to the cloud save (held 1.5 s): hold 0..1000 of it held so far
-    char keys[96]; int sel;              // sel: 0..2 the modes, 3 Upload now, 4 Back to the cloud save
+    int link;                            // 0: no link button; 1 not linked: Link this device at the top of the right column (no Upload now, no Back to the cloud save);
+                                         // 2 linked: Unlink this app under the card
+    char lbtn[48], lnote[96]; int larm;  // that button's name and the words at its right; larm: pressed once, the next press unlinks
+    char keys[96]; int sel;              // sel: 0..2 the modes, 3 Upload now, 4 Back to the cloud save, 5 the link's button
 } stv_cloudpage;
 typedef struct {
     char title[48], label[2][32];        // the page's title; its two small titles (Start, Game data)
@@ -38,6 +41,18 @@ typedef struct {
     char verify[48], clear[48]; int verify_off, clear_off;  // Check the data again, Clear the shader cache
     char note[200], keys[96]; int sel;   // the line under the buttons; sel: 0 the switch, 1 verify, 2 clear
 } stv_apppage;
+// the device link's page: BUSY a code is asked for (a spinner); CODE the QR code, the address, the code and the time left (LinkCode.dc.html); EXPIRED the same, the code
+// faded and run out; FAIL no code (the server not reached, asked too often); DONE linked (LinkDone.dc.html: a check, the device's name, Continue)
+enum { STV_LINK_BUSY, STV_LINK_CODE, STV_LINK_EXPIRED, STV_LINK_FAIL, STV_LINK_DONE };
+typedef struct {
+    int state;
+    char title[96], line[160];           // the title; BUSY, FAIL, DONE: the line under it
+    char qr[400];                        // the QR code's text
+    char step1[128], host[128], step2[128], code[24], status[128];   // CODE, EXPIRED: the two steps (the address, the code) and the line of the wait
+    int nbtn, sel; char btn[2][32];      // the buttons (sel the chosen one)
+    int nrow; char key[3][32], val[3][96]; char foot[160];          // DONE: the card of rows, the line under it
+    char keys[96];
+} stv_linkpage;
 typedef struct {
     char name[160], version[128];             // the game's name and "1.4.1 · build 1"
     const uint32_t *icon; int icon_w, icon_h; // the game's icon (RGBA); NULL: its place stays empty
@@ -50,7 +65,7 @@ typedef struct {
     const dm_cloud_view *ask;                 // a question of the cloud's start: drawn instead of the steps (NULL: none)
     int screen;                               // STV_SCREEN_*: the steps (a start without the launcher, a download), or the launcher and its pages (name, version, icon above)
     int anim;                                 // the launcher: something moves (a spinner, a held button): drawn again soon
-    stv_launcher ln; stv_cloudpage cp; stv_apppage ap;
+    stv_launcher ln; stv_cloudpage cp; stv_apppage ap; stv_linkpage lk;
 } stv_view;
 
 // The fonts: TrueType files the caller keeps until stv_release (bold NULL: the regular one for both), the pixel font pack (pixel_font.h) for code points they lack
@@ -61,7 +76,8 @@ void stv_draw(stv_canvas *c, const stv_view *v, double t);   // t: seconds, for 
 int stv_animated(const stv_view *v);   // a spinner turns: drawn again soon
 // A touch at window pixels on the question q (or on the steps' bottom line when q is not a question but has a button): the card (kind 1) or button (kind 2) under it, -1 none
 int stv_hit(const dm_cloud_view *q, int w, int h, float x, float y, int *kind);
-// A touch at window pixels on the launcher or one of its pages (v->screen): what it would choose there (stv_launcher.sel, stv_cloudpage.sel, stv_apppage.sel), -1 none
+// A touch at window pixels on the launcher or one of its pages (v->screen): what it would choose there (stv_launcher.sel, stv_cloudpage.sel, stv_apppage.sel,
+// stv_linkpage.sel), -1 none. The cloud page's rectangles depend on cp.link, the link page's on lk.state and lk.nbtn
 int stv_page_hit(const stv_view *v, int w, int h, float x, float y);
 uint32_t stv_icon_colour(const uint32_t *rgba, int w, int h);   // the icon's representative colour, made bright enough to glow (0x5B9BFF for a grey one)
 

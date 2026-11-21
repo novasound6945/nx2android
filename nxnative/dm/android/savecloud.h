@@ -59,8 +59,15 @@ typedef struct {
     uint64_t size; int64_t files;   // this device's save as its archive (files -1: not known)
     char device[64];      // this device's name (sync.txt device=)
     char result[96]; int result_bad;   // the last action's outcome ("" none)
+    int linkable;         // no sync.txt, and the device link can run (not a trial build, the app known, no check running): the page offers Link this device
+    int can_unlink;       // sync.txt is there and nothing runs: the page offers Unlink this app
 } dm_cloud_info;
 void dm_cloud_info_get(dm_cloud_info *o);
+
+// ---- the device link (savecloud_android.c: rooms' link/start and link/poll; the launcher's link page draws it from this) ----
+enum { DM_LINK_NONE, DM_LINK_BUSY, DM_LINK_CODE, DM_LINK_EXPIRED, DM_LINK_FAIL, DM_LINK_DONE };   // no page; a code asked for; shown; run out; none came; linked
+typedef struct { int state, left_s, limit; char code[16], qr[400], host[160], device[64]; } dm_cloud_link;   // left_s: the code's seconds left; limit: FAIL from a 429
+void dm_cloud_link_get(dm_cloud_link *o);
 
 #ifdef __ANDROID__
 // datasync_android.c: the screen (its EGL window picture), shown while the cloud's start runs: 1 when it runs and done() is called on the main thread once it ended
@@ -91,6 +98,11 @@ int dm_cloud_act(int what);            // DM_CLOUD_ACT_*, on a thread of its own
 int dm_cloud_play_unsynced(void);      // Play without the sync: the check that runs ends without it, one still to come is not made, a check done is not followed by uploads
 void dm_cloud_local_refresh(void);     // this device's save archived (its size and hash for the page), once, when not known yet
 void dm_launcher_start_now(int nosync);   // datasync_android.c: the player chose to play (B on a card): the launcher starts the game once the start is ready
+void dm_cloud_attach(ANativeActivity *act);   // onCreate, on the main thread: the activity, the app's names, the device's key and model (the launcher may link before the start reaches the cloud)
+int dm_cloud_link_begin(void);   // the launcher's Link this device (and New code): a code asked for on a thread of its own, then polled every 3 s; -1 when it cannot be now
+void dm_cloud_link_cancel(void); // B on the link page: the code is let go (a poll that runs is not waited for)
+void dm_cloud_link_end(void);    // Continue on Done: the page goes and, once the start has reached the cloud, its check runs (dm_cloud_act DM_CLOUD_ACT_CHECK)
+int dm_cloud_unlink(void);       // Unlink this app: sync.txt removed (the device's other games and the device stay linked on the server); 0, or -1 when it cannot be now
 #endif
 
 // the pause menu's Cloud save row (front_android.c, gfx_vk_present.c)

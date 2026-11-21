@@ -342,9 +342,48 @@ static void t_modes(void) {
     ss_fmt_when(o, sizeof o, now - 60, now, 0); CHECK(!strncmp(o, "Today ", 6) || !strncmp(o, "Yesterday ", 10), "%s", o);
 }
 
+// the device link: the key, when the start asks, link/start's and link/poll's answers, sync.txt as it writes it (0600, read back by ss_cfg_text)
+static void t_link(void) {
+    char k[65]; ss_link_key("9774d56d682e549c", k);
+    ds_sha h; ds_sha_init(&h); ds_sha_update(&h, "nx2a-savecloud:9774d56d682e549c", 31); char want[65]; ds_sha_hex(&h, want);
+    CHECK(!strcmp(k, want) && ss_hex64(k), "the key: %s", k);
+    CHECK(ss_link_auto(0, 0, 0, 1, 0) && ss_link_auto(0, 0, 0, -1, 0), "no sync.txt, online (or not known): asked");
+    CHECK(!ss_link_auto(1, 0, 0, 1, 0) && !ss_link_auto(0, 1, 0, 1, 0) && !ss_link_auto(0, 0, 1, 1, 0) && !ss_link_auto(0, 0, 0, 0, 0) && !ss_link_auto(0, 0, 0, 1, 1),
+          "sync.txt there, a trial build, this device only, no network, the data's server not reached: not asked");
+    char b[600]; CHECK(!ss_link_body(b, sizeof b, k, "Retroid Pocket Nova", "슈퍼로봇대전 \"Y\"", "com.nx2a.srwy"), "the body");
+    CHECK(strstr(b, "\"model\":\"Retroid Pocket Nova\"") && strstr(b, "\"game\":\"슈퍼로봇대전 \\\"Y\\\"\"") && strstr(b, "\"pkg\":\"com.nx2a.srwy\"") && strstr(b, k), "%s", b);
+    CHECK(ss_link_body(b, 40, k, "m", "g", "p") == -1, "a body too long is refused");
+    char m[96]; ss_link_model(m, sizeof m, "Retroid", "Retroid Pocket Nova"); CHECK(!strcmp(m, "Retroid Pocket Nova"), "%s", m);
+    ss_link_model(m, sizeof m, "samsung", "SM-S918N"); CHECK(!strcmp(m, "samsung SM-S918N"), "%s", m);
+    ss_link_model(m, sizeof m, "", ""); CHECK(!strcmp(m, "Android"), "%s", m);
+    ss_link l; const char *JA = "{\"linked\":true,\"token\":\"tok_ABC123\",\"device\":{\"id\":7,\"name\":\"Retroid Pocket Nova\"}}";
+    CHECK(ss_link_read(200, JA, strlen(JA), &l) == SS_LK_LINKED && !strcmp(l.token, "tok_ABC123") && !strcmp(l.dev_name, "Retroid Pocket Nova") && !strcmp(l.dev_id, "7"), "start: linked");
+    const char *JB = "{\"linked\":false,\"code\":\"K7Q-4MP\",\"poll\":\"p0ll\",\"expiresIn\":600,\"url\":\"https://saves.example.com/link\"}";
+    CHECK(ss_link_read(200, JB, strlen(JB), &l) == SS_LK_CODE && !strcmp(l.code, "K7Q-4MP") && !strcmp(l.poll, "p0ll") && l.expires == 600 && !strcmp(l.url, "https://saves.example.com/link"), "start: a code");
+    const char *JW = "{\"status\":\"waiting\",\"expiresIn\":512}"; CHECK(ss_link_read(200, JW, strlen(JW), &l) == SS_LK_WAITING && l.expires == 512, "poll: waiting");
+    const char *JD = "{\"status\":\"linked\",\"token\":\"t2\",\"device\":{\"id\":\"d-9\",\"name\":\"rp\\n6=x\"}}";
+    CHECK(ss_link_read(200, JD, strlen(JD), &l) == SS_LK_LINKED && !strcmp(l.token, "t2") && !strcmp(l.dev_id, "d-9") && !strcmp(l.dev_name, "rp 6 x"), "poll: linked, its name one line (%s)", l.dev_name);
+    CHECK(ss_link_read(410, "", 0, &l) == SS_LK_EXPIRED && ss_link_read(404, "{}", 2, &l) == SS_LK_EXPIRED && ss_link_read(429, "", 0, &l) == SS_LK_LIMIT, "410, 404, 429");
+    CHECK(ss_link_read(500, JA, strlen(JA), &l) == SS_LK_BAD && ss_link_read(200, "{", 1, &l) == SS_LK_BAD && ss_link_read(200, "nope", 4, &l) == SS_LK_BAD, "a 5xx, a broken body");
+    const char *JE = "{\"linked\":true,\"token\":\"bad token\"}"; CHECK(ss_link_read(200, JE, strlen(JE), &l) == SS_LK_BAD, "a token that cannot be a header");
+    const char *JF = "{\"linked\":true}"; CHECK(ss_link_read(200, JF, strlen(JF), &l) == SS_LK_BAD, "linked without a token");
+    char q[400]; ss_link_qr(q, sizeof q, "https://saves.example.com/link", "K7Q-4MP"); CHECK(!strcmp(q, "https://saves.example.com/link?code=K7Q-4MP"), "%s", q);
+    ss_link_host(q, sizeof q, "https://saves.example.com/link/"); CHECK(!strcmp(q, "saves.example.com/link"), "%s", q);
+    char p[1024]; path(p, sizeof p, "sync.txt"); unlink(p);
+    CHECK(!ss_link_write(p, SS_LINK_URL, "tok_ABC123", "Retroid Pocket Nova"), "sync.txt written");
+    struct stat st; CHECK(!stat(p, &st) && (st.st_mode & 0777) == 0600, "sync.txt is 0600 (%o)", st.st_mode & 0777);
+    size_t n = 0; char *txt = ds_read(p, &n, 1 << 16); ss_cfg c;
+    CHECK(txt && ss_cfg_text(txt, &c) && !strcmp(c.url, SS_LINK_URL) && !strcmp(c.token, "tok_ABC123") && !strcmp(c.device, "Retroid Pocket Nova"), "sync.txt reads back as the sync's");
+    free(txt);
+    CHECK(ss_link_write(p, "ftp://x", "t", "d") == -1 && ss_link_write(p, SS_LINK_URL, "", "d") == -1, "no address or no token: not written");
+    txt = ds_read(p, &n, 1 << 16); CHECK(txt && strstr(txt, "tok_ABC123"), "a refused write leaves the file as it was"); free(txt);
+    CHECK(!ss_link_write(p, SS_LINK_URL, "t3", ""), "again"); txt = ds_read(p, &n, 1 << 16); CHECK(txt && ss_cfg_text(txt, &c) && !strcmp(c.device, "android"), "no name: android"); free(txt);
+    char nw[1100]; snprintf(nw, sizeof nw, "%s.new", p); CHECK(stat(nw, &st) != 0, "no .new left");
+}
+
 int main(void) {
     snprintf(g_tmp, sizeof g_tmp, "%s/t_savesync.%d", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid()); ss_rm_tree(g_tmp); mkdir(g_tmp, 0755);
-    t_tar(); t_files(); t_decide(); t_ingame(); t_modes();
+    t_tar(); t_files(); t_decide(); t_ingame(); t_modes(); t_link();
     ss_rm_tree(g_tmp);
     printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
     return fails != 0;

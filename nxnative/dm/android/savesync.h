@@ -14,6 +14,7 @@
 #pragma once
 #include "datasync.h"   // ds_sha (SHA-256), the small JSON reader (ds_str, ds_skip, ds_u64), ds_rel_ok, ds_mkdirs
 #include <fcntl.h>
+#include <strings.h>   // strncasecmp (ss_link_model)
 #include <time.h>
 
 #define SS_MAX_BODY (64u << 20)    // the server's limit for a body, and the app's for a tar it makes or reads
@@ -515,6 +516,124 @@ static void ss_qenc(char *o, size_t n, const char *s) {
         if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') o[k++] = (char)c;
         else k += (size_t)snprintf(o + k, n - k, "%%%02X", c); }
     o[k] = 0;
+}
+
+// ---- the device link: sync.txt from the server (rooms: POST /api/saves/link/start, GET /api/saves/link/poll) instead of a file pushed by hand ----
+// The device's key is hex(sha256("nx2a-savecloud:" + ANDROID_ID)): Android 8 on gives every app signed with the same key the same ANDROID_ID, so all the ported games on a
+// device send the same key and the server links them together (the first game linked by a code, the others by link/start's linked:true at their next start). start's
+// answer: {linked:true, token, device:{id,name}} or {linked:false, code, poll, expiresIn, url}; 429 too often. poll's: {status:"waiting", expiresIn} or {status:"linked",
+// token, device}; 410 the code ran out, 404 not known. The token becomes sync.txt as an adb push would write it (url=, token=, device=), mode 0600
+#define SS_LINK_URL "https://saves.example.com"   // the server when env.txt has no DM_SAVESYNC_URL
+static void ss_link_key(const char *android_id, char out[65]) {
+    ds_sha s; ds_sha_init(&s); static const char pre[] = "nx2a-savecloud:";
+    ds_sha_update(&s, pre, sizeof pre - 1); ds_sha_update(&s, android_id, strlen(android_id)); ds_sha_hex(&s, out); memset(&s, 0, sizeof s);
+}
+// The start's own link (no sync.txt): only when nothing says no. trial: a trial build; mode_local: this game is this device only (its state); net: dm_net_state (0 none,
+// -1 not known: tried); data_unreached: the data's server was not reached just now (an answer from rooms is not likely either). 1: link/start is asked once
+static int ss_link_auto(int has_cfg, int trial, int mode_local, int net, int data_unreached) { return !has_cfg && !trial && !mode_local && net != 0 && !data_unreached; }
+// a JSON string's contents (no quotes): " \ and control bytes escaped; -1 when it does not fit
+static int ss_json_esc(char *o, size_t n, const char *s) {
+    size_t k = 0;
+    for (; *s; s++) { unsigned char c = (unsigned char)*s; char e[8]; int m;
+        if (c == '"' || c == '\\') m = snprintf(e, sizeof e, "\\%c", c); else if (c < 0x20) m = snprintf(e, sizeof e, "\\u%04x", c); else { e[0] = (char)c; e[1] = 0; m = 1; }
+        if (k + (size_t)m + 1 > n) return -1;
+        memcpy(o + k, e, (size_t)m); k += (size_t)m; }
+    if (k >= n) return -1;
+    o[k] = 0; return 0;
+}
+static int ss_link_body(char *o, size_t n, const char *key, const char *model, const char *game, const char *pkg) {   // link/start's body; -1 too long
+    char m[200], g[400], p[600];
+    if (ss_json_esc(m, sizeof m, model) || ss_json_esc(g, sizeof g, game) || ss_json_esc(p, sizeof p, pkg)) return -1;
+    int r = snprintf(o, n, "{\"key\":\"%s\",\"model\":\"%s\",\"game\":\"%s\",\"pkg\":\"%s\"}", key, m, g, p);
+    return r > 0 && (size_t)r < n ? 0 : -1;
+}
+// "Retroid" + "Retroid Pocket Nova" as "Retroid Pocket Nova"; "samsung" + "SM-S918N" as "samsung SM-S918N"; neither: "Android"
+static void ss_link_model(char *o, size_t n, const char *manuf, const char *model) {
+    size_t ml = strlen(manuf);
+    if (!model[0]) snprintf(o, n, "%s", manuf[0] ? manuf : "Android");
+    else if (!ml || !strncasecmp(model, manuf, ml)) snprintf(o, n, "%s", model);
+    else snprintf(o, n, "%s %s", manuf, model);
+}
+// what an answer of either request says (http: its status, body its JSON)
+enum { SS_LK_BAD,       // anything else (a 5xx, a body that cannot be read): tried again later
+       SS_LK_LINKED,    // a token: sync.txt can be written (token, dev_name)
+       SS_LK_CODE,      // start: a code to show (code, poll, expires, url)
+       SS_LK_WAITING,   // poll: not yet (expires)
+       SS_LK_EXPIRED,   // poll: 410, or 404 (the server forgot it): a new code
+       SS_LK_LIMIT };   // start: 429, asked too often
+typedef struct { char token[512], dev_id[64], dev_name[64], code[16], poll[128], url[256], status[16]; int linked; int64_t expires; } ss_link;
+static int ss_link_dev(ds_js *j, ss_link *l) {   // device: {id, name}
+    char key[32]; ds_ws(j); if (j->p >= j->e || *j->p++ != '{') return -1;
+    ds_ws(j); if (j->p < j->e && *j->p == '}') { j->p++; return 0; }
+    for (;;) {
+        if (ds_str(j, key, sizeof key)) return -1;
+        ds_ws(j); if (j->p >= j->e || *j->p++ != ':') return -1; ds_ws(j);
+        int s = j->p < j->e && *j->p == '"';
+        if (!strcmp(key, "name") && s) { if (ds_str(j, l->dev_name, sizeof l->dev_name)) return -1; }
+        else if (!strcmp(key, "id") && s) { if (ds_str(j, l->dev_id, sizeof l->dev_id)) return -1; }
+        else if (!strcmp(key, "id")) { uint64_t v; if (ds_u64(j, &v)) { if (ds_skip(j, 2)) return -1; } else snprintf(l->dev_id, sizeof l->dev_id, "%llu", (unsigned long long)v); }
+        else if (ds_skip(j, 2)) return -1;
+        ds_ws(j); if (j->p >= j->e) return -1;
+        if (*j->p == ',') { j->p++; continue; }
+        return *j->p++ == '}' ? 0 : -1;
+    }
+}
+static int ss_link_read(int http, const char *t, size_t n, ss_link *l) {
+    memset(l, 0, sizeof *l);
+    if (http == 429) return SS_LK_LIMIT;
+    if (http == 410 || http == 404) return SS_LK_EXPIRED;
+    if (http != 200 || !t) return SS_LK_BAD;
+    ds_js j = {t, t + n}; char key[32];
+    ds_ws(&j); if (j.p >= j.e || *j.p++ != '{') return SS_LK_BAD;
+    ds_ws(&j); if (j.p < j.e && *j.p == '}') return SS_LK_BAD;
+    for (;;) {
+        if (ds_str(&j, key, sizeof key)) return SS_LK_BAD;
+        ds_ws(&j); if (j.p >= j.e || *j.p++ != ':') return SS_LK_BAD; ds_ws(&j);
+        int s = j.p < j.e && *j.p == '"';
+        if (!strcmp(key, "linked")) { if (j.e - j.p >= 4 && !memcmp(j.p, "true", 4)) l->linked = 1; if (ds_skip(&j, 1)) return SS_LK_BAD; }
+        else if (!strcmp(key, "token") && s) { if (ds_str(&j, l->token, sizeof l->token)) return SS_LK_BAD; }
+        else if (!strcmp(key, "code") && s) { if (ds_str(&j, l->code, sizeof l->code)) return SS_LK_BAD; }
+        else if (!strcmp(key, "poll") && s) { if (ds_str(&j, l->poll, sizeof l->poll)) return SS_LK_BAD; }
+        else if (!strcmp(key, "url") && s) { if (ds_str(&j, l->url, sizeof l->url)) return SS_LK_BAD; }
+        else if (!strcmp(key, "status") && s) { if (ds_str(&j, l->status, sizeof l->status)) return SS_LK_BAD; }
+        else if (!strcmp(key, "expiresIn")) { uint64_t v; if (ds_u64(&j, &v)) { if (ds_skip(&j, 1)) return SS_LK_BAD; } else l->expires = (int64_t)v; }
+        else if (!strcmp(key, "device")) { if (j.p < j.e && *j.p == '{') { if (ss_link_dev(&j, l)) return SS_LK_BAD; } else if (ds_skip(&j, 1)) return SS_LK_BAD; }
+        else if (ds_skip(&j, 1)) return SS_LK_BAD;
+        ds_ws(&j); if (j.p >= j.e) return SS_LK_BAD;
+        if (*j.p == ',') { j.p++; continue; }
+        if (*j.p++ != '}') return SS_LK_BAD;
+        break;
+    }
+    for (const char *q = l->token; *q; q++) if ((unsigned char)*q <= 0x20 || (unsigned char)*q >= 0x7f) { memset(l->token, 0, sizeof l->token); break; }   // (a header value)
+    for (char *q = l->dev_name; *q; q++) if ((unsigned char)*q < 0x20 || *q == '=') *q = ' ';   // (one line of sync.txt)
+    ss_trim(l->dev_name);
+    if ((l->linked || !strcmp(l->status, "linked")) && l->token[0]) return SS_LK_LINKED;
+    if (!strcmp(l->status, "waiting")) return SS_LK_WAITING;
+    if (!l->linked && !l->status[0] && l->code[0] && l->poll[0]) { if (l->expires <= 0) l->expires = 600; return SS_LK_CODE; }
+    return SS_LK_BAD;
+}
+// sync.txt as the link writes it: what ss_cfg_text reads back (-1: it would not: no http(s) address or no token)
+static int ss_link_cfg(char *o, size_t n, const char *url, const char *token, const char *device) {
+    int r = snprintf(o, n, "# the device link (savecloud_android.c): rooms' token for this device\nurl=%s\ntoken=%s\ndevice=%s\n", url, token, device[0] ? device : "android");
+    ss_cfg c; int ok = r > 0 && (size_t)r < n && ss_cfg_text(o, &c) && !strcmp(c.token, token);
+    memset(&c, 0, sizeof c); if (!ok && n) memset(o, 0, n);
+    return ok ? 0 : -1;
+}
+static int ss_link_write(const char *path, const char *url, const char *token, const char *device) {   // through <path>.new (0600) and a rename; 0 or -1 (errno)
+    char b[1400], t[1100]; if (ss_link_cfg(b, sizeof b, url, token, device)) { errno = EINVAL; return -1; }
+    snprintf(t, sizeof t, "%s.new", path); unlink(t);
+    int fd = open(t, O_WRONLY | O_CREAT | O_TRUNC, 0600), r = -1;
+    if (fd >= 0) { size_t n = strlen(b); r = write(fd, b, n) == (ssize_t)n && !fchmod(fd, 0600) && !fsync(fd) ? 0 : -1; if (close(fd)) r = -1; }
+    memset(b, 0, sizeof b);
+    if (!r && rename(t, path)) r = -1;
+    if (r) { int e = errno; unlink(t); errno = e; }
+    return r;
+}
+// the QR code's text (the server's address with the code, so the phone's page opens with it filled in) and the address as the screen writes it (no scheme)
+static void ss_link_qr(char *o, size_t n, const char *url, const char *code) { snprintf(o, n, "%s%scode=%s", url, strchr(url, '?') ? "&" : "?", code); }
+static void ss_link_host(char *o, size_t n, const char *url) {
+    const char *s = !strncmp(url, "https://", 8) ? url + 8 : !strncmp(url, "http://", 7) ? url + 7 : url; snprintf(o, n, "%s", s);
+    size_t k = strlen(o); while (k && o[k - 1] == '/') o[--k] = 0;
 }
 
 // ---- while the game runs (savecloud_android.c's upload thread): what a tick does, what an upload's answer does to the state, which corner notes show. No question is ever

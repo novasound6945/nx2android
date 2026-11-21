@@ -23,6 +23,16 @@
 #if defined(__clang__)
 #pragma clang diagnostic pop
 #endif
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wsign-compare"
+#pragma clang diagnostic ignored "-Wcast-qual"
+#pragma clang diagnostic ignored "-Wmissing-prototypes"
+#endif
+#include "../third_party/qrcodegen/qrcodegen.c"   // v1.8.0, MIT: github.com/nayuki/QR-Code-generator (the device link's QR code)
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 // ---- the design's colours and Noto Sans KR's vertical metrics (hhea: ascent 1.160 em, descent 0.288 em, a line of "normal" height 1.448 em) ----
 #define BG 0x0F1115u
@@ -570,8 +580,8 @@ static void draw_launcher(stv_canvas *c, const stv_view *v, double t) {
 #define PG_TITLE (LHN * 30 + 28)
 #define PG_FOOT (16 + LHN * 14 + 28)
 static float pg_top(box b, float content) { return fmaxf(32, (b.H - PG_FOOT - content) / 2); }   // centred above the keys' line
-typedef struct { float x0, cw, lw, y0, top, mh, note_y, rx, rw, card_y, card_h, r[5][4]; int note_n; } clay;   // r: the modes (0..2), Upload now (3), Back to the cloud
-// save (4); cw the page's width, lw the modes' (the mock-up's 1040 and 520: narrower where the window is, the modes giving first); note_n: the note's lines
+typedef struct { float x0, cw, lw, y0, top, mh, note_y, rx, rw, card_y, card_h, r[6][4]; int note_n; } clay;   // r: the modes (0..2), Upload now (3), Back to the cloud
+// save (4), the link's button (5; a rectangle 0 wide when there is none); cw the page's width, lw the modes' (the mock-up's 1040 and 520: narrower where the window is, the modes giving first); note_n: the note's lines
 static float cp_mh(void) { return 44 + LHN * 19 + 4 + LHN * 14; }
 static float cp_content(int note_n) { return PG_TITLE + LHN * 14 + 14 + 3 * cp_mh() + 2 * 12 + 16 + note_n * 1.5f * 13; }   // the left column, the taller
 static box cp_box(int w, int h) { return box_need(w, h, 880 + 64, 32 + cp_content(2) + PG_FOOT); }
@@ -585,7 +595,12 @@ static clay cp_layout(const stv_cloudpage *p, box b) {
     L.note_y = y + 3 * L.mh + 2 * 12 + 16;
     L.rx = L.x0 + L.lw + 40; L.card_y = y; int n = p->nrow < 0 ? 0 : p->nrow > 4 ? 4 : p->nrow;
     L.card_h = 40 + n * LHN * 15 + (n > 1 ? (n - 1) * 12 : 0);
+    if (p->link == 1) {   // not linked: Link this device above the card, nothing under it
+        L.r[5][0] = L.rx; L.r[5][1] = y; L.r[5][2] = L.rw; L.r[5][3] = 64; L.card_y = y + 64 + 12;
+        return L;
+    }
     float uy = L.card_y + L.card_h + 12;
+    if (p->link == 2) { L.r[5][0] = L.rx; L.r[5][1] = uy; L.r[5][2] = L.rw; L.r[5][3] = 48; uy += 48 + 12; }   // linked: Unlink this app under the card (its account row)
     L.r[3][0] = L.rx; L.r[3][1] = uy; L.r[3][2] = L.rw; L.r[3][3] = 56;
     L.r[4][0] = L.rx; L.r[4][1] = uy + 56 + 12; L.r[4][2] = L.rw; L.r[4][3] = 56;
     return L;
@@ -617,6 +632,20 @@ static void draw_cloudpage(stv_canvas *c, const stv_view *v) {
     if (p->note[0]) para(c, p->note, L.x0 * s, L.note_y * s, L.lw * s, 13 * s, 1.5f * 13 * s, DIM2, LEFT, L.note_n);
     line(c, p->label[1], L.rx * s, L.top * s, 0, 0, 14 * s, DIM, LEFT, L.rw * s, 0);
     kv_card(c, s, L.rx, L.card_y, L.rw, L.card_h, p->nrow > 4 ? 4 : p->nrow, p->key, p->val, p->col, 24);
+    const float *lb = L.r[5]; int lsel = p->sel == 5;
+    if (p->link == 1) {   // Link this device: the accent's fill (as Start), its name dark and bold, the words at its right; chosen: the soft ring
+        if (lsel) halo(c, s, lb, 14, ACC, 0.18f);
+        rrect(c, lb[0] * s, lb[1] * s, lb[2] * s, lb[3] * s, 14 * s, ACC, 1);
+        float w = line(c, p->lbtn, (lb[0] + 24) * s, lb[1] * s, lb[3] * s, 1, 17 * s, BG, LEFT, (lb[2] - 48) * 0.6f * s, 0) / s;
+        line(c, p->lnote, (lb[0] + lb[2] - 24) * s, lb[1] * s, lb[3] * s, 0, 13 * s, 0x1E2633u, RIGHT, (lb[2] - 48 - w - 16) * s, 0);
+        if (p->keys[0]) foot_at(c, p->keys, b, 28, 14);
+        return;
+    }
+    if (p->link == 2) {   // Unlink this app: a plain button; pressed once, red (the next press unlinks)
+        if (p->larm) edged(c, s, lb, 14, 2, RED_HOLD, RED_BG); else if (lsel) edged(c, s, lb, 14, 2, ACC, CARD_SEL); else rrect(c, lb[0] * s, lb[1] * s, lb[2] * s, lb[3] * s, 14 * s, BTN, 1);
+        float w = line(c, p->lbtn, (lb[0] + 24) * s, lb[1] * s, lb[3] * s, 0, 16 * s, p->larm ? RED_INK : INK, LEFT, (lb[2] - 48) * 0.45f * s, 0) / s;
+        line(c, p->lnote, (lb[0] + lb[2] - 24) * s, lb[1] * s, lb[3] * s, 0, 13 * s, p->larm ? RED_DIM : DIM, RIGHT, (lb[2] - 48 - w - 16) * s, 0);
+    }
     const float *u = L.r[3];   // Upload now
     if (p->sel == 3) edged(c, s, u, 14, 2, ACC, CARD_SEL); else rrect(c, u[0] * s, u[1] * s, u[2] * s, u[3] * s, 14 * s, BTN, 1);
     float uw = line(c, p->up, (u[0] + 24) * s, u[1] * s, u[3] * s, 0, 16 * s, p->up_off ? DIM2 : INK, LEFT, (u[2] - 48) * 0.6f * s, 0) / s;
@@ -679,12 +708,88 @@ static void draw_apppage(stv_canvas *c, const stv_view *v) {
     if (p->note[0]) para(c, p->note, L.note_x * s, L.note_y * s, L.note_w * s, 13 * s, 1.5f * 13 * s, DIM2, LEFT, 2);
     if (p->keys[0]) foot_at(c, p->keys, b, 28, 14);
 }
+// ---- the device link's page (LinkCode / LinkDone.dc.html): the rectangles in design px from fixed sizes only, as the other pages ----
+typedef struct { float y_title, y_main, y_btn, qx, rx, rw, y_disc, y_card, card_h, y_foot; } klay;
+static float lk_card_h(const stv_linkpage *p) { int n = p->nrow > 3 ? 3 : p->nrow; return n ? 48 + n * LHN * 16 + (n - 1) * 14 : 0; }
+static klay lk_layout(const stv_linkpage *p, box b) {
+    klay L; memset(&L, 0, sizeof L);
+    if (p->state == STV_LINK_CODE || p->state == STV_LINK_EXPIRED) {   // the title, 40, the QR code (260) and its column 64 apart, 40, the buttons (56)
+        float total = LHN * 30 + 40 + 260 + 40 + 56, y = q_top(b, total, 28 + LHN * 14 + 12);
+        L.rw = fminf(520, b.W - 64 - 260 - 64); L.qx = (b.W - 260 - 64 - L.rw) / 2; L.rx = L.qx + 260 + 64;
+        L.y_title = y; L.y_main = y + LHN * 30 + 40; L.y_btn = L.y_main + 260 + 40;
+    } else if (p->state == STV_LINK_DONE) {   // the check (80), 32, the title and its line, 32, the card (560), 32, the line, 32, Continue (60)
+        L.card_h = lk_card_h(p); float th = LHN * 30 + 12 + LHN * 17, fh = p->foot[0] ? LHN * 14 + 32 : 0;
+        float total = 80 + 32 + th + 32 + (L.card_h ? L.card_h + 32 : 0) + fh + 60, y = q_top(b, total, 28 + LHN * 14 + 12);
+        L.y_disc = y; y += 80 + 32; L.y_title = y; y += th + 32; L.y_card = y; if (L.card_h) y += L.card_h + 32; L.y_foot = y; y += fh; L.y_btn = y;
+    } else {   // BUSY, FAIL: the icon (56), 32, the title and its line, 40, the buttons
+        float th = LHN * 30 + (p->line[0] ? 12 + LHN * 16 : 0), total = 56 + 32 + th + 40 + 56, y = q_top(b, total, 28 + LHN * 14 + 12);
+        L.y_disc = y; L.y_title = y + 56 + 32; L.y_btn = L.y_title + th + 40;
+    }
+    return L;
+}
+static int lk_buttons(const stv_linkpage *p, box b, float r[2][4]) {   // the buttons (260 wide, 20 apart, centred): their count
+    klay L = lk_layout(p, b); int n = p->nbtn < 0 ? 0 : p->nbtn > 2 ? 2 : p->nbtn; float h = p->state == STV_LINK_DONE ? 60 : 56, tw = n * 260 + (n > 1 ? 20 : 0);
+    for (int i = 0; i < n; i++) { r[i][0] = b.W / 2 - tw / 2 + i * 280; r[i][1] = L.y_btn; r[i][2] = 260; r[i][3] = h; }
+    return n;
+}
+static void fill_px(stv_canvas *c, int x, int y, int w, int h, uint32_t rgb, float alpha) {   // whole pixels (the QR code's modules: sharp, no smoothing)
+    int a = (int)(alpha * 255 + 0.5f);
+    for (int j = y < 0 ? 0 : y; j < y + h && j < c->h; j++) for (int i = x < 0 ? 0 : x; i < x + w && i < c->w; i++) blend(c->px + (size_t)j * c->w + i, rgb, a);
+}
+// the QR code of text in a white square (x, y, size pixels, radius rad): black modules a whole number of pixels each, 4 modules of white around them at least; faded:
+// the modules light grey (a code run out). 0 when the text does not fit a version 10 code
+static int qr_draw(stv_canvas *c, const char *text, float x, float y, float size, float rad, int faded) {
+    static uint8_t tmp[qrcodegen_BUFFER_LEN_FOR_VERSION(10)], qr[qrcodegen_BUFFER_LEN_FOR_VERSION(10)];
+    rrect(c, x, y, size, size, rad, 0xFFFFFFu, 1);
+    if (!text[0] || !qrcodegen_encodeText(text, tmp, qr, qrcodegen_Ecc_MEDIUM, 1, 10, qrcodegen_Mask_AUTO, true)) return 0;
+    int n = qrcodegen_getSize(qr), m = (int)floorf((size - 0.6f * rad) / (n + 8)); if (m < 1) m = 1;   // (the white's round corners keep off the 4 modules' square)
+    int x0 = (int)lroundf(x + (size - n * m) / 2), y0 = (int)lroundf(y + (size - n * m) / 2);
+    for (int j = 0; j < n; j++) for (int i = 0; i < n; i++) if (qrcodegen_getModule(qr, i, j)) fill_px(c, x0 + i * m, y0 + j * m, m, m, 0x000000u, faded ? 0.18f : 1);
+    return n;
+}
+static void draw_linkpage(stv_canvas *c, const stv_view *v, double t) {
+    box b = box_of(c->w, c->h); float s = b.s, cx = b.W / 2; const stv_linkpage *p = &v->lk; klay L = lk_layout(p, b); float br[2][4]; int nb = lk_buttons(p, b, br);
+    background(c, 0, 0, 0, 0, 0, 0, 0);
+    line(c, p->title, cx * s, L.y_title * s, 0, 1, 30 * s, INK, CENTER, (b.W - 64) * s, 0);
+    if (p->state == STV_LINK_CODE || p->state == STV_LINK_EXPIRED) {
+        int ex = p->state == STV_LINK_EXPIRED; float qs = 260 * s;
+        qr_draw(c, p->qr, L.qx * s, L.y_main * s, qs, 16 * s, ex);
+        // the column: the address's step, the code's step (22 apart), the wait's line; centred against the QR code
+        float h1 = LHN * 15 + 8 + LHN * 22, h2 = LHN * 15 + 8 + LHN * 56, h3 = LHN * 15, y = L.y_main + (260 - (h1 + 22 + h2 + 22 + h3)) / 2, rw = L.rw;
+        line(c, p->step1, L.rx * s, y * s, 0, 0, 15 * s, DIM, LEFT, rw * s, 0); y += LHN * 15 + 8;
+        line(c, p->host, L.rx * s, y * s, 0, 0, 22 * s, ex ? DIM2 : ACC, LEFT, rw * s, 0); y += LHN * 22 + 22;
+        line(c, p->step2, L.rx * s, y * s, 0, 0, 15 * s, DIM, LEFT, rw * s, 0); y += LHN * 15 + 8;
+        line(c, p->code, L.rx * s, y * s, 0, 1, 56 * s, ex ? DIM2 : INK, LEFT, rw * s, 6 * s); y += LHN * 56 + 22;
+        if (ex) { icon_warn(c, L.rx * s, (y + (LHN * 15 - 18) / 2) * s, 18 * s, 2.5f); line(c, p->status, (L.rx + 28) * s, y * s, 0, 0, 15 * s, WARN, LEFT, (rw - 28) * s, 0); }
+        else { step_icon(c, STV_RUN, L.rx * s, (y + (LHN * 15 - 18) / 2) * s, 18 * s, t); line(c, p->status, (L.rx + 28) * s, y * s, 0, 0, 15 * s, DIM, LEFT, (rw - 28) * s, 0); }
+    } else if (p->state == STV_LINK_DONE) {
+        disc(c, cx * s, (L.y_disc + 40) * s, 40 * s, OK_GREEN, 0.16f); stroke(c, CHECK, 3, 0, (cx - 20) * s, (L.y_disc + 20) * s, 40 * s / 24, 2.5f, OK_GREEN, 1);
+        line(c, p->line, cx * s, (L.y_title + LHN * 30 + 12) * s, 0, 0, 17 * s, BODY, CENTER, (b.W - 64) * s, 0);
+        if (L.card_h) { float w = fminf(560, b.W - 64), x = cx - w / 2; rrect(c, x * s, L.y_card * s, w * s, L.card_h * s, 16 * s, CARD, 1);
+            for (int i = 0; i < p->nrow && i < 3; i++) { float top = L.y_card + 24 + i * (LHN * 16 + 14);
+                float kw = line(c, p->key[i], (x + 32) * s, top * s, 0, 0, 16 * s, DIM, LEFT, (w - 64) * 0.4f * s, 0) / s;
+                line(c, p->val[i], (x + w - 32) * s, top * s, 0, 0, 16 * s, INK, RIGHT, (w - 64 - kw - 16) * s, 0); } }
+        if (p->foot[0]) line(c, p->foot, cx * s, L.y_foot * s, 0, 0, 14 * s, DIM2, CENTER, (b.W - 64) * s, 0);
+    } else {
+        if (p->state == STV_LINK_BUSY) step_icon(c, STV_RUN, (cx - 28) * s, L.y_disc * s, 56 * s, t);
+        else { static const float slash[] = {4, 4, 20, 20}; float x = (cx - 28) * s, y = L.y_disc * s, k = 56 * s / 24;
+            stroke(c, CLOUD, (int)(sizeof CLOUD / sizeof *CLOUD / 2), 1, x, y, k, 1.6f, DIM, 1); stroke(c, slash, 2, 0, x, y, k, 1.6f, DIM, 1); }
+        line(c, p->line, cx * s, (L.y_title + LHN * 30 + 12) * s, 0, 0, 16 * s, DIM, CENTER, (b.W - 64) * s, 0);
+    }
+    for (int i = 0; i < nb; i++) {   // the chosen one with the accent's edge and its ring; Continue (LinkDone) bold
+        const float *r = br[i]; choice_frame(c, s, r, 14, p->sel == i);
+        line(c, p->btn[i], (r[0] + r[2] / 2) * s, r[1] * s, r[3] * s, p->state == STV_LINK_DONE, (p->state == STV_LINK_DONE ? 18 : 17) * s, INK, CENTER, (r[2] - 24) * s, 0);
+    }
+    if (p->keys[0]) foot_at(c, p->keys, b, 28, 14);
+}
 int stv_page_hit(const stv_view *v, int w, int h, float x, float y) {
     box b = v->screen == STV_SCREEN_CLOUD ? cp_box(w, h) : v->screen == STV_SCREEN_APP ? ap_box(w, h) : box_of(w, h);   // (each page's, as it is drawn)
-    float X = x / b.s, Y = y / b.s; const float *r[5]; int n = 0;
-    llay ll; clay cl; alay al;
+    if (v->screen == STV_SCREEN_LINK) b = box_of(w, h);
+    float X = x / b.s, Y = y / b.s; const float *r[6]; int n = 0;
+    llay ll; clay cl; alay al; float lr[2][4];
     if (v->screen == STV_SCREEN_LAUNCHER) { ll = ln_layout(b, wide_of(w, h)); for (int i = 0; i < 4; i++) r[n++] = ll.r[i]; }
-    else if (v->screen == STV_SCREEN_CLOUD) { cl = cp_layout(&v->cp, b); for (int i = 0; i < 5; i++) r[n++] = cl.r[i]; }
+    else if (v->screen == STV_SCREEN_CLOUD) { cl = cp_layout(&v->cp, b); for (int i = 0; i < 6; i++) r[n++] = cl.r[i]; }
+    else if (v->screen == STV_SCREEN_LINK) { int k = lk_buttons(&v->lk, b, lr); for (int i = 0; i < k; i++) r[n++] = lr[i]; }
     else if (v->screen == STV_SCREEN_APP) { al = ap_layout(b); r[n++] = al.sw; r[n++] = al.btn[0]; r[n++] = al.btn[1]; }
     for (int i = 0; i < n; i++) if (X >= r[i][0] && X < r[i][0] + r[i][2] && Y >= r[i][1] && Y < r[i][1] + r[i][3]) return i;
     return -1;
@@ -696,6 +801,7 @@ void stv_draw(stv_canvas *c, const stv_view *v, double t) {
     else if (v->screen == STV_SCREEN_LAUNCHER) draw_launcher(c, v, t);
     else if (v->screen == STV_SCREEN_CLOUD) draw_cloudpage(c, v);
     else if (v->screen == STV_SCREEN_APP) draw_apppage(c, v);
+    else if (v->screen == STV_SCREEN_LINK) draw_linkpage(c, v, t);
     else draw_steps(c, v, t);
 }
 int stv_animated(const stv_view *v) {

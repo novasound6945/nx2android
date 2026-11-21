@@ -1655,6 +1655,7 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
     // an APK ported with --data-url downloads its data first (datasync_android.c), on threads of its own; the game starts on this thread when that ends
     // the start screen (datasync_android.c), one for the data download, the shader preparation and the cloud's start: it shows only once they took 300 ms, and closes
     // (its thread, EGL, fonts and icon gone) before the game takes the window (game_run)
+    dm_cloud_attach(act);   // (savecloud_android.c: the device link's key, model and the app's names, before the launcher can ask for a link)
     dm_start_screen_open(act, g_root);
     atomic_store(&g_syncing, 1);
     if (dm_sync_begin(act, g_root, prep_late)) return;

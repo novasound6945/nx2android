@@ -3,6 +3,10 @@
 // opaque bytes: the deterministic tar of savesync.h, whose SHA-256 is the save's identity. savesync.h holds the parts that need no Android (the archive, sync.txt, the state,
 // the meta, the start's decision; dm/host/tests/t_savesync.c tests them); this file is the transport, the threads, the start screen's content and the pause menu's row.
 //
+// The device link writes sync.txt (savesync.h ss_link_*): a start without it asks rooms' link/start once (3 s at most, online, not a trial build, not this device only) with
+// the device's key (sha256 of "nx2a-savecloud:" + ANDROID_ID, the same for every game this signing key ports): another game on the device linked it already, so the
+// token comes back at once, sync.txt is written and the check goes on; else the start goes on without the sync (no code is shown at the start). The launcher's Cloud
+// save page links by hand (link_thread: a code and its QR code, polled every 3 s; dm_cloud_link_*) and unlinks this app (sync.txt removed, dm_cloud_unlink).
 // Off unless the files folder has sync.txt (url=, token=, device=: savesync.h ss_cfg): without it nothing here runs and the app is as it was. The token is never logged
 // (its first 4 characters only). A trial build (an APK without a data server, a debuggable one, env.txt's DM_SAVESYNC=off) and a game whose sync the player switched off in
 // the pause menu run without the network at all; such a run is marked offline_play in the state (saves/sync-state.txt), and the next start with the sync asks before that
@@ -46,6 +50,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <sys/system_properties.h>
 
 uint64_t dm_fs_commit_count(void);       // hle_fs.c
 const uint8_t *dm_overlay_font(void);    // overlay_theme.c
@@ -72,6 +77,8 @@ static struct {
     ss_meta meta; int meta_ok;           // the server's meta as this run's check (or a launcher's) last read it
     int lknown; char lsha[65]; uint64_t lsize; int64_t lfiles, lt;   // this device's save as its archive, before the game (the launcher's page)
     int busy, prog; char result[96]; int result_bad;   // the launcher's action (DM_CLOUD_ACT_*) and its download's progress; its outcome
+    int attached, trial_base, reached, auto_tried;     // dm_cloud_attach ran; no data server or debuggable (trial without env.txt's word); dm_cloud_begin ran; its link/start asked
+    char key[65], model[96], label[160];               // the device link's: the device's key (never logged whole), its model, the app's label
 } C = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, .mode = SS_RUN_NONE};
 static void st_save_locked(void) { if (C.state_path[0] && ss_state_save(C.state_path, &C.st)) LOG("[RED] cloud: cannot write %s (errno %d)", C.state_path, errno); }
 static void changed_locked(void) { C.ver++; }
@@ -131,8 +138,10 @@ static void jheader(JNIEnv *E, jobject C_, const char *k, char *out, size_t cap)
 static int jprop(JNIEnv *E, jobject c, const char *k, const char *v) { jstring a = (*E)->NewStringUTF(E, k), b = a ? (*E)->NewStringUTF(E, v) : NULL; if (b) (*E)->CallVoidMethod(E, c, J.mProp, a, b); return jx(E, NULL, 0) || !b ? -1 : 0; }
 // One request: method GET, PUT (body, its hash in X-Save-Sha256) or POST (no body). 0 when the server answered (r->code, its body up to cap bytes in r->body, X-Save-Seq and
 // X-Save-Sha256), -1 when it did not (r->why). deadline: monotonic ms the whole request ends by (each blocking read waits at most what is left of it)
-static int http_do(JNIEnv *E, const char *method, const char *url, const uint8_t *body, size_t n, const char *body_sha, int conn_ms, int64_t deadline, size_t cap, hres *r, hprog prog) {
-    memset(r, 0, sizeof *r); int rc = -1; jobject U = NULL, Cn = NULL, in = NULL, out = NULL; jbyteArray buf = NULL; char auth[600];
+// ctype: the body's Content-Type (NULL: application/octet-stream); auth: the token's Authorization header (the device link's requests have none)
+static int http_req(JNIEnv *E, const char *method, const char *url, const uint8_t *body, size_t n, const char *body_sha, const char *ctype, int auth, int conn_ms, int64_t deadline,
+                    size_t cap, hres *r, hprog prog) {
+    memset(r, 0, sizeof *r); int rc = -1, auth_on = auth; jobject U = NULL, Cn = NULL, in = NULL, out = NULL; jbyteArray buf = NULL; char auth_h[600];
     if ((*E)->PushLocalFrame(E, 64)) { jx(E, NULL, 0); snprintf(r->why, sizeof r->why, "no JNI frame"); return -1; }
     jstring su = (*E)->NewStringUTF(E, url); if (jx(E, r->why, sizeof r->why) || !su) goto out;
     U = (*E)->NewObject(E, J.cUrl, J.mUrl, su); if (jx(E, r->why, sizeof r->why) || !U) goto out;
@@ -141,13 +150,13 @@ static int http_do(JNIEnv *E, const char *method, const char *url, const uint8_t
     (*E)->CallVoidMethod(E, Cn, J.mConnTo, (jint)(conn_ms < left ? conn_ms : left)); (*E)->CallVoidMethod(E, Cn, J.mReadTo, (jint)(left < 10000 ? left : 10000));
     (*E)->CallVoidMethod(E, Cn, J.mCaches, JNI_FALSE); if (jx(E, r->why, sizeof r->why)) goto out;
     (*E)->CallVoidMethod(E, Cn, J.mMethod, (*E)->NewStringUTF(E, method)); if (jx(E, r->why, sizeof r->why)) goto out;
-    snprintf(auth, sizeof auth, "Bearer %s", C.cfg.token);
-    int bad = jprop(E, Cn, "Authorization", auth); memset(auth, 0, sizeof auth);
+    int bad = 0;
+    if (auth_on && C.cfg.token[0]) { snprintf(auth_h, sizeof auth_h, "Bearer %s", C.cfg.token); bad = jprop(E, Cn, "Authorization", auth_h); memset(auth_h, 0, sizeof auth_h); }
     if (bad || jprop(E, Cn, "Accept-Encoding", "identity")) { snprintf(r->why, sizeof r->why, "a request header was refused"); goto out; }
     buf = (*E)->NewByteArray(E, 256 << 10); if (jx(E, r->why, sizeof r->why) || !buf) goto out;
     if (strcmp(method, "GET")) {   // PUT and POST: a body of a known length (POST's is empty)
         if (body_sha && jprop(E, Cn, "X-Save-Sha256", body_sha)) goto out;
-        if (body && jprop(E, Cn, "Content-Type", "application/octet-stream")) goto out;
+        if (body && jprop(E, Cn, "Content-Type", ctype ? ctype : "application/octet-stream")) goto out;
         (*E)->CallVoidMethod(E, Cn, J.mDoOut, JNI_TRUE); (*E)->CallVoidMethod(E, Cn, J.mFixed, (jlong)n); if (jx(E, r->why, sizeof r->why)) goto out;
         out = (*E)->CallObjectMethod(E, Cn, J.mOut); if (jx(E, r->why, sizeof r->why) || !out) goto out;
         for (size_t o = 0; o < n;) {
@@ -188,6 +197,9 @@ out:
     else if (ss_buf_put(&r->body, "", 1) == 0) r->body.n--;   // NUL-terminated (for the JSON reader's sake), not counted
     return rc;
 }
+static int http_do(JNIEnv *E, const char *method, const char *url, const uint8_t *body, size_t n, const char *body_sha, int conn_ms, int64_t deadline, size_t cap, hres *r, hprog prog) {
+    return http_req(E, method, url, body, n, body_sha, NULL, 1, conn_ms, deadline, cap, r, prog);
+}
 
 // ---- this device's save, archived (with a commit between the start and the end of the read: read again) ----
 static int snap(ss_buf *t, char sha[65], int64_t *newest, char *err, size_t ecap) {   // 0 with the archive, 1 no save, -errno
@@ -227,6 +239,7 @@ static struct {
     dm_cloud_view v; int kind, done, quit, applying, choice, auto_ms; int64_t last_input;
     void (*done_cb)(int quit); int up_after;
     int active, recheck;   // a check runs (its view and input are the screen's); recheck: one the launcher asked for (no done_cb: the launcher goes on)
+    int autolink;          // the start's link/start runs (no sync.txt yet): B waits for it (3 s at most)
 } W;
 void dm_cloud_view_get(dm_cloud_view *v) { pthread_mutex_lock(&C.mu); *v = W.v; if (!W.active) { v->ask = 0; v->urgent = 0; } pthread_mutex_unlock(&C.mu); }
 static void up_start(void);
@@ -529,10 +542,14 @@ static void start_check(JNIEnv *E, int recheck) {
         break;
     }
 }
+static int autolink(JNIEnv *E);
+static void link_none(void);
 static void *start_thread(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "cloudstart");
     JNIEnv *E = jattach();
-    if (!E) { LOG("[RED] cloud: no Java for the sync: this run plays without it"); finish(0, 1, 0); return NULL; }
+    pthread_mutex_lock(&C.mu); int al = W.autolink; pthread_mutex_unlock(&C.mu);
+    if (!E) { LOG("[RED] cloud: no Java for the sync: this run plays without it"); if (al) link_none(); else finish(0, 1, 0); return NULL; }
+    if (al) { int r = autolink(E); if (r <= 0) { if (!r) link_none(); (*C.vm)->DetachCurrentThread(C.vm); return NULL; } }
     start_check(E, 0);
     (*C.vm)->DetachCurrentThread(C.vm);
     return NULL;
@@ -542,7 +559,7 @@ static void *start_thread(void *a) {
 // plays without the sync; a touch chooses what it lifts on. The volume keys stay the system's
 static void input_choose(int i) {
     pthread_mutex_lock(&C.mu);
-    if (W.done || W.applying) { pthread_mutex_unlock(&C.mu); return; }
+    if (W.done || W.applying || W.autolink) { pthread_mutex_unlock(&C.mu); return; }
     int n = W.v.ncards ? W.v.ncards : W.v.nbtn;
     if (i < 0 || i >= n) { pthread_mutex_unlock(&C.mu); return; }
     W.v.sel = i; W.v.ver++; W.last_input = now_ms();
@@ -555,7 +572,7 @@ static void input_move(int d) {
     W.last_input = now_ms(); pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke();
 }
 static void input_back(void) {
-    pthread_mutex_lock(&C.mu); int ok = !W.done && !W.applying; if (ok) finish_locked(0, 1); pthread_mutex_unlock(&C.mu);
+    pthread_mutex_lock(&C.mu); int ok = !W.done && !W.applying && !W.autolink; if (ok) finish_locked(0, 1); pthread_mutex_unlock(&C.mu);
     if (ok) skipped_end();
 }
 // The question's layout decides B: a list's is its last button (Keep it), a pair's its second (B · Keep it), else play without the sync; a pair's A is its first
@@ -821,29 +838,83 @@ static void app_info(ANativeActivity *act, int *debuggable) {   // the package's
     jfieldID fV = pi && !jx(E, NULL, 0) ? (*E)->GetFieldID(E, (*E)->GetObjectClass(E, pi), "versionName", "Ljava/lang/String;") : NULL;
     jstring vn = fV && !jx(E, NULL, 0) ? (*E)->GetObjectField(E, pi, fV) : NULL;
     const char *u = vn && !jx(E, NULL, 0) ? (*E)->GetStringUTFChars(E, vn, NULL) : NULL; if (u) { snprintf(C.build, sizeof C.build, "%s", u); (*E)->ReleaseStringUTFChars(E, vn, u); }
+    jx(E, NULL, 0);
+    jmethodID mL = ai && pm ? (*E)->GetMethodID(E, (*E)->GetObjectClass(E, ai), "loadLabel", "(Landroid/content/pm/PackageManager;)Ljava/lang/CharSequence;") : NULL;   // the app's label (the link's game)
+    jobject cs = mL && !jx(E, NULL, 0) ? (*E)->CallObjectMethod(E, ai, mL, pm) : NULL;
+    jmethodID mS = cs && !jx(E, NULL, 0) ? (*E)->GetMethodID(E, (*E)->GetObjectClass(E, cs), "toString", "()Ljava/lang/String;") : NULL;
+    if (mS && !jx(E, NULL, 0)) jstr(E, cs, mS, C.label, sizeof C.label);
     jx(E, NULL, 0); (*E)->PopLocalFrame(E, NULL);
 }
-int dm_cloud_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(int quit)) {
-    const char *root = getenv("DM_ROOT"); char p[700]; size_t n = 0;
-    if (!root) return 0;
-    snprintf(p, sizeof p, "%s/sync.txt", root); char *txt = ds_read(p, &n, 1 << 16);
-    if (!txt) return 0;   // no sync.txt: as before the sync existed
-    int on = ss_cfg_text(txt, &C.cfg); memset(txt, 0, n); free(txt);
-    if (!on) { LOG("[RED] cloud: %s has no url= (http:// or https://) and token=: the sync is off", p); return 0; }
+// Settings.Secure.getString(getContentResolver(), "android_id") through JNI (framework classes only: an APK without a dex of its own has them too); 0 with the ID in out
+static int android_id(JNIEnv *E, jobject act, char *out, size_t cap) {
+    out[0] = 0; if ((*E)->PushLocalFrame(E, 16)) { jx(E, NULL, 0); return -1; }
+    jclass cA = (*E)->GetObjectClass(E, act); jmethodID mR = cA ? (*E)->GetMethodID(E, cA, "getContentResolver", "()Landroid/content/ContentResolver;") : NULL;
+    jobject cr = mR && !jx(E, NULL, 0) ? (*E)->CallObjectMethod(E, act, mR) : NULL;
+    jclass cS = cr && !jx(E, NULL, 0) ? (*E)->FindClass(E, "android/provider/Settings$Secure") : NULL;
+    jmethodID mG = cS && !jx(E, NULL, 0) ? (*E)->GetStaticMethodID(E, cS, "getString", "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;") : NULL;
+    jstring k = mG && !jx(E, NULL, 0) ? (*E)->NewStringUTF(E, "android_id") : NULL;
+    jstring v = k ? (*E)->CallStaticObjectMethod(E, cS, mG, cr, k) : NULL;
+    const char *u = v && !jx(E, NULL, 0) ? (*E)->GetStringUTFChars(E, v, NULL) : NULL; if (u) { snprintf(out, cap, "%s", u); (*E)->ReleaseStringUTFChars(E, v, u); }
+    jx(E, NULL, 0); (*E)->PopLocalFrame(E, NULL);
+    return out[0] ? 0 : -1;
+}
+void dm_cloud_attach(ANativeActivity *act) {
+    if (C.attached) return;
     C.vm = act->vm; C.act = act->clazz;
     int dbg = 0; app_info(act, &dbg);
     AAsset *as = act->assetManager ? AAssetManager_open(act->assetManager, "nx2a/source.bin", AASSET_MODE_UNKNOWN) : NULL; if (as) AAsset_close(as);
-    const char *env = getenv("DM_SAVESYNC"); int env_off = env && (!strcmp(env, "off") || !strcmp(env, "0"));
-    C.trial = !as || dbg || env_off;
-    const char *gv = getenv("DM_GAME_VERSION"); snprintf(C.gver, sizeof C.gver, "%s", gv ? gv : "");
+    char id[128] = "", mf[PROP_VALUE_MAX] = "", md[PROP_VALUE_MAX] = "";
+    int have_id = !android_id(act->env, act->clazz, id, sizeof id);
+    __system_property_get("ro.product.manufacturer", mf); __system_property_get("ro.product.model", md);
+    pthread_mutex_lock(&C.mu);
+    C.trial_base = !as || dbg; if (have_id) ss_link_key(id, C.key); else C.key[0] = 0;
+    ss_link_model(C.model, sizeof C.model, mf, md); if (!C.label[0]) snprintf(C.label, sizeof C.label, "%s", C.pkg);
+    C.attached = 1; pthread_mutex_unlock(&C.mu);
+    memset(id, 0, sizeof id);
+    if (!have_id) LOG("[RED] cloud: the device's ANDROID_ID cannot be read: no device link on this device");
+    else LOG("cloud: device link key %.6s... (%s, %s)", C.key, C.model, C.trial_base ? "a trial build: no link" : "the link can run");
+}
+// sync.txt read into C.cfg, with the state it goes with (C.mu held): 1 when the sync is on. The start's (dm_cloud_begin) or, after it, a link's (link_done)
+static int cfg_load_locked(void) {
+    const char *root = getenv("DM_ROOT"); char p[700]; size_t n = 0;
+    if (!root) return 0;
+    snprintf(p, sizeof p, "%s/sync.txt", root); char *txt = ds_read(p, &n, 1 << 16);
+    if (!txt) return 0;   // no sync.txt: as before the sync existed (or a link to come)
+    int on = ss_cfg_text(txt, &C.cfg); memset(txt, 0, n); free(txt);
+    if (!on) { LOG("[RED] cloud: %s has no url= (http:// or https://) and token=: the sync is off", p); return 0; }
     snprintf(C.state_path, sizeof C.state_path, "%s/sync-state.txt", dm_saves_dir());
     char pk[600]; ss_qenc(pk, sizeof pk, C.pkg); snprintf(C.base, sizeof C.base, "%s/api/saves/g/%s", C.cfg.url, pk);
-    pthread_mutex_lock(&C.mu);
     ss_state_load(C.state_path, &C.st); C.began = 1;
     C.mode = ss_run_mode(1, C.trial, C.st.mode == SS_MODE_LOCAL);
     LOG("cloud: %s, device %s, token %.4s... (%s), package %s, build %s%s", C.cfg.url, C.cfg.device, C.cfg.token, C.st.have ? "state kept" : "first setup", C.pkg, C.build,
-        C.mode == SS_RUN_SYNC ? "" : C.trial ? (!as ? ": a trial build (no data server): no sync this run" : dbg ? ": a trial build (debuggable): no sync this run" : ": DM_SAVESYNC=off: no sync this run")
+        C.mode == SS_RUN_SYNC ? "" : C.trial ? (C.trial_base ? ": a trial build (no data server, or debuggable): no sync this run" : ": DM_SAVESYNC=off: no sync this run")
         : ": this device only (the game's mode)");
+    return 1;
+}
+int dm_cloud_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(int quit)) {
+    if (!getenv("DM_ROOT")) return 0;
+    dm_cloud_attach(act);
+    const char *env = getenv("DM_SAVESYNC"); int env_off = env && (!strcmp(env, "off") || !strcmp(env, "0"));
+    const char *gv = getenv("DM_GAME_VERSION"); snprintf(C.gver, sizeof C.gver, "%s", gv ? gv : "");
+    pthread_mutex_lock(&C.mu);
+    C.reached = 1; C.trial = C.trial_base || env_off;
+    if (!C.began && !cfg_load_locked()) {
+        // no sync.txt: the start's own link. Another game on this device linked it already: link/start answers with the token at once (3 s at most), sync.txt is written
+        // and the check goes on as if it had always been there. A code is not shown (the launcher's Cloud save page links by hand): the start goes on without the sync
+        ss_state st; char sp[700]; snprintf(sp, sizeof sp, "%s/sync-state.txt", dm_saves_dir()); int key = C.key[0] != 0, tried = C.auto_tried, trial = C.trial;
+        pthread_mutex_unlock(&C.mu);
+        ss_state_load(sp, &st);
+        int net = key && !tried ? dm_net_state(act->env, act->clazz) : 0, go = key && !tried && ss_link_auto(0, trial, st.mode == SS_MODE_LOCAL, net, dm_data_unreached());
+        if (!go) { if (key && !tried) LOG("cloud: no sync.txt and %s: no link asked this start", trial ? "a trial build" : st.mode == SS_MODE_LOCAL ? "this game is this device only" : net == 0 ? "no network" : "the data's server was not reached"); return 0; }
+        pthread_mutex_lock(&C.mu); C.auto_tried = 1;
+        memset(&W, 0, sizeof W); W.choice = -1; W.done_cb = done; W.active = 1; W.autolink = 1;
+        wait_locked("기기 확인 중…", "Looking for the link…"); W.v.nbtn = 0;
+        pthread_mutex_unlock(&C.mu);
+        if (!dm_cloud_screen_begin(act, w, screen_done)) { pthread_mutex_lock(&C.mu); W.done_cb = NULL; W.done = 1; W.active = 0; W.autolink = 0; pthread_mutex_unlock(&C.mu); return 0; }
+        pthread_t t;
+        if (pthread_create(&t, NULL, start_thread, NULL)) { LOG("[RED] cloud: cannot start the link thread"); link_none(); } else pthread_detach(t);
+        return 1;
+    }
     if (C.mode == SS_RUN_SUPPRESSED) {   // no network at all; the next start with the sync asks before what this run saves goes up
         ss_mark_offline_play(&C.st); st_save_locked();
         changed_locked(); pthread_mutex_unlock(&C.mu);
@@ -867,6 +938,133 @@ int dm_cloud_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(int quit
     return 1;
 }
 
+// ---- the device link: the start's (autolink: link/start once, its token only) and the launcher's (link_thread: a code, polled every 3 s, until it is linked, runs
+// out or the player goes back). The key and the token are never logged whole ----
+static struct { int state, gen, limit; char code[16], qr[400], host[160], device[64], poll[128]; int64_t until; } K;   // under C.mu; gen: the page's, a cancel moves it on
+static void link_base(char *o, size_t n) {   // the server: env.txt's DM_SAVESYNC_URL, else rooms
+    const char *e = getenv("DM_SAVESYNC_URL"); int ok = e && (!strncmp(e, "https://", 8) || !strncmp(e, "http://", 7)) && ds_url_text(e) && strlen(e) < n;
+    snprintf(o, n, "%s", ok ? e : SS_LINK_URL); size_t k = strlen(o); while (k && o[k - 1] == '/') o[--k] = 0;
+}
+static int link_start(JNIEnv *E, int conn_ms, int64_t deadline, ss_link *l, char *why, size_t wcap) {   // SS_LK_*, -1 no answer (why)
+    char base[600], u[700], body[1400];
+    pthread_mutex_lock(&C.mu); int bad = ss_link_body(body, sizeof body, C.key, C.model, C.label, C.pkg); pthread_mutex_unlock(&C.mu);
+    if (bad) { snprintf(why, wcap, "the request does not fit"); return -1; }
+    link_base(base, sizeof base); snprintf(u, sizeof u, "%s/api/saves/link/start", base);
+    hres r; int got = http_req(E, "POST", u, (const uint8_t *)body, strlen(body), NULL, "application/json", 0, conn_ms, deadline, 64 << 10, &r, NULL);
+    memset(body, 0, sizeof body);
+    if (got) { snprintf(why, wcap, "%s", r.why); return -1; }
+    int k = ss_link_read(r.code, (const char *)r.body.p, r.body.n, l); if (k == SS_LK_BAD) snprintf(why, wcap, "HTTP %d", r.code);
+    ss_buf_free(&r.body); return k;
+}
+// a token: sync.txt written (0600), and once the start has reached the cloud, read as the start reads it. 0, -1 (not written)
+static int link_take(const ss_link *l) {
+    const char *root = getenv("DM_ROOT"); char p[700], base[600]; if (!root) return -1;
+    snprintf(p, sizeof p, "%s/sync.txt", root); link_base(base, sizeof base);
+    pthread_mutex_lock(&C.mu); char dev[64]; snprintf(dev, sizeof dev, "%s", l->dev_name[0] ? l->dev_name : C.model); pthread_mutex_unlock(&C.mu);
+    if (ss_link_write(p, base, l->token, dev)) { LOG("[RED] cloud: the link's sync.txt cannot be written (errno %d)", errno); return -1; }
+    LOG("cloud: this device is linked (%s, device %s, token %.6s...): sync.txt written", base, dev, l->token);
+    pthread_mutex_lock(&C.mu);
+    if (C.reached && !C.began && cfg_load_locked() && C.mode == SS_RUN_SUPPRESSED) { ss_mark_offline_play(&C.st); st_save_locked(); }
+    changed_locked(); pthread_mutex_unlock(&C.mu);
+    return 0;
+}
+static int autolink(JNIEnv *E) {   // 1: linked, the check goes on; 0: not linked (the start goes on without the sync); -1: the start ended meanwhile
+    ss_link l; char why[200] = ""; int64_t t0 = now_ms(); int k = link_start(E, 3000, t0 + 3000, &l, why, sizeof why);
+    int took = k == SS_LK_LINKED && !link_take(&l); memset(&l, 0, sizeof l);
+    pthread_mutex_lock(&C.mu); W.autolink = 0; int d = W.done, sync = C.mode == SS_RUN_SYNC;
+    if (took && d && C.began) { C.skipped = 1; ss_mark_offline_play(&C.st); st_save_locked(); changed_locked(); }   // (the player chose to play without the sync meanwhile)
+    pthread_mutex_unlock(&C.mu);
+    if (took) LOG("cloud: link/start: linked by the device's key (%lld ms): %s", (long long)(now_ms() - t0), d ? "this run without the sync (the player's choice)" : "the check goes on");
+    else LOG("cloud: link/start: %s (%lld ms): this start goes on without the sync", k == SS_LK_CODE ? "not linked yet (the launcher's Cloud save page links it)" : k == SS_LK_LIMIT ? "asked too often (429)"
+             : k == SS_LK_LINKED ? "linked, but sync.txt could not be written" : why[0] ? why : "no answer", (long long)(now_ms() - t0));
+    if (d) return -1;
+    if (took && !sync) { pthread_mutex_lock(&C.mu); W.done = 1; W.active = 0; pthread_mutex_unlock(&C.mu); dm_start_step(STV_CLOUD, STV_SKIP, korean() ? "이 기기만" : "This device only"); dm_cloud_screen_end(); return -1; }
+    return took ? 1 : 0;
+}
+static void link_none(void) {   // the start's link found none: the start goes on without the sync (nothing is marked: no sync.txt, no sync)
+    pthread_mutex_lock(&C.mu); int was = W.done; W.done = 1; W.active = 0; W.autolink = 0; W.up_after = 0; pthread_mutex_unlock(&C.mu);
+    if (!was) dm_start_step(STV_CLOUD, STV_SKIP, korean() ? "기기 연결 필요" : "Not linked");
+    dm_cloud_screen_end(); dm_cloud_screen_poke();
+}
+static void link_state(int gen, int state, int limit) { pthread_mutex_lock(&C.mu); if (K.gen == gen) { K.state = state; K.limit = limit; } pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke(); }
+static void link_done(int gen, const ss_link *l) {
+    if (link_take(l)) { link_state(gen, DM_LINK_FAIL, 0); return; }
+    pthread_mutex_lock(&C.mu); if (K.gen == gen) { K.state = DM_LINK_DONE; snprintf(K.device, sizeof K.device, "%s", l->dev_name[0] ? l->dev_name : C.model); } pthread_mutex_unlock(&C.mu);
+    dm_cloud_screen_poke();
+}
+static void *link_thread(void *a) {
+    int gen = (int)(intptr_t)a; pthread_setname_np(pthread_self(), "cloudlink");
+    JNIEnv *E = jattach(); if (!E) { LOG("[RED] cloud: no Java for the link"); link_state(gen, DM_LINK_FAIL, 0); return NULL; }
+    ss_link l; char why[200] = "", base[600], u[900]; link_base(base, sizeof base);
+    int k = link_start(E, 5000, now_ms() + 10000, &l, why, sizeof why);
+    if (k == SS_LK_LINKED) link_done(gen, &l);
+    else if (k != SS_LK_CODE) { LOG("cloud: link/start: %s: no code", k == SS_LK_LIMIT ? "asked too often (429)" : why[0] ? why : "no answer"); link_state(gen, DM_LINK_FAIL, k == SS_LK_LIMIT); }
+    else {
+        char q[600]; ss_qenc(q, sizeof q, l.poll); snprintf(u, sizeof u, "%s/api/saves/link/poll?poll=%s", base, q);
+        pthread_mutex_lock(&C.mu);
+        if (K.gen == gen) { K.state = DM_LINK_CODE; snprintf(K.code, sizeof K.code, "%s", l.code); K.until = now_ms() + l.expires * 1000;
+            char lu[300]; snprintf(lu, sizeof lu, "%s", l.url[0] ? l.url : base); if (!l.url[0]) snprintf(lu, sizeof lu, "%s/link", base);
+            ss_link_qr(K.qr, sizeof K.qr, lu, l.code); ss_link_host(K.host, sizeof K.host, lu); }
+        pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke();
+        LOG("cloud: link/start: a code for the player, %lld s; polled every 3 s", (long long)l.expires);
+        int quiet = 0;
+        for (;;) {
+            pthread_mutex_lock(&C.mu);
+            struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 3;
+            while (K.gen == gen && K.state == DM_LINK_CODE) if (pthread_cond_timedwait(&C.cv, &C.mu, &ts)) break;
+            int alive = K.gen == gen && K.state == DM_LINK_CODE; int64_t until = K.until;
+            pthread_mutex_unlock(&C.mu);
+            if (!alive) { LOG("cloud: the link's code was let go"); break; }
+            if (now_ms() >= until) { LOG("cloud: the link's code ran out"); link_state(gen, DM_LINK_EXPIRED, 0); break; }
+            hres r; if (http_req(E, "GET", u, NULL, 0, NULL, NULL, 0, 3000, now_ms() + 5000, 64 << 10, &r, NULL)) { if (!quiet++) LOG("cloud: link/poll: no answer (%s): polled on", r.why); continue; }
+            ss_link p; int pk = ss_link_read(r.code, (const char *)r.body.p, r.body.n, &p); ss_buf_free(&r.body);
+            if (pk == SS_LK_LINKED) { link_done(gen, &p); memset(&p, 0, sizeof p); break; }
+            if (pk == SS_LK_EXPIRED) { LOG("cloud: link/poll: HTTP %d: the code is gone", r.code); link_state(gen, DM_LINK_EXPIRED, 0); break; }
+            if (pk == SS_LK_WAITING && p.expires > 0) { pthread_mutex_lock(&C.mu); if (K.gen == gen) K.until = now_ms() + p.expires * 1000; pthread_mutex_unlock(&C.mu); }
+            else if (pk != SS_LK_WAITING && !quiet++) LOG("cloud: link/poll: HTTP %d: polled on", r.code);
+        }
+    }
+    memset(&l, 0, sizeof l);
+    (*C.vm)->DetachCurrentThread(C.vm);
+    return NULL;
+}
+void dm_cloud_link_get(dm_cloud_link *o) {
+    memset(o, 0, sizeof *o); pthread_mutex_lock(&C.mu);
+    o->state = K.state; o->limit = K.limit; snprintf(o->code, sizeof o->code, "%s", K.code); snprintf(o->qr, sizeof o->qr, "%s", K.qr); snprintf(o->host, sizeof o->host, "%s", K.host);
+    snprintf(o->device, sizeof o->device, "%s", K.device); int64_t l = K.until - now_ms(); o->left_s = l > 0 ? (int)((l + 999) / 1000) : 0;
+    pthread_mutex_unlock(&C.mu);
+}
+int dm_cloud_link_begin(void) {
+    pthread_mutex_lock(&C.mu);
+    int ok = C.attached && C.vm && C.key[0] && !C.trial_base && !C.began && !W.active && K.state != DM_LINK_BUSY && K.state != DM_LINK_CODE, gen = 0;
+    if (ok) { gen = ++K.gen; K.state = DM_LINK_BUSY; K.limit = 0; K.code[0] = K.qr[0] = K.host[0] = K.device[0] = 0; K.until = 0; }
+    pthread_mutex_unlock(&C.mu);
+    if (!ok) return -1;
+    LOG("cloud: the launcher links this device (link/start)");
+    pthread_t t; if (pthread_create(&t, NULL, link_thread, (void *)(intptr_t)gen)) { link_state(gen, DM_LINK_FAIL, 0); return -1; }
+    pthread_detach(t); dm_cloud_screen_poke();
+    return 0;
+}
+void dm_cloud_link_cancel(void) { pthread_mutex_lock(&C.mu); K.gen++; K.state = DM_LINK_NONE; pthread_cond_broadcast(&C.cv); pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke(); }
+void dm_cloud_link_end(void) {
+    pthread_mutex_lock(&C.mu); int was = K.state == DM_LINK_DONE, go = was && C.began && C.mode == SS_RUN_SYNC && !C.trial; K.gen++; K.state = DM_LINK_NONE; pthread_mutex_unlock(&C.mu);
+    if (go) { LOG("cloud: linked: the check runs now"); dm_cloud_act(DM_CLOUD_ACT_CHECK); }
+    dm_cloud_screen_poke();
+}
+int dm_cloud_unlink(void) {
+    const char *root = getenv("DM_ROOT"); char p[700]; if (!root) return -1;
+    snprintf(p, sizeof p, "%s/sync.txt", root);
+    pthread_mutex_lock(&C.mu);
+    int ok = C.began && !C.trial && !C.busy && !W.active && !C.up_started;
+    if (ok && unlink(p) && errno != ENOENT) { LOG("[RED] cloud: sync.txt cannot be removed (errno %d)", errno); ok = 0; }
+    if (ok) { C.began = 0; C.mode = SS_RUN_NONE; memset(&C.cfg, 0, sizeof C.cfg); C.meta_ok = 0; C.offline = 0; C.result[0] = 0; W.up_after = 0; changed_locked(); }
+    pthread_mutex_unlock(&C.mu);
+    if (!ok) return -1;
+    LOG("cloud: the launcher unlinked this app (sync.txt removed; the device's other games stay linked)");
+    dm_start_step(STV_CLOUD, STV_SKIP, korean() ? "기기 연결 필요" : "Not linked"); dm_cloud_screen_poke();
+    return 0;
+}
+
 // ---- the launcher (datasync_android.c): its Cloud save page reads this state, and asks for a mode, Upload now, Back to the cloud save, a check again ----
 _Static_assert(SS_LOCAL_UNKNOWN == DM_CLOUD_LOCAL_UNKNOWN && SS_LOCAL_SAME == DM_CLOUD_LOCAL_SAME && SS_LOCAL_OWED == DM_CLOUD_LOCAL_OWED && SS_LOCAL_ONLY == DM_CLOUD_LOCAL_ONLY
                && SS_LOCAL_PLAYED == DM_CLOUD_LOCAL_PLAYED && SS_LOCAL_CONFLICT == DM_CLOUD_LOCAL_CONFLICT, "the launcher's This device row");
@@ -885,6 +1083,8 @@ void dm_cloud_info_get(dm_cloud_info *o) {
     o->can_upload = free_ && (o->local == SS_LOCAL_OWED || o->local == SS_LOCAL_PLAYED);
     o->can_restore = free_ && C.meta.seq != 0;
     snprintf(o->result, sizeof o->result, "%s", C.result); o->result_bad = C.result_bad;
+    o->linkable = C.attached && C.vm && C.key[0] && !C.trial_base && !C.began && !W.active;
+    o->can_unlink = C.began && !C.trial && !C.busy && !W.active && !C.up_started;
     pthread_mutex_unlock(&C.mu);
 }
 static void local_now(void) {   // this device's save archived again, for the page (before the game: nothing commits)

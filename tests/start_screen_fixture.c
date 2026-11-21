@@ -44,10 +44,13 @@ static void save(stv_canvas *c, const char *dir, const char *name) {
 // target can be chosen (sel not NULL), what changes when it is chosen (its edge, its fill, the ring 6 design px out) is where it answers a touch, give or take that ring
 static const stv_view *TV; static const dm_cloud_view *TQ;
 static int hit_at(int W, int H, float x, float y) { int k = 0; return TQ ? stv_hit(TQ, W, H, x, y, &k) : stv_page_hit(TV, W, H, x, y); }
-static void touch_check(stv_canvas *c, stv_view *v, int n, int *sel, int nsel) {
+// ids: what each target answers (NULL: 0 .. n - 1), the only answers there may be
+static void touch_check_ids(stv_canvas *c, stv_view *v, const int *ids, int n, int *sel, int nsel) {
     int W = c->w, H = c->h, bx[8][4]; assert(n <= 8);
     for (int i = 0; i < n; i++) { bx[i][0] = bx[i][1] = 1 << 30; bx[i][2] = bx[i][3] = -1; }
-    for (int y = 0; y < H; y += 2) for (int x = 0; x < W; x += 2) { int k = hit_at(W, H, x + 0.5f, y + 0.5f); if (k < 0) continue; assert(k < n);
+    for (int y = 0; y < H; y += 2) for (int x = 0; x < W; x += 2) { int h = hit_at(W, H, x + 0.5f, y + 0.5f), k = -1; if (h < 0) continue;
+        for (int i = 0; i < n; i++) if ((ids ? ids[i] : i) == h) k = i;
+        assert(k >= 0);
         if (x < bx[k][0]) bx[k][0] = x; if (y < bx[k][1]) bx[k][1] = y; if (x > bx[k][2]) bx[k][2] = x; if (y > bx[k][3]) bx[k][3] = y; }
     for (int i = 0; i < n; i++) {
         assert(bx[i][2] >= 0 && bx[i][0] > 4 && bx[i][1] > 4 && bx[i][2] < W - 4 && bx[i][3] < H - 4);
@@ -57,7 +60,7 @@ static void touch_check(stv_canvas *c, stv_view *v, int n, int *sel, int nsel) {
     float sc = (W / 1280.0f < H / 720.0f ? W / 1280.0f : H / 720.0f) * 1.3f; int keep = *sel; size_t np = (size_t)W * H;
     uint32_t *a = malloc(np * 4); assert(a);
     for (int i = 0; i < nsel; i++) {
-        *sel = -1; stv_draw(c, v, 0); memcpy(a, c->px, np * 4); *sel = i; stv_draw(c, v, 0);
+        *sel = -1; stv_draw(c, v, 0); memcpy(a, c->px, np * 4); *sel = ids ? ids[i] : i; stv_draw(c, v, 0);
         int d[4] = {1 << 30, 1 << 30, -1, -1};
         for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) if (a[(size_t)y * W + x] != c->px[(size_t)y * W + x]) {
             if (x < d[0]) d[0] = x; if (y < d[1]) d[1] = y; if (x > d[2]) d[2] = x; if (y > d[3]) d[3] = y; }
@@ -67,6 +70,21 @@ static void touch_check(stv_canvas *c, stv_view *v, int n, int *sel, int nsel) {
         assert(d[0] >= bx[i][0] - out && d[1] >= bx[i][1] - out && d[2] <= bx[i][2] + out && d[3] <= bx[i][3] + out);   // and what is drawn no wider than it and its ring
     }
     free(a); *sel = keep; stv_draw(c, v, 0);
+}
+static void touch_check(stv_canvas *c, stv_view *v, int n, int *sel, int nsel) { touch_check_ids(c, v, NULL, n, sel, nsel); }
+// the QR code is sharp: the box around its pure black pixels holds nothing but pure black and pure white, its modules are whole pixels (the finder's 7-module run on its
+// first row a multiple of 7), and 4 modules of pure white are around it
+static void qr_check(const stv_canvas *c) {
+    int x0 = c->w, y0 = c->h, x1 = -1, y1 = -1;
+    for (int y = 0; y < c->h; y++) for (int x = 0; x < c->w; x++) if ((c->px[(size_t)y * c->w + x] & 0xffffff) == 0) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    assert(x1 > x0 + 50 && y1 > y0 + 50 && x1 - x0 == y1 - y0);
+    int run = 0; while (x0 + run <= x1 && (c->px[(size_t)y0 * c->w + x0 + run] & 0xffffff) == 0) run++;
+    assert(run % 7 == 0); int m = run / 7; assert(m >= 2 && (x1 - x0 + 1) % m == 0);
+    for (int y = y0 - 4 * m; y <= y1 + 4 * m; y++) for (int x = x0 - 4 * m; x <= x1 + 4 * m; x++) {
+        uint32_t q = c->px[(size_t)y * c->w + x] & 0xffffff; int in = x >= x0 && x <= x1 && y >= y0 && y <= y1;
+        assert(q == 0xffffff || (in && q == 0));
+    }
+    printf("  QR %d modules of %d px\n", (x1 - x0 + 1) / m, m);
 }
 int main(int argc, char **argv) {
     if (argc != 7) { fprintf(stderr, "usage: start_screen_fixture regular.ttf bold.ttf font.nxpf out_dir w h\n"); return 2; }
@@ -160,6 +178,49 @@ int main(int argc, char **argv) {
     touch_check(&c, &v, 5, &cp->sel, 5);
     { stv_view e; memset(&e, 0, sizeof e); e.screen = STV_SCREEN_CLOUD; e.cp.nrow = 4;   // datasync_android.c's lnr_hit: a view with nothing but its page
       for (int y = 0; y < H; y += 7) for (int x = 0; x < W; x += 7) assert(stv_page_hit(&e, W, H, x, y) == stv_page_hit(&v, W, H, x, y)); }
+    // 21. the cloud save's page, not linked: Link this device at the top of the right column (chosen), the card under it, no Upload now / Back
+    { stv_view u = v; stv_cloudpage *up = &u.cp; u.screen = STV_SCREEN_CLOUD; up->link = 1; up->sel = 5; up->modes_off = 1; up->checked = 0; up->hold = 0;
+      snprintf(up->lbtn, sizeof up->lbtn, "기기 연결하기"); snprintf(up->lnote, sizeof up->lnote, "휴대폰으로 QR · 코드");
+      snprintf(up->note, sizeof up->note, "휴대폰으로 한 번 연결하면 이 기기의 다른 게임도 함께 연결돼요.");
+      static const char *const UV[4] = {"-", "확인 전", "6.9 MB · 파일 37개", "연결 안 됨"}; for (int i = 0; i < 4; i++) snprintf(up->val[i], sizeof up->val[i], "%s", UV[i]); up->col[1] = STV_COL_DIM;
+      stv_draw(&c, &u, 0); save(&c, argv[4], "21-cloud-unlinked");
+      TQ = NULL; TV = &u; static const int ids[4] = {5, 0, 1, 2}; touch_check_ids(&c, &u, ids, 4, &up->sel, 1);   // (the modes cannot be chosen: off)
+      stv_view e; memset(&e, 0, sizeof e); e.screen = STV_SCREEN_CLOUD; e.cp.nrow = 4; e.cp.link = 1;   // lnr_hit's view: its page and cp.link only
+      for (int y = 0; y < H; y += 7) for (int x = 0; x < W; x += 7) assert(stv_page_hit(&e, W, H, x, y) == stv_page_hit(&u, W, H, x, y));
+    // 22. linked: Unlink this app under the card (pressed once: red, the next press unlinks)
+      up->link = 2; up->sel = 5; up->modes_off = 0; snprintf(up->lbtn, sizeof up->lbtn, "이 앱 연결 끊기"); snprintf(up->lnote, sizeof up->lnote, "다른 게임과 기기 전체는 웹에서 끊을 수 있어요");
+      static const char *const LV[4] = {"nova · 오늘 오전 6:41", "클라우드와 같아요", "6.9 MB · 파일 37개", "기기 이름 Retroid Pocket Nova"}; for (int i = 0; i < 4; i++) snprintf(up->val[i], sizeof up->val[i], "%s", LV[i]); up->col[1] = STV_COL_GOOD;
+      snprintf(up->note, sizeof up->note, "이 기기만에서 다시 자동·수동으로 바꾸면, 처음 연결할 때처럼 어느 세이브로 할지 물어봐요.");
+      stv_draw(&c, &u, 0); save(&c, argv[4], "22-cloud-linked");
+      static const int ids2[6] = {0, 1, 2, 3, 4, 5}; touch_check_ids(&c, &u, ids2, 6, &up->sel, 6);
+      e.cp.link = 2; for (int y = 0; y < H; y += 7) for (int x = 0; x < W; x += 7) assert(stv_page_hit(&e, W, H, x, y) == stv_page_hit(&u, W, H, x, y));
+      up->larm = 1; snprintf(up->lnote, sizeof up->lnote, "A 한 번 더 누르면 끊어요"); stv_draw(&c, &u, 0); save(&c, argv[4], "22b-cloud-unlink-armed"); }
+    // 23. the device link: the QR code, the address, the code and the time left (LinkCode.dc.html)
+    { stv_view u; head(&u, icon, ""); u.screen = STV_SCREEN_LINK; stv_linkpage *lp = &u.lk;
+      lp->state = STV_LINK_CODE; snprintf(lp->title, sizeof lp->title, "휴대폰으로 이 기기를 연결하세요");
+      snprintf(lp->qr, sizeof lp->qr, "https://saves.example.com/link?code=K7Q-4MP"); snprintf(lp->host, sizeof lp->host, "saves.example.com/link"); snprintf(lp->code, sizeof lp->code, "K7Q-4MP");
+      snprintf(lp->step1, sizeof lp->step1, "1. 휴대폰 카메라로 QR을 찍거나, 아래 주소로 들어가요"); snprintf(lp->step2, sizeof lp->step2, "2. 카카오로 로그인하고 이 코드를 확인해요");
+      snprintf(lp->status, sizeof lp->status, "휴대폰에서 연결을 누르길 기다리는 중 · 9:42 남음"); lp->nbtn = 1; lp->sel = -1; snprintf(lp->btn[0], sizeof lp->btn[0], "취소"); snprintf(lp->keys, sizeof lp->keys, "B 취소");
+      stv_draw(&c, &u, 0.2); save(&c, argv[4], "23-link-code"); qr_check(&c);
+      TQ = NULL; TV = &u; touch_check(&c, &u, 1, &lp->sel, 1);
+      stv_view e; memset(&e, 0, sizeof e); e.screen = STV_SCREEN_LINK; e.lk.state = lp->state; e.lk.nbtn = lp->nbtn;
+      for (int y = 0; y < H; y += 7) for (int x = 0; x < W; x += 7) assert(stv_page_hit(&e, W, H, x, y) == stv_page_hit(&u, W, H, x, y));
+    // 24. the code ran out: faded, New code (A) and Cancel
+      lp->state = STV_LINK_EXPIRED; lp->nbtn = 2; lp->sel = 0; snprintf(lp->btn[0], sizeof lp->btn[0], "새 코드"); snprintf(lp->btn[1], sizeof lp->btn[1], "취소");
+      snprintf(lp->status, sizeof lp->status, "코드 시간이 지났어요 · A 새 코드"); snprintf(lp->keys, sizeof lp->keys, "← → 고르기 · A 선택 · B 취소");
+      stv_draw(&c, &u, 0); save(&c, argv[4], "24-link-expired"); touch_check(&c, &u, 2, &lp->sel, 2);
+      e.lk.state = lp->state; e.lk.nbtn = 2; for (int y = 0; y < H; y += 7) for (int x = 0; x < W; x += 7) assert(stv_page_hit(&e, W, H, x, y) == stv_page_hit(&u, W, H, x, y));
+    // 25. linked (LinkDone.dc.html): the check, the device's name, Continue
+      memset(lp, 0, sizeof *lp); lp->state = STV_LINK_DONE; snprintf(lp->title, sizeof lp->title, "연결됐어요"); snprintf(lp->line, sizeof lp->line, "이제 저장하면 클라우드에 올라가요.");
+      lp->nrow = 2; snprintf(lp->key[0], sizeof lp->key[0], "기기 이름"); snprintf(lp->val[0], sizeof lp->val[0], "Retroid Pocket Nova"); snprintf(lp->key[1], sizeof lp->key[1], "이 게임"); snprintf(lp->val[1], sizeof lp->val[1], "SUPER ROBOT WARS Y");
+      snprintf(lp->foot, sizeof lp->foot, "기기 이름은 웹 saves.example.com/saves 에서 바꾸거나 연결을 끊을 수 있어요"); lp->nbtn = 1; lp->sel = 0; snprintf(lp->btn[0], sizeof lp->btn[0], "계속");
+      stv_draw(&c, &u, 0); save(&c, argv[4], "25-link-done"); touch_check(&c, &u, 1, &lp->sel, 1);
+      e.lk.state = lp->state; e.lk.nbtn = 1; e.lk.nrow = 2; e.lk.foot[0] = 'x'; for (int y = 0; y < H; y += 7) for (int x = 0; x < W; x += 7) assert(stv_page_hit(&e, W, H, x, y) == stv_page_hit(&u, W, H, x, y));
+    // 26. no code came (the server not reached)
+      memset(lp, 0, sizeof *lp); lp->state = STV_LINK_FAIL; snprintf(lp->title, sizeof lp->title, "연결 코드를 받지 못했어요"); snprintf(lp->line, sizeof lp->line, "인터넷 연결을 확인하고 다시 해 주세요.");
+      lp->nbtn = 2; lp->sel = 0; snprintf(lp->btn[0], sizeof lp->btn[0], "다시 시도"); snprintf(lp->btn[1], sizeof lp->btn[1], "취소"); snprintf(lp->keys, sizeof lp->keys, "← → 고르기 · A 선택 · B 취소");
+      stv_draw(&c, &u, 0); save(&c, argv[4], "26-link-fail"); touch_check(&c, &u, 2, &lp->sel, 2); }
+    TV = &v;   // (the pages after these: the launcher's view again)
     // 15. the app's settings
     v.screen = STV_SCREEN_APP; stv_apppage *ap = &v.ap;
     snprintf(ap->title, sizeof ap->title, "앱 설정"); snprintf(ap->label[0], sizeof ap->label[0], "시작"); snprintf(ap->label[1], sizeof ap->label[1], "게임 데이터");

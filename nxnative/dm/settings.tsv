@@ -220,6 +220,7 @@ DM_RUMBLE_GAIN	float		debug,ios	?	haptics_apple.m
 DM_RUMBLE_LOG	str		debug	?	hle_hid.c	Count input values before deduplicating motors, including partially routed batches.
 DM_SAVE	str		app	?	saves_android.c nvn_mtl.m hle_fs.c	the save folder (the Android front end sets it)
 DM_SAVESYNC	str		profile	start	savecloud_android.c	off or 0: no cloud save sync this run (sync.txt is kept; the run is marked as played without the sync)
+DM_SAVESYNC_URL	str		debug	start	savecloud_android.c	the server the device link asks (link/start, link/poll) and writes into sync.txt, an http:// or https:// address (default https://saves.example.com): a test server
 DM_SCREEN_MATCH	str		debug,ios	?	front_mac.m	
 DM_SF_TRACE	str		debug	?	hle_sf.c	
 DM_SHAKE_G	float		debug	start	front_android.c DmGamepad.m	how hard (in G beyond gravity, 1.5 by default) the device must be shaken for the controller's six-axis sensor to be shaken (`DM_BTN_SHAKE`, `host/hle_hid.c`; Super Mario Odyssey's cap throw). Each detected shake logs `front end: device shaken (peak … G)`; `ctl.txt` `Shake~0.4` shakes it without the 

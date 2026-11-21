@@ -13,7 +13,7 @@ NOTO = DM / 'third_party/noto-sans-kr'
 PIXEL = DM / 'third_party/fusion-pixel-font/fusion-pixel-12px-proportional-zh_tw.nxpf'
 SCREENS = ('1-main', '2-download', '3-conflict', '4-offline', '5-other-device', '6-need-network', '7-offline-shaders', '12-launcher', '13-launcher-waiting', '14-cloud-settings',
            '15-app-settings', '16-after-test', '17-manual-pending', '18-launcher-long-name', '19-launcher-korean-name',
-           '20-launcher-two-line-name')
+           '20-launcher-two-line-name', '21-cloud-unlinked', '22-cloud-linked', '22b-cloud-unlink-armed', '23-link-code', '24-link-expired', '25-link-done', '26-link-fail')
 
 
 class StartScreen(unittest.TestCase):

@@ -238,7 +238,8 @@ static struct {
 } V;   // under S.mu
 // the launcher (its code at the end of this file), under S.mu
 typedef struct {
-    int on, quick, page, sel[3];              // shown (not start at once, or − pressed); the setting; the page (0 the launcher, 1 Cloud save, 2 App settings), each page's choice
+    int on, quick, page, sel[4];              // shown (not start at once, or − pressed); the setting; the page (0 the launcher, 1 Cloud save, 2 App settings, 3 the device link), each page's choice
+    int64_t unarm;                            // Unlink this app pressed once: the next press until then unlinks
     int want, nosync, gate, gpipe[2];         // Start pressed (without the sync); the start is ready and waits for it (front_android.c's go, called through gpipe)
     void (*go)(void);
     int holding, hold_touch; int64_t hold_t0, hint_until;   // Back to the cloud save held (by the finger); "hold it" shown until
@@ -301,9 +302,40 @@ typedef struct { int phase, status, wait_s, wait_tot, need_net, pd, pt; ds_progr
 // the launcher's picture: its statuses, items and pages from the start's state (x), the launcher's (x->ln) and the cloud's (ci)
 static void fmt_gb(char *o, size_t n, uint64_t b) { if (b >= 1024ull << 20) snprintf(o, n, "%.1f GB", b / 1073741824.0); else snprintf(o, n, "%.0f MB", b / 1048576.0); }
 static void st_set(stv_status *s, int state, const char *t) { s->state = state; snprintf(s->text, sizeof s->text, "%s", t); }
+// the Cloud save page's link button (stv_cloudpage.link): 1 Link this device (no sync.txt and the link can run), 2 Unlink this app (linked, not a trial build), 0 none
+static int cp_link_of(const dm_cloud_info *ci) { return !ci->avail ? (ci->linkable ? 1 : 0) : !ci->trial ? 2 : 0; }
+// the link page from the link's state (savecloud.h dm_cloud_link): its layout's part (state, buttons) too, which lnr_hit needs without the words
+static void lk_fill(stv_linkpage *p, const dm_cloud_link *k, const char *game, int sel) {
+    int ko = korean(); memset(p, 0, sizeof *p);
+    p->state = k->state == DM_LINK_CODE ? STV_LINK_CODE : k->state == DM_LINK_EXPIRED ? STV_LINK_EXPIRED : k->state == DM_LINK_FAIL ? STV_LINK_FAIL : k->state == DM_LINK_DONE ? STV_LINK_DONE : STV_LINK_BUSY;
+    int two = p->state == STV_LINK_EXPIRED || p->state == STV_LINK_FAIL; p->nbtn = two ? 2 : 1; p->sel = two ? (sel == 1 ? 1 : 0) : p->state == STV_LINK_DONE ? 0 : -1;
+    if (p->state == STV_LINK_DONE) {
+        snprintf(p->title, sizeof p->title, "%s", L("연결됐어요", "Linked")); snprintf(p->line, sizeof p->line, "%s", L("이제 저장하면 클라우드에 올라가요.", "From now on each save goes up to the cloud."));
+        p->nrow = 2; snprintf(p->key[0], sizeof p->key[0], "%s", L("기기 이름", "Device name")); snprintf(p->val[0], sizeof p->val[0], "%s", k->device);
+        snprintf(p->key[1], sizeof p->key[1], "%s", L("이 게임", "This game")); snprintf(p->val[1], sizeof p->val[1], "%s", game);
+        char site[160]; snprintf(site, sizeof site, "%s", k->host[0] ? k->host : "saves.example.com"); char *sl = strchr(site, '/'); if (sl) *sl = 0;
+        snprintf(p->foot, sizeof p->foot, ko ? "기기 이름은 웹 %s/saves 에서 바꾸거나 연결을 끊을 수 있어요" : "The device's name can be changed, or the link ended, at %s/saves", site);
+        snprintf(p->btn[0], sizeof p->btn[0], "%s", L("계속", "Continue"));   // (no keys line: the one button is chosen, and the page is tall)
+        return;
+    }
+    snprintf(p->title, sizeof p->title, "%s", p->state == STV_LINK_FAIL ? L("연결 코드를 받지 못했어요", "No link code came") : L("휴대폰으로 이 기기를 연결하세요", "Link this device with your phone"));
+    if (p->state == STV_LINK_BUSY) snprintf(p->line, sizeof p->line, "%s", L("코드를 받는 중…", "Getting a code…"));
+    if (p->state == STV_LINK_FAIL) snprintf(p->line, sizeof p->line, "%s", k->limit ? L("너무 자주 요청했어요. 잠시 뒤에 다시 해 주세요.", "Asked too often. Try again in a while.") : L("인터넷 연결을 확인하고 다시 해 주세요.", "Check the internet connection and try again."));
+    if (two) { snprintf(p->btn[0], sizeof p->btn[0], "%s", p->state == STV_LINK_FAIL ? L("다시 시도", "Retry") : L("새 코드", "New code")); snprintf(p->btn[1], sizeof p->btn[1], "%s", L("취소", "Cancel"));
+               snprintf(p->keys, sizeof p->keys, "%s", L("← → 고르기 · A 선택 · B 취소", "← → choose · A select · B cancel")); }
+    else { snprintf(p->btn[0], sizeof p->btn[0], "%s", L("취소", "Cancel")); snprintf(p->keys, sizeof p->keys, "%s", L("B 취소", "B cancel")); }
+    if (p->state == STV_LINK_CODE || p->state == STV_LINK_EXPIRED) {
+        snprintf(p->qr, sizeof p->qr, "%s", k->qr); snprintf(p->host, sizeof p->host, "%s", k->host); snprintf(p->code, sizeof p->code, "%s", k->code);
+        snprintf(p->step1, sizeof p->step1, "%s", L("1. 휴대폰 카메라로 QR을 찍거나, 아래 주소로 들어가요", "1. Scan the QR code with the phone's camera, or open this address"));
+        snprintf(p->step2, sizeof p->step2, "%s", L("2. 카카오로 로그인하고 이 코드를 확인해요", "2. Sign in with Kakao and confirm this code"));
+        if (p->state == STV_LINK_EXPIRED) snprintf(p->status, sizeof p->status, "%s", L("코드 시간이 지났어요 · A 새 코드", "The code ran out · A new code"));
+        else snprintf(p->status, sizeof p->status, ko ? "휴대폰에서 연결을 누르길 기다리는 중 · %d:%02d 남음" : "Waiting for Link on the phone · %d:%02d left", k->left_s / 60, k->left_s % 60);
+    }
+}
 static void build_launcher(stv_view *v, const snap_t *x, const stv_step *steps, const dm_cloud_info *ci) {
     const lnr_t *n = &x->ln; int ko = korean(); int64_t now = (int64_t)time(NULL), mono = now_ms(); char t[200], a[64], b[64];
-    v->screen = n->page == 1 ? STV_SCREEN_CLOUD : n->page == 2 ? STV_SCREEN_APP : STV_SCREEN_LAUNCHER;
+    v->screen = n->page == 1 ? STV_SCREEN_CLOUD : n->page == 2 ? STV_SCREEN_APP : n->page == 3 ? STV_SCREEN_LINK : STV_SCREEN_LAUNCHER;
+    if (v->screen == STV_SCREEN_LINK) { dm_cloud_link k; dm_cloud_link_get(&k); lk_fill(&v->lk, &k, V.name, n->sel[3]); v->anim = k.state == DM_LINK_BUSY || k.state == DM_LINK_CODE; return; }
     // the three statuses
     stv_launcher *l = &v->ln; stv_status *s = l->status;
     if (n->vrun) { int p = n->vpr.total ? (int)(n->vpr.done * 100 / n->vpr.total) : 0;
@@ -353,7 +385,9 @@ static void build_launcher(stv_view *v, const snap_t *x, const stv_step *steps, 
                           *const DEN[3] = {"Each save goes up, and when the game closes", "You decide when it goes up; the start asks", "Nothing down or up: this device's save only, for tests"};
         for (int i = 0; i < 3; i++) { snprintf(p->mode[i], sizeof p->mode[i], "%s", ko ? MKO[i] : MEN[i]); snprintf(p->desc[i], sizeof p->desc[i], "%s", ko ? DKO[i] : DEN[i]); }
         p->checked = ci->mode; p->modes_off = !ci->avail || ci->trial || ci->act || ci->checking;
-        snprintf(p->note, sizeof p->note, "%s", !ci->avail ? (steps[STV_CLOUD].state == STV_SKIP ? L("이 기기는 클라우드 세이브에 연결되지 않았어요 (sync.txt 없음).", "This device is not linked to the cloud save (no sync.txt).")
+        p->link = cp_link_of(ci);
+        snprintf(p->note, sizeof p->note, "%s", p->link == 1 ? L("휴대폰으로 한 번 연결하면 이 기기의 다른 게임도 함께 연결돼요.", "Linked once with a phone, this device's other games are linked too.")
+                 : !ci->avail ? (steps[STV_CLOUD].state == STV_SKIP ? L("이 기기는 클라우드 세이브에 연결되지 않았어요.", "This device is not linked to the cloud save.")
                                                                      : L("시작 준비가 끝나면 바꿀 수 있어요.", "It can be changed once the start is ready."))
                  : ci->trial ? L("시험판이라 이 기기 세이브로만 해요. 바꿀 수 없어요.", "A trial build keeps this device's save only. It cannot be changed.")
                  : ci->act || ci->checking ? L("확인하는 중이에요. 끝나면 바꿀 수 있어요.", "Checking. It can be changed once done.")
@@ -382,8 +416,12 @@ static void build_launcher(stv_view *v, const snap_t *x, const stv_step *steps, 
         else snprintf(p->back_note, sizeof p->back_note, "%s", ci->can_restore ? L("A 길게 · 이 기기 세이브는 백업 1칸에", "Hold A · this device's save to the backup slot") : !ci->avail || ci->mode == 2 || ci->trial ? L("쓸 수 없어요", "Not available")
                       : !ci->online ? L("연결 안 됨", "Not connected") : L("클라우드에 세이브 없음", "None in the cloud"));
         p->hold = n->holding ? (int)((mono - n->hold_t0) * 1000 / 1500) : 0;
+        if (p->link == 1) { snprintf(p->lbtn, sizeof p->lbtn, "%s", L("기기 연결하기", "Link this device")); snprintf(p->lnote, sizeof p->lnote, "%s", L("휴대폰으로 QR · 코드", "QR · code on a phone")); }
+        else if (p->link == 2) { p->larm = n->unarm > mono && ci->can_unlink; snprintf(p->lbtn, sizeof p->lbtn, "%s", L("이 앱 연결 끊기", "Unlink this app"));
+            snprintf(p->lnote, sizeof p->lnote, "%s", p->larm ? L("A 한 번 더 누르면 끊어요", "A again to unlink") : !ci->can_unlink ? L("확인이 끝나면 할 수 있어요", "Once the check is done")
+                     : L("다른 게임과 기기 전체는 웹에서 끊을 수 있어요", "Other games and the whole device: on the web")); }
         snprintf(p->keys, sizeof p->keys, "%s", L("↑↓←→ 고르기 · A 선택 · B 돌아가기", "↑↓←→ choose · A select · B back")); p->sel = n->sel[1];
-        v->anim = n->holding || ci->act || ci->checking || n->hint_until > mono;
+        v->anim = n->holding || ci->act || ci->checking || n->hint_until > mono || n->unarm > mono;
     } else {
         stv_apppage *p = &v->ap;
         snprintf(p->title, sizeof p->title, "%s", L("앱 설정", "App settings")); snprintf(p->label[0], sizeof p->label[0], "%s", L("시작", "Start")); snprintf(p->label[1], sizeof p->label[1], "%s", L("게임 데이터", "Game data"));
@@ -960,16 +998,23 @@ enum { K_UP, K_DOWN, K_LEFT, K_RIGHT, K_A, K_B };
 static void lnr_activate(int page, int sel, int touch) {   // A (or a touch) on the page's sel
     dm_cloud_info ci; dm_cloud_info_get(&ci);
     pthread_mutex_lock(&S.mu);
-    int act = 0;   // what runs once the lock is let go: 1 play without the sync, 2 a mode, 3 Upload now, 4 verify, 5 shader cache
+    int act = 0;   // what runs once the lock is let go: 1 play without the sync, 2 a mode, 3 Upload now, 4 verify, 5 shader cache, 6 a link code, 7 unlink, 8 linked: Continue, 9 the link cancelled
     if (page == 0) {
         if (sel == 0) { LN.want = 1; LN.nosync = 1; act = 1; }
-        else if (sel == 1) { LN.page = 1; LN.sel[1] = ci.mode >= 0 && ci.mode <= 2 ? ci.mode : 0; LN.last_act = 0; }
+        else if (sel == 1) { LN.page = 1; LN.sel[1] = cp_link_of(&ci) == 1 ? 5 : ci.mode >= 0 && ci.mode <= 2 ? ci.mode : 0; LN.last_act = 0; LN.unarm = 0; }
         else if (sel == 2) { LN.page = 2; LN.sel[2] = 0; LN.amsg[0] = 0; }
         else if (sel == 3) { LN.want = 1; LOG("launcher: Start%s", LN.gate ? "" : " (the start is not ready: it starts once it is)"); }
     } else if (page == 1) {
         if (sel <= 2) act = 2;
         else if (sel == 3 && ci.can_upload) { act = 3; LN.last_act = DM_CLOUD_ACT_UPLOAD; }
         else if (sel == 4 && ci.can_restore && !touch) { LN.holding = 1; LN.hold_t0 = now_ms(); LN.hold_touch = 0; }
+        else if (sel == 5 && cp_link_of(&ci) == 1) act = 6;
+        else if (sel == 5 && cp_link_of(&ci) == 2 && ci.can_unlink) { if (LN.unarm > now_ms()) { LN.unarm = 0; act = 7; } else LN.unarm = now_ms() + 4000; }
+    } else if (page == 3) {
+        dm_cloud_link k; dm_cloud_link_get(&k);
+        if (k.state == DM_LINK_DONE) act = 8;
+        else if ((k.state == DM_LINK_EXPIRED || k.state == DM_LINK_FAIL) && sel == 0) act = 6;
+        else if (sel == 1 || (touch && (k.state == DM_LINK_CODE || k.state == DM_LINK_BUSY))) act = 9;   // Cancel (a touch on the code's one button)
     } else if (page == 2) {
         if (sel == 0) { LN.quick = !LN.quick; lnr_save_quick(LN.quick); LOG("launcher: start at once %s", LN.quick ? "on (− at the start opens the launcher)" : "off"); }
         else if (sel == 1 && verify_ok_locked(&ci)) { act = 4; LN.vrun = 1; LN.amsg[0] = 0; memset(&LN.vpr, 0, sizeof LN.vpr); }
@@ -981,6 +1026,13 @@ static void lnr_activate(int page, int sel, int touch) {   // A (or a touch) on 
     else if (act == 3) dm_cloud_act(DM_CLOUD_ACT_UPLOAD);
     else if (act == 4) { pthread_t t; if (pthread_create(&t, NULL, verify_thread, NULL)) { pthread_mutex_lock(&S.mu); LN.vrun = 0; pthread_mutex_unlock(&S.mu); } else pthread_detach(t); }
     else if (act == 5) shader_clear();
+    else if (act == 6) {   // a code (again): the link page, or back to the Cloud save page when the link cannot run now
+        pthread_mutex_lock(&S.mu); LN.page = 3; LN.sel[3] = 0; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+        if (dm_cloud_link_begin()) { LOG("[RED] launcher: the device link cannot run now"); pthread_mutex_lock(&S.mu); LN.page = 1; LN.sel[1] = 5; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); }
+    }
+    else if (act == 7) { if (dm_cloud_unlink()) LOG("[RED] launcher: Unlink this app cannot run now"); pthread_mutex_lock(&S.mu); LN.sel[1] = 5; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); }
+    else if (act == 8) { pthread_mutex_lock(&S.mu); LN.page = 0; LN.sel[0] = 3; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); dm_cloud_link_end(); }
+    else if (act == 9) { dm_cloud_link_cancel(); pthread_mutex_lock(&S.mu); LN.page = 1; LN.sel[1] = 5; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); }
 }
 static void lnr_hold_end(int touch) {   // A (or the finger) let go of Back to the cloud save before 1.5 s: "hold it"
     pthread_mutex_lock(&S.mu);
@@ -992,10 +1044,18 @@ static void lnr_key(int k) {
     if (want && page == 0) { if (k == K_B) { LN.want = LN.nosync = 0; LOG("launcher: Start cancelled"); } pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); return; }
     if (LN.holding && k != K_A) LN.holding = 0;
     if (page == 0) { if (k == K_UP && s0 > 0) (*sel)--; else if (k == K_DOWN && s0 < 3) (*sel)++; else if (k == K_A) go = s0; }
-    else if (page == 1) {
-        if (k == K_UP) *sel = s0 <= 2 ? (s0 > 0 ? s0 - 1 : 0) : 3; else if (k == K_DOWN) *sel = s0 <= 2 ? (s0 < 2 ? s0 + 1 : 2) : 4;
-        else if (k == K_RIGHT && s0 <= 2) *sel = 3; else if (k == K_LEFT && s0 >= 3) { dm_cloud_info ci; dm_cloud_info_get(&ci); *sel = ci.mode >= 0 && ci.mode <= 2 ? ci.mode : 0; }
+    else if (page == 1) {   // the right column top to bottom: linked Unlink (5), Upload now (3), Back (4); not linked Link this device (5) only; else 3, 4
+        dm_cloud_info ci; dm_cloud_info_get(&ci); int lk = cp_link_of(&ci);
+        if (k != K_A) LN.unarm = 0;
+        if (k == K_UP) *sel = s0 <= 2 ? (s0 > 0 ? s0 - 1 : 0) : lk == 1 ? 5 : lk == 2 ? (s0 == 4 ? 3 : 5) : 3;
+        else if (k == K_DOWN) *sel = s0 <= 2 ? (s0 < 2 ? s0 + 1 : 2) : lk == 1 ? 5 : lk == 2 ? (s0 == 5 ? 3 : 4) : 4;
+        else if (k == K_RIGHT && s0 <= 2) *sel = lk == 1 ? 5 : 3; else if (k == K_LEFT && s0 >= 3) *sel = ci.mode >= 0 && ci.mode <= 2 ? ci.mode : 0;
         else if (k == K_A) go = s0; else if (k == K_B) { LN.page = 0; LN.sel[0] = 1; }
+    } else if (page == 3) {   // the link: ← → between New code and Cancel, A chooses (Continue once linked), B cancels (or continues)
+        dm_cloud_link lkk; dm_cloud_link_get(&lkk); int two = lkk.state == DM_LINK_EXPIRED || lkk.state == DM_LINK_FAIL;
+        if ((k == K_LEFT || k == K_RIGHT) && two) *sel = k == K_LEFT ? 0 : 1;
+        else if (k == K_A && (two || lkk.state == DM_LINK_DONE)) go = two ? s0 : 0;
+        else if (k == K_B) go = lkk.state == DM_LINK_DONE ? 0 : 1;
     } else {
         if (k == K_UP) *sel = 0; else if (k == K_DOWN && s0 == 0) *sel = 1; else if (k == K_LEFT && s0 == 2) *sel = 1; else if (k == K_RIGHT && s0 == 1) *sel = 2;
         else if (k == K_A) go = s0; else if (k == K_B) { LN.page = 0; LN.sel[0] = 2; }
@@ -1006,7 +1066,9 @@ static void lnr_key(int k) {
 static int lnr_hit(float x, float y, int *page) {   // a touch on the page shown (its layout: startscreen.c stv_page_hit)
     pthread_mutex_lock(&S.mu); ANativeWindow *w = S.win; *page = LN.page; pthread_mutex_unlock(&S.mu);
     if (!w) return -1;
-    stv_view v; memset(&v, 0, sizeof v); v.screen = *page == 0 ? STV_SCREEN_LAUNCHER : *page == 1 ? STV_SCREEN_CLOUD : STV_SCREEN_APP; v.cp.nrow = 4;
+    stv_view v; memset(&v, 0, sizeof v); v.screen = *page == 0 ? STV_SCREEN_LAUNCHER : *page == 1 ? STV_SCREEN_CLOUD : *page == 3 ? STV_SCREEN_LINK : STV_SCREEN_APP; v.cp.nrow = 4;
+    if (*page == 1) { dm_cloud_info ci; dm_cloud_info_get(&ci); v.cp.link = cp_link_of(&ci); }
+    if (*page == 3) { dm_cloud_link k; dm_cloud_link_get(&k); lk_fill(&v.lk, &k, "", 0); }
     return stv_page_hit(&v, ANativeWindow_getWidth(w), ANativeWindow_getHeight(w), x, y);
 }
 static void lnr_touch(int act, float x, float y) {
