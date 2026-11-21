@@ -55,6 +55,7 @@
 #include <sys/system_properties.h>
 
 uint64_t dm_fs_commit_count(void);       // hle_fs.c
+void dm_perf_background_thread(const char *who);   // perf_android.c: nice 19, the slowest cores, out of the ADPF session
 const uint8_t *dm_overlay_font(void);    // overlay_theme.c
 
 static int64_t now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
@@ -740,6 +741,8 @@ static void check_owed(void) {
 static void *up_thread(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "savesync");
     JNIEnv *E = jattach(); if (!E) { LOG("[RED] cloud: no Java for the uploads: the save does not go up this run"); return NULL; }
+    // it lives as long as the game plays: below the game's threads, on the slowest cores (after the attach, which makes it a Java thread too)
+    dm_perf_background_thread("cloud upload (savesync)");
     uint64_t lastc = dm_fs_commit_count(); int dirty = 0, paused = 0, was_net = -1; int64_t changed_t = 0, last_hb = now_ms();   // (the start just opened the session, if it could)
     LOG("cloud: uploads on (about 3 s after the game commits its save, at once when the network comes back, and when the app leaves the screen); a heartbeat every 60 s while on screen");
     for (;;) {

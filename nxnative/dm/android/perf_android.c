@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
 #include "dm.h"
 
 typedef struct APerformanceHintManager APerformanceHintManager;
@@ -137,6 +138,8 @@ static uint64_t task_ticks(int tid) {
     for (char *t = c + 1; *t && field < 15; t++) if (*t == ' ') { field++; if (field == 14) ut = strtoull(t + 1, NULL, 10); else if (field == 15) st = strtoull(t + 1, NULL, 10); }
     return ut + st;
 }
+static _Atomic int g_bg_tids[4];   // background threads (dm_perf_background_thread): never put in the session, whatever they use
+static int bg_tid(int tid) { for (int i = 0; i < 4; i++) if (atomic_load(&g_bg_tids[i]) == tid) return 1; return 0; }
 static void hint_threads_scan(int32_t self) {
     static struct { int tid; uint64_t ticks; } prev[512]; static int np; static int64_t last;
     int64_t now = perf_now(); double secs = last ? (now - last) / 1e9 : 0; last = now;
@@ -150,7 +153,7 @@ static void hint_threads_scan(int32_t self) {
         for (int k = 0; k < 5; k++) {   // the busiest first
             int best = -1; uint64_t bu = 0;
             for (int i = 0; i < nc; i++) {
-                if (cur[i].tid == self) continue;
+                if (cur[i].tid == self || bg_tid(cur[i].tid)) continue;
                 int taken = 0; for (int j = 0; j < npick; j++) taken |= pick[j] == cur[i].tid; if (taken) continue;
                 uint64_t was = 0; for (int j = 0; j < np; j++) if (prev[j].tid == cur[i].tid) { was = prev[j].ticks; break; }
                 uint64_t u = cur[i].used > was ? cur[i].used - was : 0;
@@ -226,6 +229,34 @@ void dm_perf_replay_thread(void) {
     if (tries) LOG("[perf] replay thread on CPUs%s (%s, up to %ld MHz), after %d refusals", l, prime ? "prime" : "big", hi, tries);
     else LOG("[perf] replay thread on CPUs%s (%s, up to %ld MHz)", l, prime ? "prime" : "big", hi);
     state = 1;
+}
+
+// A background thread that runs while the game plays (savecloud_android.c up_thread: the save's tar, its SHA-256, the HTTPS PUT and the heartbeats): the calling thread at
+// nice 19 and on the cores of the lowest maximum clock, and never in the ADPF session (hint_threads_scan, which would raise its clock with the game's). On the Galaxy (A-Train,
+// 2026-11-21) an upload at the default priority went with 76-146 ms frames for its second (GPU and submit times as usual). The cores are left as they are when their clocks are
+// unknown or all alike, or when the cores of the lowest clock are not allowed to the thread now; a refusal is logged, never retried. One line in the log either way
+void dm_perf_background_thread(const char *who) {
+    int tid = (int)gettid();
+    for (int i = 0; i < 4; i++) { int z = 0; if (atomic_compare_exchange_strong(&g_bg_tids[i], &z, tid)) break; }
+    errno = 0; int was = getpriority(PRIO_PROCESS, (id_t)tid); if (errno) was = 99;
+    char pr[64];
+    if (setpriority(PRIO_PROCESS, (id_t)tid, 19)) snprintf(pr, sizeof pr, "nice %d kept (setpriority: %s)", was, strerror(errno));
+    else { errno = 0; int now = getpriority(PRIO_PROCESS, (id_t)tid); snprintf(pr, sizeof pr, "nice %d (was %d)", errno ? 99 : now, was); }
+    char cpu[160] = "cores left to the scheduler";
+    long n = sysconf(_SC_NPROCESSORS_CONF); if (n > 32) n = 32; long mhz[32] = {0}, hi = 0, lo = 0;
+    for (long c = 0; c < n; c++) { char p[96]; snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%ld/cpufreq/cpuinfo_max_freq", c); FILE *f = fopen(p, "r");
+        if (f) { if (fscanf(f, "%ld", &mhz[c]) != 1) mhz[c] = 0; fclose(f); } mhz[c] /= 1000; if (mhz[c] > hi) hi = mhz[c]; if (mhz[c] && (!lo || mhz[c] < lo)) lo = mhz[c]; }
+    cpu_set_t now_set, set; CPU_ZERO(&set);
+    if (!hi || hi == lo) snprintf(cpu, sizeof cpu, "cores left to the scheduler (their clocks unknown or all alike)");
+    else if (sched_getaffinity(0, sizeof now_set, &now_set)) snprintf(cpu, sizeof cpu, "cores left to the scheduler (sched_getaffinity: %s)", strerror(errno));
+    else {
+        char l[96] = ""; size_t o = 0;
+        for (long c = 0; c < n; c++) if (mhz[c] == lo && CPU_ISSET(c, &now_set)) { CPU_SET(c, &set); o += snprintf(l + o, sizeof l - o, " %ld", c); }
+        if (!CPU_COUNT(&set)) snprintf(cpu, sizeof cpu, "cores left to the scheduler (none of the %ld MHz cores allowed now)", lo);
+        else if (sched_setaffinity(0, sizeof set, &set)) snprintf(cpu, sizeof cpu, "cores left to the scheduler (sched_setaffinity CPUs%s: %s)", l, strerror(errno));
+        else snprintf(cpu, sizeof cpu, "CPUs%s (up to %ld MHz)", l, lo);
+    }
+    LOG("[perf] %s thread %d: %s, %s, kept out of the ADPF session", who, tid, pr, cpu);
 }
 
 static int64_t g_work_start;
