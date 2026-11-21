@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # axml.py: read and change an APK's binary AndroidManifest.xml (AXML, as mkapk.py writes it: one UTF-16 string pool, a resource map, the element tree), and read the signer
 # certificates of its APK Signature Scheme v2 block, with the Python standard library only. porter apk-update (porter/apkupdate.py) gives a released APK a new versionCode and
-# versionName (and its label, set_label, and the permissions this checkout's mkapk.py asks for that it lacks, add_permissions) this way: every other byte of the manifest stays as
+# versionName (and its label, set_label, the permissions this checkout's mkapk.py asks for that it lacks, add_permissions, its services, add_services, and hasCode) this way: every other byte of the manifest stays as
 # the APK's port wrote it (the package, the label, the activity, the permissions of that port's mkapk.py).
 # Usage: axml.py <app.apk>   → prints the manifest's package, versionCode, versionName, debuggable, label and the signer certificates' SHA-256 (JSON)
 import hashlib, json, struct, sys, zipfile
@@ -180,6 +180,118 @@ def add_permissions(data, wanted):
     out = bytearray(data[:po] + pool_chunk(strings) + data[po + psize:app] + els + data[app:])
     struct.pack_into('<I', out, 4, len(out))
     return bytes(out), [n for n, _ in todo]
+
+
+RES_XML_START_NS, RES_XML_END_NS, RES_XML_CDATA, T_INT_HEX = 0x0100, 0x0101, 0x0104, 0x11
+
+
+def _tree(data):   # (header size, [(offset, type, header size, size)] of the chunks after the header)
+    hs = struct.unpack_from('<H', data, 2)[0]
+    return hs, list(_chunks(data, hs, len(data)))
+
+
+def map_attr(data, attr, rid):
+    """data with the android: attribute name attr in the resource map as rid (an attribute a later manifest needs that the APK's port did not write: a service's
+    foregroundServiceType). The map gives an ID to the strings at its own indexes, so the name goes in at the map's end: every string after it moves one place, and
+    every reference to one (the elements', the attributes', the namespaces') is renumbered. The same bytes when the map has it already"""
+    m = parse(data); strings = list(m['strings'])
+    hs, chunks = _tree(data)
+    rm = next(((o, chs, csize) for o, ct, chs, csize in chunks if ct == RES_RESOURCE_MAP), None)
+    if rm is None: raise ValueError('AXML: no resource map')
+    rmap = list(struct.unpack_from(f'<{(rm[2] - rm[1]) // 4}I', data, rm[0] + rm[1]))
+    if any(strings[i] == attr and rmap[i] == rid for i in range(min(len(rmap), len(strings)))): return data
+    k = len(rmap)
+    if k > len(strings): raise ValueError('AXML: a resource map longer than the string pool')
+    strings.insert(k, attr); rmap.append(rid)
+    def mv(i): return i + 1 if i != 0xffffffff and i >= k else i
+    out = bytearray(data[:hs])
+    for o, ct, chs, csize in chunks:
+        c = bytearray(data[o:o + csize])
+        if ct == RES_STRING_POOL: c = bytearray(pool_chunk(strings))
+        elif ct == RES_RESOURCE_MAP: c = bytearray(struct.pack('<HHI', RES_RESOURCE_MAP, 8, 8 + 4 * len(rmap)) + b''.join(struct.pack('<I', x) for x in rmap))
+        elif ct in (RES_XML_START_NS, RES_XML_END_NS, RES_START_ELEMENT, RES_END_ELEMENT, RES_XML_CDATA):
+            def fix(at): struct.pack_into('<I', c, at, mv(struct.unpack_from('<I', c, at)[0]))
+            fix(12)   # the node's comment
+            if ct in (RES_XML_START_NS, RES_XML_END_NS, RES_END_ELEMENT): fix(chs); fix(chs + 4)   # prefix, uri / ns, name
+            elif ct == RES_XML_CDATA:
+                fix(chs)
+                if c[chs + 4 + 3] == T_STRING: fix(chs + 8)
+            else:
+                fix(chs); fix(chs + 4)
+                astart, asize, acount = struct.unpack_from('<HHH', c, chs + 8)
+                for i in range(acount):
+                    a = chs + astart + i * asize
+                    fix(a); fix(a + 4); fix(a + 8)
+                    if c[a + 15] == T_STRING: fix(a + 16)
+        out += c
+    struct.pack_into('<I', out, 4, len(out))
+    return bytes(out)
+
+
+def services(data):
+    """The android:name of each <service> of the manifest, in order"""
+    m = parse(data)
+    return [_value(m['strings'], a['android:name']) for tag, a in m['elements'] if tag == 'service' and 'android:name' in a]
+
+
+def add_services(data, wanted, ids):
+    """data with each (tag, [(android: attribute, value)]) of wanted (mkapk.py SERVICES) the manifest has not (by android:name) put in at the end of <application>;
+    → (data, [the names added]). ids: {attribute: resource ID} (mkapk.py ATTR_IDS). Values: a string, a bool, an int, ('hex', int) for flags. An attribute name the
+    resource map lacks is put in it (map_attr); strings the pool lacks are appended. The same bytes when none is missing"""
+    have = set(services(data))
+    todo = [(tag, attrs) for tag, attrs in wanted if dict(attrs).get('name') not in have]
+    if not todo: return data, []
+    for _, attrs in todo:
+        for a, _v in attrs:
+            if a not in ids: raise ValueError(f'android:{a}: no resource ID known for it')
+            data = map_attr(data, a, ids[a])
+    m = parse(data); strings = list(m['strings'])
+    hs, chunks = _tree(data)
+    rmap = next(struct.unpack_from(f'<{(csize - chs) // 4}I', data, o + chs) for o, ct, chs, csize in chunks if ct == RES_RESOURCE_MAP)
+    if ANDROID_NS not in strings: raise ValueError('AXML: no android namespace in the string pool')
+    ns = strings.index(ANDROID_NS)
+    end = None
+    for o, ct, chs, csize in chunks:
+        if ct == RES_END_ELEMENT and strings[struct.unpack_from('<I', data, o + chs + 4)[0]] == 'application': end = o
+    if end is None: raise ValueError('AXML: the manifest has no </application>')
+    def s(x):
+        if x not in strings: strings.append(x)
+        return strings.index(x)
+    def mapped(attr):
+        return next(i for i, x in enumerate(strings[:len(rmap)]) if x == attr and rmap[i] == ids[attr])
+    line = struct.unpack_from('<I', data, end + 8)[0]
+    els = b''
+    for tag, attrs in todo:
+        t = s(tag); enc = []
+        for a, v in attrs:
+            i = mapped(a)
+            if isinstance(v, bool): raw, dt, val = 0xffffffff, T_BOOL, 0xffffffff if v else 0
+            elif isinstance(v, int): raw, dt, val = 0xffffffff, T_INT_DEC, v & 0xffffffff
+            elif isinstance(v, tuple) and len(v) == 2 and v[0] == 'hex': raw, dt, val = 0xffffffff, T_INT_HEX, v[1] & 0xffffffff
+            elif isinstance(v, str): raw, dt, val = s(v), T_STRING, s(v)
+            else: raise ValueError(f'{tag}: android:{a} = {v!r}: not a string, a bool, an int or a (\'hex\', int)')
+            enc.append((ids[a], struct.pack('<IIIHBBI', ns, i, raw, 8, 0, dt, val)))
+        enc.sort(key=lambda x: x[0])   # by resource ID, as aapt2 and mkapk.py order them
+        body = struct.pack('<II', line, 0xffffffff) + struct.pack('<IIHHHHHH', 0xffffffff, t, 20, 20, len(enc), 0, 0, 0) + b''.join(e for _, e in enc)
+        els += struct.pack('<HHI', RES_START_ELEMENT, 16, 8 + len(body)) + body
+        els += struct.pack('<HHI', RES_END_ELEMENT, 16, 24) + struct.pack('<IIII', line, 0xffffffff, 0xffffffff, t)
+    po, psize = m['pool']
+    out = bytearray(data[:po] + pool_chunk(strings) + data[po + psize:end] + els + data[end:])
+    struct.pack_into('<I', out, 4, len(out))
+    return bytes(out), [dict(attrs)['name'] for _, attrs in todo]
+
+
+def set_has_code(data):
+    """data with the application's android:hasCode true (an APK that had no dex: the service's dex comes in). The same bytes when it is true, or not there (true by
+    default)"""
+    m = parse(data)
+    app = next((attrs for tag, attrs in m['elements'] if tag == 'application'), None)
+    if not app: raise ValueError('AXML: the manifest has no <application>')
+    a = app.get('android:hasCode')
+    if a is None or (a[2] == T_BOOL and a[3]): return data
+    if a[2] != T_BOOL: raise ValueError(f'AXML: android:hasCode is not a bool (type {a[2]:#x})')
+    out = bytearray(data); struct.pack_into('<I', out, a[0] + 16, 0xffffffff)
+    return bytes(out)
 
 
 def signer_certs(apk):

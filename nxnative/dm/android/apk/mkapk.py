@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# mkapk.py: build and sign a code-less NativeActivity APK with the Python standard library only (no JDK, no Android SDK).
+# mkapk.py: build and sign a NativeActivity APK with the Python standard library only (no JDK, no Android SDK). Its only Java is the background download's service, a
+#   prebuilt dex (service.dex: build_service_dex.py), and a --dex of the port's own (the native keyboard, the external display) beside it.
 #   binary AndroidManifest.xml (AXML) -> stored ZIP with the .so page-aligned -> APK Signature Scheme v2 (RSA-2048, SHA-256) with a self-signed cert.
 # Usage: mkapk.py <lib.so> <out.apk> [key.json] [--package P] [--label L] [--lib NAME] [--landscape] [--icon icon.png [--icon-fg fg.png --icon-bg bg.png]] [--release] [--version-code N] [--version-name V]   (the key is created on first use and reused, so reinstalls keep the same signer)
 import hashlib, json, os, struct, sys, time
@@ -12,7 +13,9 @@ _p.add_argument('--icon', help='launcher icon (a PNG, used at its own size: nodp
 _p.add_argument('--icon-fg', help='with --icon-bg: an adaptive icon\'s foreground layer (a PNG of the 108 dp layer, the launcher\'s mask shows the middle 72 dp); --icon stays for older launchers')
 _p.add_argument('--icon-bg', help='the adaptive icon\'s background layer (a PNG, like --icon-fg)')
 _p.add_argument('--asset', action='append', default=[], metavar='NAME=FILE', help='a file the app reads with AAssetManager as NAME (assets/NAME in the APK): the gamepad theme')
-_p.add_argument('--dex', help='optional classes.dex for a custom NativeActivity')
+_p.add_argument('--dex', help='optional classes.dex for a custom NativeActivity (the service\'s dex goes beside it as classes2.dex)')
+_p.add_argument('--service-dex', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'service.dex'),
+                help='the background download\'s service (java_service/org/nx2a/DownloadService.java, built by build_service_dex.py): in every APK')
 _p.add_argument('--activity', default='android.app.NativeActivity', help='NativeActivity class name')
 _p.add_argument('--release', action='store_true', help='not debuggable')
 _p.add_argument('--cleartext', action='store_true', help='allow cleartext HTTP (usesCleartextTraffic): an app that downloads its data from an http:// server (porter --data-url), which Android 9+ refuses otherwise')
@@ -37,7 +40,8 @@ ATTR_IDS = {  # android: attribute resource IDs (frameworks/base/core/res/res/va
     'configChanges': 0x0101001f, 'screenOrientation': 0x0101001e, 'value': 0x01010024, 'resource': 0x01010025, 'minSdkVersion': 0x0101020c, 'versionCode': 0x0101021b,
     'versionName': 0x0101021c, 'targetSdkVersion': 0x01010270, 'maxSdkVersion': 0x01010271, 'isGame': 0x010103f4, 'extractNativeLibs': 0x010104ea, 'appCategory': 0x01010545,
     'usesCleartextTraffic': 0x010104ec, 'requestLegacyExternalStorage': 0x01010603, 'enableOnBackInvokedCallback': 0x0101066c, 'drawable': 0x01010199,   # (maxSdkVersion and requestLegacyExternalStorage read from android-36's android.jar, R$attr)
-    'supportsPerformanceGameMode': 0x01010657}   # framework public-final.xml; GameModeConfig since API33
+    'supportsPerformanceGameMode': 0x01010657,   # framework public-final.xml; GameModeConfig since API33
+    'foregroundServiceType': 0x01010599}   # API 29
 T_REF, T_STRING, T_INT_DEC, T_INT_HEX, T_BOOL = 0x01, 0x03, 0x10, 0x11, 0x12
 ICON_ID, ICON_FG_ID, ICON_BG_ID = 0x7f010000, 0x7f010001, 0x7f010002   # drawable/icon, icon_fg, icon_bg in resources.arsc (res_table)
 # A plain icon is drawn small on a white disc by Android 8+ launchers; an adaptive one fills the launcher's icon shape
@@ -64,13 +68,24 @@ PERMISSIONS = [
     # that reads its RomFS from its files folder runs as before; requestLegacyExternalStorage is ignored from Android 11 with this target SDK
     ('android.permission.MANAGE_EXTERNAL_STORAGE', []),
     ('android.permission.READ_EXTERNAL_STORAGE', [('maxSdkVersion', 29)]),
+    # The game data's download off the screen (datasync_android.c, DownloadService): a foreground service of type dataSync (FOREGROUND_SERVICE, and from Android 14
+    # FOREGROUND_SERVICE_DATA_SYNC: normal permissions, granted at install) whose notification needs POST_NOTIFICATIONS from Android 13 (asked once, at the first
+    # download: refused, the download runs without it). WAKE_LOCK, ACCESS_WIFI_STATE (its Wi-Fi lock) and ACCESS_NETWORK_STATE (the network callback) are above
+    ('android.permission.FOREGROUND_SERVICE', []),
+    ('android.permission.FOREGROUND_SERVICE_DATA_SYNC', []),
+    ('android.permission.POST_NOTIFICATIONS', []),
+]
+# The service element(s) of the application: (tag, [(android: attribute, value)]). A literal, read by porter apk-update (porter/apkupdate.py services) with ast.literal_eval,
+# which gives a released APK the ones it lacks (by android:name); values are strings, bools and ('hex', int) flags
+SERVICES = [
+    ('service', [('name', 'org.nx2a.DownloadService'), ('exported', False), ('foregroundServiceType', ('hex', 0x1))]),   # dataSync
 ]
 
 # (tag, [(ns_android?, name, value)], children)
 MANIFEST = ('manifest', [(False, 'package', PKG), (True, 'versionCode', ARGS.version_code), (True, 'versionName', ARGS.version_name)], [
     ('uses-sdk', [(True, 'minSdkVersion', MIN_SDK), (True, 'targetSdkVersion', TARGET_SDK)], []),
     *[('uses-permission', [(True, 'name', n)] + [(True, a, v) for a, v in more], []) for n, more in PERMISSIONS],   # (PERMISSIONS above)
-    ('application', [(True, 'label', LABEL)] + ([(True, 'icon', ('ref', ICON_ID))] if ARGS.icon else []) + [(True, 'hasCode', bool(ARGS.dex)), (True, 'debuggable', not ARGS.release), (True, 'isGame', True), (True, 'extractNativeLibs', True),
+    ('application', [(True, 'label', LABEL)] + ([(True, 'icon', ('ref', ICON_ID))] if ARGS.icon else []) + [(True, 'hasCode', True),   # (the service's dex: every APK has code) (True, 'debuggable', not ARGS.release), (True, 'isGame', True), (True, 'extractNativeLibs', True),
         (True, 'requestLegacyExternalStorage', True),
         *([(True, 'usesCleartextTraffic', True)] if ARGS.cleartext else []),   # --cleartext: the data server's http:// (front_android.c sync_fetch); off by default from target SDK 28
         (True, 'appCategory', 0),   # a game (appCategory game = 0, and the older isGame): Android's game mode and game dashboard, and the device maker's game tools, apply to it
@@ -85,7 +100,8 @@ MANIFEST = ('manifest', [(False, 'package', PKG), (True, 'versionCode', ARGS.ver
             ('meta-data', [(True, 'name', 'android.app.lib_name'), (True, 'value', LIB)], []),
             ('intent-filter', [], [
                 ('action', [(True, 'name', 'android.intent.action.MAIN')], []),
-                ('category', [(True, 'name', 'android.intent.category.LAUNCHER')], [])])])])])
+                ('category', [(True, 'name', 'android.intent.category.LAUNCHER')], [])])]),
+        *[(tag, [(True, a, v) for a, v in attrs], []) for tag, attrs in SERVICES]])])
 
 def axml(root):
     # string pool: attribute names that carry resource IDs come first, in resource-map order
@@ -175,6 +191,7 @@ def main():
         print(f'new signing key {keyf} ({time.time() - t:.1f} s)')
     entries = [('AndroidManifest.xml', axml(MANIFEST), 4), (f'lib/arm64-v8a/lib{LIB}.so', open(so, 'rb').read(), 16384)]
     if ARGS.dex: entries.append(('classes.dex', open(ARGS.dex, 'rb').read(), 4))
+    entries.append(('classes2.dex' if ARGS.dex else 'classes.dex', open(ARGS.service_dex, 'rb').read(), 4))   # (ART loads classesN.dex in order: multidex since API 21)
     entries += [(f'lib/arm64-v8a/{os.path.basename(x)}', open(x, 'rb').read(), 16384) for x in ARGS.extra_so]
     entries += [(f'assets/{n}', open(f, 'rb').read(), 4) for n, _, f in (x.partition('=') for x in ARGS.asset)]   # stored, as every entry: AAsset reads them in place
     drawables = []

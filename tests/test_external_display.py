@@ -72,11 +72,14 @@ class ExternalDisplayTest(unittest.TestCase):
             base = ['python3', str(tool), str(so)]
             subprocess.run([*base, str(root / 'default.apk'), str(key)], check=True, capture_output=True)
             with zipfile.ZipFile(root / 'default.apk') as z:
-                self.assertNotIn('classes.dex', z.namelist())
+                service = (ROOT / 'nxnative/dm/android/apk/service.dex').read_bytes()
+                self.assertEqual(z.read('classes.dex'), service)   # only the background download's service (DownloadService)
+                self.assertNotIn('classes2.dex', z.namelist())
                 self.assertIn('android.app.NativeActivity'.encode('utf-16-le'), z.read('AndroidManifest.xml'))
             subprocess.run([*base, str(root / 'custom.apk'), str(key), '--dex', str(dex), '--activity', 'org.nx2a.ExternalActivity'], check=True, capture_output=True)
             with zipfile.ZipFile(root / 'custom.apk') as z:
                 self.assertEqual(z.read('classes.dex'), dex.read_bytes())
+                self.assertEqual(z.read('classes2.dex'), service)   # the service beside the port's own dex
                 self.assertIn('org.nx2a.ExternalActivity'.encode('utf-16-le'), z.read('AndroidManifest.xml'))
             result = subprocess.run([*base, str(root / 'bad.apk'), str(key), '--activity', 'org.nx2a.ExternalActivity'], capture_output=True)
             self.assertNotEqual(result.returncode, 0)
