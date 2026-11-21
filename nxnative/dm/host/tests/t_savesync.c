@@ -353,9 +353,21 @@ static void t_link(void) {
     char b[600]; CHECK(!ss_link_body(b, sizeof b, k, "Retroid Pocket Nova", "슈퍼로봇대전 \"Y\"", "com.nx2a.srwy"), "the body");
     CHECK(strstr(b, "\"model\":\"Retroid Pocket Nova\"") && strstr(b, "\"game\":\"슈퍼로봇대전 \\\"Y\\\"\"") && strstr(b, "\"pkg\":\"com.nx2a.srwy\"") && strstr(b, k), "%s", b);
     CHECK(ss_link_body(b, 40, k, "m", "g", "p") == -1, "a body too long is refused");
-    char m[96]; ss_link_model(m, sizeof m, "Retroid", "Retroid Pocket Nova"); CHECK(!strcmp(m, "Retroid Pocket Nova"), "%s", m);
-    ss_link_model(m, sizeof m, "samsung", "SM-S918N"); CHECK(!strcmp(m, "samsung SM-S918N"), "%s", m);
-    ss_link_model(m, sizeof m, "", ""); CHECK(!strcmp(m, "Android"), "%s", m);
+    static const char *const MODELS[][4] = {   // ro.product.brand, .manufacturer, .model: the device's name
+        {"Retroid", "Moorechip", "Retroid Pocket Nova", "Retroid Pocket Nova"},   // (the Nova as it was seen: a contract maker's name, the model names it)
+        {"Moorechip", "Moorechip", "Retroid Pocket Nova", "Retroid Pocket Nova"}, {"", "Moorechip", "Retroid Pocket Nova", "Retroid Pocket Nova"},
+        {"Retroid", "Moorechip", "Pocket 5", "Retroid Pocket 5"}, {"Retroid", "Retroid", "Retroid Pocket 4 Pro", "Retroid Pocket 4 Pro"},
+        {"samsung", "samsung", "SM-S918N", "Samsung SM-S918N"}, {"google", "Google", "Pixel 8 Pro", "Google Pixel 8 Pro"},
+        {"Redmi", "Xiaomi", "23049PCD8G", "Redmi 23049PCD8G"}, {"Xiaomi", "Xiaomi", "Xiaomi 14", "Xiaomi 14"}, {"POCO", "Xiaomi", "POCO F5", "POCO F5"},
+        {"OnePlus", "OnePlus", "CPH2449", "OnePlus CPH2449"}, {"Sony", "Sony", "XQ-DQ72", "Sony XQ-DQ72"}, {"motorola", "motorola", "moto g54 5G", "Motorola moto g54 5G"},
+        {"AYN", "AYN", "Odin2", "Odin2"}, {"AYN", "AYN", "Thor", "AYN Thor"}, {"Anbernic", "ANBERNIC", "RG556", "Anbernic RG556"},
+        {"AYANEO", "AYANEO", "Pocket S", "AYANEO Pocket S"}, {"Lenovo", "LENOVO", "Lenovo TB-9707F", "Lenovo TB-9707F"},
+        {"rockchip", "rockchip", "rk3566_r", "rk3566_r"}, {"Allwinner", "Allwinner", "H700", "H700"}, {"", "", "  Odin 2 Portal ", "Odin 2 Portal"},
+        {"", "", "", "Android"}, {"", "Moorechip", "", "Moorechip"}, {"samsung", "samsung", "", "Samsung"}, {"LGE", "LGE", "LGM-V300K", "LGM-V300K"}};
+    for (size_t i = 0; i < sizeof MODELS / sizeof MODELS[0]; i++) {
+        char m[96]; ss_link_model(m, sizeof m, MODELS[i][0], MODELS[i][1], MODELS[i][2]);
+        CHECK(!strcmp(m, MODELS[i][3]), "the name of %s / %s / %s: \"%s\", not \"%s\"", MODELS[i][0], MODELS[i][1], MODELS[i][2], m, MODELS[i][3]);
+    }
     ss_link l; const char *JA = "{\"linked\":true,\"token\":\"tok_ABC123\",\"device\":{\"id\":7,\"name\":\"Retroid Pocket Nova\"}}";
     CHECK(ss_link_read(200, JA, strlen(JA), &l) == SS_LK_LINKED && !strcmp(l.token, "tok_ABC123") && !strcmp(l.dev_name, "Retroid Pocket Nova") && !strcmp(l.dev_id, "7"), "start: linked");
     const char *JB = "{\"linked\":false,\"code\":\"K7Q-4MP\",\"poll\":\"p0ll\",\"expiresIn\":600,\"url\":\"https://saves.example.com/link\"}";
@@ -381,9 +393,33 @@ static void t_link(void) {
     char nw[1100]; snprintf(nw, sizeof nw, "%s.new", p); CHECK(stat(nw, &st) != 0, "no .new left");
 }
 
+// a token the server refused: which answers are one, sync.txt aside (sync-state.txt stays), link/start once a run, and what its answer does
+static void t_reauth(void) {
+    CHECK(ss_refused(401) && ss_refused(403) && !ss_refused(200) && !ss_refused(404) && !ss_refused(409) && !ss_refused(500) && !ss_refused(0), "401 and 403 only");
+    ss_reauth r = {0};   // the web unlinked this device; link/start links it again (another game of the device, or a hand token merged into a linked device)
+    CHECK(ss_reauth_begin(&r, 1, 0) == SS_RA_ASK, "the first refusal asks link/start");
+    CHECK(ss_reauth_end(SS_LK_LINKED, 1) == SS_RA_RETRY, "linked: the request again with the new token");
+    CHECK(ss_reauth_begin(&r, 1, 0) == SS_RA_STOP, "the new token refused too: not linked, no second link/start (no loop)");
+    CHECK(ss_reauth_begin(&r, 1, 0) == SS_RA_STOP, "and none after it");
+    ss_reauth r2 = {0}; CHECK(ss_reauth_begin(&r2, 0, 0) == SS_RA_STOP && r2.tried, "no device key: not linked");
+    ss_reauth r3 = {0}; CHECK(ss_reauth_begin(&r3, 1, 1) == SS_RA_STOP, "a trial build: not linked");
+    CHECK(ss_reauth_end(SS_LK_CODE, 0) == SS_RA_STOP && ss_reauth_end(SS_LK_LIMIT, 0) == SS_RA_STOP && ss_reauth_end(SS_LK_BAD, 0) == SS_RA_STOP && ss_reauth_end(-1, 0) == SS_RA_STOP,
+          "a code (the device unlinked on the web), 429, a bad answer, no answer: not linked");
+    CHECK(ss_reauth_end(SS_LK_LINKED, 0) == SS_RA_STOP, "linked but sync.txt not written: not linked");
+    // sync.txt aside, a hand-pushed one (no device link in it) as the link's
+    char p[1024], rv[1100], sp[1024]; path(p, sizeof p, "ra/sync.txt"); snprintf(rv, sizeof rv, "%s.revoked", p); path(sp, sizeof sp, "ra/sync-state.txt");
+    put("ra/sync.txt", "url=https://rooms.example\ntoken=handtok\ndevice=nova\n"); put("ra/sync-state.txt", "seq=7\npending=1\n");
+    struct stat st; CHECK(!ss_revoke(p) && stat(p, &st) != 0 && !stat(rv, &st), "sync.txt is sync.txt.revoked");
+    size_t n = 0; char *txt = ds_read(rv, &n, 1 << 16); CHECK(txt && strstr(txt, "handtok"), "its contents kept"); free(txt);
+    txt = ds_read(sp, &n, 1 << 16); ss_state s; if (txt) ss_state_text(txt, &s); CHECK(txt && s.seq == 7 && s.pending == 1, "sync-state.txt stays as it was"); free(txt);
+    CHECK(!ss_revoke(p), "no sync.txt: nothing to do, no error");
+    CHECK(!ss_link_write(p, SS_LINK_URL, "tok_new", "Retroid Pocket Nova") && !ss_revoke(p), "the link's sync.txt refused too: aside again");
+    txt = ds_read(rv, &n, 1 << 16); CHECK(txt && strstr(txt, "tok_new") && !strstr(txt, "handtok"), "the last one replaces the one aside before"); free(txt);
+}
+
 int main(void) {
     snprintf(g_tmp, sizeof g_tmp, "%s/t_savesync.%d", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid()); ss_rm_tree(g_tmp); mkdir(g_tmp, 0755);
-    t_tar(); t_files(); t_decide(); t_ingame(); t_modes(); t_link();
+    t_tar(); t_files(); t_decide(); t_ingame(); t_modes(); t_link(); t_reauth();
     ss_rm_tree(g_tmp);
     printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
     return fails != 0;

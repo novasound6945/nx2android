@@ -14,7 +14,7 @@
 #pragma once
 #include "datasync.h"   // ds_sha (SHA-256), the small JSON reader (ds_str, ds_skip, ds_u64), ds_rel_ok, ds_mkdirs
 #include <fcntl.h>
-#include <strings.h>   // strncasecmp (ss_link_model)
+#include <strings.h>   // strncasecmp, strcasecmp (ss_link_model)
 #include <time.h>
 
 #define SS_MAX_BODY (64u << 20)    // the server's limit for a body, and the app's for a tar it makes or reads
@@ -232,11 +232,11 @@ static int ss_cfg_text(const char *txt, ss_cfg *c) {   // 1: on (an http(s):// a
 // next upload's base is fbase); auth: the server refused the token; last_up: when the save last went up (Unix seconds). have: the file was there (a first setup has none).
 // offline_play (op_seq, op_sha: the last sync's seq and hash then): a run played without the sync (B at the start, the launcher's Play without the sync, a trial build,
 // this device only): the next start with the sync asks before this device's save goes up, if it changed since. mode: this game's SS_MODE_* (the launcher's Cloud save
-// page, the pause menu's switch; an older state's off=1 reads as SS_MODE_LOCAL, and off= is still written for it). relink: the mode left SS_MODE_LOCAL, so the next
+// page; an older state's off=1 reads as SS_MODE_LOCAL, and off= is still written for it). relink: the mode left SS_MODE_LOCAL, so the next
 // check is a first connection (ss_set_mode). m_device, m_time: the cloud's save as the server last told (who uploaded it, when; "" and 0 for none); checked: when the
 // server last answered (Unix seconds), for the launcher while it is offline
 enum { SS_MODE_AUTO,     // each save goes up about 3 s after the game commits it, and when the app leaves the screen or ends (the default)
-       SS_MODE_MANUAL,   // nothing goes up by itself: the player's Upload now (the pause menu, the launcher, the start's question) only; the next start asks about a save not sent
+       SS_MODE_MANUAL,   // nothing goes up by itself: the player's Upload now (the launcher, the start's question) only; the next start asks about a save not sent
        SS_MODE_LOCAL };  // this device only: nothing downloaded, uploaded or signalled (no network at all): a save kept for testing
 typedef struct { int have; uint64_t seq; char sha[65]; int pending, conflict, force, auth; uint64_t fbase, cseq; int64_t ctime, last_up; char cdevice[64];
                  int offline_play, mode, relink; uint64_t op_seq; char op_sha[65]; char m_device[64]; int64_t m_time, checked; } ss_state;
@@ -382,7 +382,7 @@ enum { SS_GO_UPTODATE,   // the server has this device's save: the state takes t
        SS_GO_DOWNLOAD,   // the server's is newer and this device's did not change since the last sync (or it has none): take the server's
        SS_GO_CONFLICT,   // both changed since the last sync (or a first setup finds a save on both): the player chooses, nothing is overwritten by itself
        SS_GO_OFFLINE,    // the server did not answer: the game starts with the device's save
-       SS_GO_AUTH,       // the server refused the token: as offline, and the menu says so
+       SS_GO_AUTH,       // the server refused the token: as offline (savecloud_android.c token_refused: sync.txt aside, link/start once)
        SS_GO_ASK_OFFLINE,  // a run without the sync changed this device's save and the server did not move: the player chooses (back to the cloud's, upload it, keep it)
        SS_GO_ASK_MANUAL }; // SS_MODE_MANUAL: this device's save changed (or none is on the server) and the server did not move: the player chooses (upload it, or keep it)
 // local: this device's archive hash, NULL when it has no save. *pending: whether an upload is owed afterwards (a conflict or a question owes none until the player chooses;
@@ -425,7 +425,7 @@ static void ss_set_mode(ss_state *s, int mode) {
     s->mode = mode; s->have = 1;
 }
 // whether a mode sends this device's save for an event: the game saved (SS_EV_SAVE), the app leaves the screen or ends (SS_EV_LEAVE: onPause, the menu's Exit game),
-// the player asked for it (SS_EV_ASKED: Upload now in the menu or the launcher, a card of the start chosen). This device only sends nothing, ever
+// the player asked for it (SS_EV_ASKED: Upload now in the launcher, a card of the start chosen). This device only sends nothing, ever
 enum { SS_EV_SAVE, SS_EV_LEAVE, SS_EV_ASKED };
 static int ss_uploads(int mode, int ev) { return mode == SS_MODE_AUTO || (mode == SS_MODE_MANUAL && ev == SS_EV_ASKED); }
 // The server's save is this device's now (the launcher's Back to the cloud save, the start's download): now_sha the archive of the save as it is after the import,
@@ -547,12 +547,30 @@ static int ss_link_body(char *o, size_t n, const char *key, const char *model, c
     int r = snprintf(o, n, "{\"key\":\"%s\",\"model\":\"%s\",\"game\":\"%s\",\"pkg\":\"%s\"}", key, m, g, p);
     return r > 0 && (size_t)r < n ? 0 : -1;
 }
-// "Retroid" + "Retroid Pocket Nova" as "Retroid Pocket Nova"; "samsung" + "SM-S918N" as "samsung SM-S918N"; neither: "Android"
-static void ss_link_model(char *o, size_t n, const char *manuf, const char *model) {
-    size_t ml = strlen(manuf);
-    if (!model[0]) snprintf(o, n, "%s", manuf[0] ? manuf : "Android");
-    else if (!ml || !strncasecmp(model, manuf, ml)) snprintf(o, n, "%s", model);
-    else snprintf(o, n, "%s %s", manuf, model);
+// The device's name for the link (rooms shows it on its device list): ro.product.model, after the brand only when that says more. A model that starts with its brand's,
+// manufacturer's or a known brand's word already names it ("Retroid Pocket Nova", "Xiaomi 14", "Odin2"); else a consumer brand (SS_BRANDS: ro.product.brand first, then
+// ro.product.manufacturer) goes in front in its own spelling ("Samsung SM-S918N", "Google Pixel 8"); any other manufacturer (a contract maker, "Moorechip", a SoC's
+// "rockchip") is left out: the model alone. No model: the brand, the manufacturer, or "Android"
+static const char *const SS_BRANDS[] = {"Samsung", "Google", "Xiaomi", "Redmi", "POCO", "OnePlus", "Sony", "Motorola", "Nokia", "LG", "OPPO", "vivo", "realme", "Huawei", "Honor",
+                                        "ASUS", "Lenovo", "Nothing", "nubia", "RedMagic", "ZTE", "Fairphone", "Razer", "AYN", "Odin", "Retroid", "Anbernic", "AYANEO", "GPD",
+                                        "Powkiddy", "Miyoo", NULL};
+static const char *ss_brand_of(const char *s) {   // the brand's own spelling, NULL when s is not one
+    if (!s[0]) return NULL;
+    for (int i = 0; SS_BRANDS[i]; i++) if (!strcasecmp(s, SS_BRANDS[i])) return SS_BRANDS[i];
+    return NULL;
+}
+static int ss_word_prefix(const char *s, const char *w) {   // s starts with the word w (any case; a digit may follow it, as in "Odin2", a letter may not)
+    size_t k = strlen(w); if (!k || strncasecmp(s, w, k)) return 0;
+    char c = s[k]; return !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
+}
+static void ss_link_model(char *o, size_t n, const char *brand, const char *manuf, const char *model) {
+    char b[96], f[96], m[96]; snprintf(b, sizeof b, "%s", brand ? brand : ""); snprintf(f, sizeof f, "%s", manuf ? manuf : ""); snprintf(m, sizeof m, "%s", model ? model : "");
+    ss_trim(b); ss_trim(f); ss_trim(m);
+    const char *k = ss_brand_of(b); if (!k) k = ss_brand_of(f);
+    if (!m[0]) { snprintf(o, n, "%s", k ? k : f[0] ? f : b[0] ? b : "Android"); return; }
+    int named = ss_word_prefix(m, b) || ss_word_prefix(m, f);
+    for (int i = 0; !named && SS_BRANDS[i]; i++) named = ss_word_prefix(m, SS_BRANDS[i]);
+    if (named || !k) snprintf(o, n, "%s", m); else snprintf(o, n, "%s %s", k, m);
 }
 // what an answer of either request says (http: its status, body its JSON)
 enum { SS_LK_BAD,       // anything else (a 5xx, a body that cannot be read): tried again later
@@ -635,6 +653,23 @@ static void ss_link_host(char *o, size_t n, const char *url) {
     const char *s = !strncmp(url, "https://", 8) ? url + 8 : !strncmp(url, "http://", 7) ? url + 7 : url; snprintf(o, n, "%s", s);
     size_t k = strlen(o); while (k && o[k - 1] == '/') o[--k] = 0;
 }
+// A token the server refused (401 or 403 to meta, data or session: the device was unlinked on the web, or a hand-pushed token's device was merged into a linked one),
+// whether sync.txt came by hand or from the link: sync.txt goes aside to sync.txt.revoked (sync-state.txt stays: the save's sync is the device's, not the token's), and
+// once a run link/start is asked with the device's key. linked:true: its token is the new sync.txt and the refused request goes again (quietly: the game may run);
+// anything else, or a second refusal in the same run: not linked (the app as one never linked: the launcher's page links it, the next start asks link/start again).
+// Never a question: the game may be running
+static int ss_refused(int code) { return code == 401 || code == 403; }
+typedef struct { int tried; } ss_reauth;   // this run's (savecloud_android.c C.reauth)
+enum { SS_RA_ASK,       // sync.txt aside, link/start asked
+       SS_RA_STOP,      // sync.txt aside, not linked (no key, a trial build, or the run asked already)
+       SS_RA_RETRY };   // (ss_reauth_end) a new sync.txt: the request again
+static int ss_reauth_begin(ss_reauth *r, int has_key, int trial) { int first = !r->tried; r->tried = 1; return first && has_key && !trial ? SS_RA_ASK : SS_RA_STOP; }
+static int ss_reauth_end(int lk, int taken) { return lk == SS_LK_LINKED && taken ? SS_RA_RETRY : SS_RA_STOP; }   // lk: link/start's SS_LK_* (-1 no answer); taken: sync.txt written and read
+static int ss_revoke(const char *sync_path) {   // sync.txt to <it>.revoked (one there before is replaced); 0, also when there is none; -1 (errno) when it stays
+    char t[1100]; if (snprintf(t, sizeof t, "%s.revoked", sync_path) >= (int)sizeof t) { errno = ENAMETOOLONG; return -1; }
+    if (!rename(sync_path, t) || errno == ENOENT) return 0;
+    return unlink(sync_path) && errno != ENOENT ? -1 : 0;   // (cannot be renamed: it goes all the same, a refused token is no use)
+}
 
 // ---- while the game runs (savecloud_android.c's upload thread): what a tick does, what an upload's answer does to the state, which corner notes show. No question is ever
 // asked once the game runs: a conflict found then is kept for the next start's cards ----
@@ -645,7 +680,7 @@ static void ss_link_host(char *o, size_t n, const char *url) {
 typedef struct {
     int syncs;               // this run syncs (not skipped, not a trial build, not this device only, the token not refused)
     int mode;                // SS_MODE_AUTO or SS_MODE_MANUAL
-    int kick;                // the player asked for an upload (the menu's Upload now, a card's choice)
+    int kick;                // the player asked for an upload (the launcher's Upload now, a card's choice)
     int net;                 // the device has a network now (ConnectivityManager): 1, 0, or -1 when not known
     int was_net;             // the last tick's net
     int sess_open;           // the server took this run's open (or a heartbeat)

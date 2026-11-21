@@ -1,15 +1,17 @@
 // Android port: the save's cloud sync, as Steam Cloud does it for a game: the save is taken from the server before the game starts when the server's is newer, and goes up
 // soon after the game commits it and when the app leaves the screen. The server (rooms: /api/saves/g/<package>/{meta,data,session}, a Bearer token) keeps one save a game,
 // opaque bytes: the deterministic tar of savesync.h, whose SHA-256 is the save's identity. savesync.h holds the parts that need no Android (the archive, sync.txt, the state,
-// the meta, the start's decision; dm/host/tests/t_savesync.c tests them); this file is the transport, the threads, the start screen's content and the pause menu's row.
+// the meta, the start's decision; dm/host/tests/t_savesync.c tests them); this file is the transport, the threads, the start screen's content and the corner mark.
 //
 // The device link writes sync.txt (savesync.h ss_link_*): a start without it asks rooms' link/start once (3 s at most, online, not a trial build, not this device only) with
 // the device's key (sha256 of "nx2a-savecloud:" + ANDROID_ID, the same for every game this signing key ports): another game on the device linked it already, so the
 // token comes back at once, sync.txt is written and the check goes on; else the start goes on without the sync (no code is shown at the start). The launcher's Cloud
 // save page links by hand (link_thread: a code and its QR code, polled every 3 s; dm_cloud_link_*) and unlinks this app (sync.txt removed, dm_cloud_unlink).
+// A token the server refuses (401/403 to meta, data or session; a hand-pushed sync.txt's or the link's alike) moves sync.txt to sync.txt.revoked and asks link/start
+// once a run (token_refused): linked, the new token is used at once and the request goes again; else the run goes on as not linked. Never a question in the game.
 // Off unless the files folder has sync.txt (url=, token=, device=: savesync.h ss_cfg): without it nothing here runs and the app is as it was. The token is never logged
-// (its first 4 characters only). A trial build (an APK without a data server, a debuggable one, env.txt's DM_SAVESYNC=off) and a game whose sync the player switched off in
-// the pause menu run without the network at all; such a run is marked offline_play in the state (saves/sync-state.txt), and the next start with the sync asks before that
+// (its first 4 characters only). A trial build (an APK without a data server, a debuggable one, env.txt's DM_SAVESYNC=off) and a game whose sync the player switched off (the
+// launcher's Cloud save page: this device only) run without the network at all; such a run is marked offline_play in the state (saves/sync-state.txt), and the next start with the sync asks before that
 // run's save goes up.
 //
 // Offline first: a device without a network (ConnectivityManager: none at all) starts the game at once with its save, no question. The start (dm_cloud_begin, from game_start before the host mounts the save, after the save manager's
@@ -33,7 +35,7 @@
 // when it went up, its check (uploads less than 3 s apart: one spinner, one check); waiting and a conflict a change of state only, none of a kind within 5 min
 // (savesync.h ss_up_begin, ss_up_end, ss_mark_now). Every network failure is a log line: the game never waits for the network once it runs.
 //
-// The mode (savesync.h SS_MODE_*, the game's own, in its state): automatic as above; manual sends only what the player asks for (the menu's Upload now, the launcher's,
+// The mode (savesync.h SS_MODE_*, the game's own, in its state): automatic as above; manual sends only what the player asks for (the launcher's Upload now,
 // a card of the start), a burst of commits is only hashed (owed or not: the struck-through cloud stays in the corner while a save is owed), and the next start asks
 // about it (ManualPending.dc.html) unless the cloud moved too (the conflict's cards); this device only asks and sends nothing (no network at all), and leaving it makes
 // the next check a first connection. The launcher (datasync_android.c) reads this file's state (dm_cloud_info_get) and asks it for Upload now, Back to the cloud save
@@ -54,8 +56,6 @@
 
 uint64_t dm_fs_commit_count(void);       // hle_fs.c
 const uint8_t *dm_overlay_font(void);    // overlay_theme.c
-void dm_overlay_redraw(void);            // the backend (front_android.c has a weak one): the held game's last frame presented again
-int dm_menu_state(void);                 // front_android.c: -1 when the pause menu is closed
 
 static int64_t now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
 static int has_glyph(uint32_t cp) { const pf_index *g = pf_find(dm_overlay_font(), cp); return g && (g->cp_adv >> 8) == cp; }   // not the U+FFFD a font without it draws
@@ -72,17 +72,18 @@ static struct {
     int sess_open;                       // the server took this run's session open (or a heartbeat): a run that started offline opens it once the network is back
     ss_notes notes;                      // the corner marks (savesync.h ss_up_begin, ss_up_end, ss_mark_now)
     int64_t next_try;                    // when an owed upload is tried again (monotonic ms)
-    unsigned ver;                        // the menu row's version
+    unsigned ver;                        // moves on with each change of the state (changed_locked)
     JavaVM *vm; jobject act;             // the NativeActivity (a global reference, ANativeActivity.clazz)
     ss_meta meta; int meta_ok;           // the server's meta as this run's check (or a launcher's) last read it
     int lknown; char lsha[65]; uint64_t lsize; int64_t lfiles, lt;   // this device's save as its archive, before the game (the launcher's page)
     int busy, prog; char result[96]; int result_bad;   // the launcher's action (DM_CLOUD_ACT_*) and its download's progress; its outcome
     int attached, trial_base, reached, auto_tried;     // dm_cloud_attach ran; no data server or debuggable (trial without env.txt's word); dm_cloud_begin ran; its link/start asked
     char key[65], model[96], label[160];               // the device link's: the device's key (never logged whole), its model, the app's label
+    unsigned cfg_gen;                                  // moves on each time C.cfg changes (a request's hres.gen: which token it was sent with)
+    ss_reauth reauth; int reauth_busy;                 // a refused token's link/start (savesync.h ss_reauth_*: once a run); one thread at a time asks it
 } C = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, .mode = SS_RUN_NONE};
 static void st_save_locked(void) { if (C.state_path[0] && ss_state_save(C.state_path, &C.st)) LOG("[RED] cloud: cannot write %s (errno %d)", C.state_path, errno); }
 static void changed_locked(void) { C.ver++; }
-static void menu_redraw(void) { if (dm_menu_state() >= 0) dm_overlay_redraw(); }   // (the panel compares dm_cloud_menu_ver)
 _Static_assert(SS_MARK_BUSY == DM_CLOUD_MARK_BUSY && SS_MARK_SAVED == DM_CLOUD_MARK_SAVED && SS_MARK_WAITING == DM_CLOUD_MARK_OFFLINE && SS_MARK_CONFLICT == DM_CLOUD_MARK_CONFLICT
                && SS_MARK_SAVED_MS == DM_CLOUD_MARK_SAVED_MS && SS_MARK_WAITING_MS == DM_CLOUD_MARK_OFFLINE_MS && SS_MARK_CONFLICT_MS == DM_CLOUD_MARK_CONFLICT_MS, "the corner marks");
 
@@ -127,7 +128,7 @@ static int jinit(JNIEnv *E) {
     int ok = J.ok; pthread_mutex_unlock(&J_mu); return ok;
 }
 static JNIEnv *jattach(void) { JNIEnv *E = NULL; if ((*C.vm)->AttachCurrentThread(C.vm, &E, NULL) != JNI_OK) return NULL; return jinit(E) ? E : NULL; }
-typedef struct { int code; ss_buf body; char seq[32], sha[80], why[200]; } hres;
+typedef struct { int code; ss_buf body; char seq[32], sha[80], why[200]; unsigned gen; } hres;   // gen: C.cfg_gen when its token was taken
 typedef void (*hprog)(uint64_t done, int64_t total);
 static void jheader(JNIEnv *E, jobject C_, const char *k, char *out, size_t cap) {
     out[0] = 0; jstring n = (*E)->NewStringUTF(E, k); jstring v = n ? (*E)->CallObjectMethod(E, C_, J.mHeader, n) : NULL;
@@ -151,7 +152,11 @@ static int http_req(JNIEnv *E, const char *method, const char *url, const uint8_
     (*E)->CallVoidMethod(E, Cn, J.mCaches, JNI_FALSE); if (jx(E, r->why, sizeof r->why)) goto out;
     (*E)->CallVoidMethod(E, Cn, J.mMethod, (*E)->NewStringUTF(E, method)); if (jx(E, r->why, sizeof r->why)) goto out;
     int bad = 0;
-    if (auth_on && C.cfg.token[0]) { snprintf(auth_h, sizeof auth_h, "Bearer %s", C.cfg.token); bad = jprop(E, Cn, "Authorization", auth_h); memset(auth_h, 0, sizeof auth_h); }
+    if (auth_on) {   // (C.cfg may change on another thread: a refused token's new one)
+        pthread_mutex_lock(&C.mu); r->gen = C.cfg_gen; int tk = C.cfg.token[0] != 0; if (tk) snprintf(auth_h, sizeof auth_h, "Bearer %s", C.cfg.token); pthread_mutex_unlock(&C.mu);
+        if (tk) bad = jprop(E, Cn, "Authorization", auth_h);
+        memset(auth_h, 0, sizeof auth_h);
+    }
     if (bad || jprop(E, Cn, "Accept-Encoding", "identity")) { snprintf(r->why, sizeof r->why, "a request header was refused"); goto out; }
     buf = (*E)->NewByteArray(E, 256 << 10); if (jx(E, r->why, sizeof r->why) || !buf) goto out;
     if (strcmp(method, "GET")) {   // PUT and POST: a body of a known length (POST's is empty)
@@ -214,16 +219,25 @@ static int snap(ss_buf *t, char sha[65], int64_t *newest, char *err, size_t ecap
     if (!r) ss_sha256(t->p, t->n, sha); else sha[0] = 0;
     return r;
 }
-static void url_of(char *o, size_t n, const char *what) { snprintf(o, n, "%s/%s", C.base, what); }
+static void url_of(char *o, size_t n, const char *what) { pthread_mutex_lock(&C.mu); snprintf(o, n, "%s/%s", C.base, what); pthread_mutex_unlock(&C.mu); }   // (C.mu not held)
+static int token_refused(JNIEnv *E, unsigned gen);
+static void link_none(void);
 enum { SESS_OPEN, SESS_ALIVE, SESS_CLOSED };
 static int owed_now(void) { pthread_mutex_lock(&C.mu); int d = C.st.pending || C.st.conflict; pthread_mutex_unlock(&C.mu); return d; }   // a save the cloud has not got
 // The session: state and dirty (a save still owed), 0 when the server took it. A heartbeat (alive) logs only when its outcome or its dirty changed
 static int session_post(JNIEnv *E, int state, int dirty, int64_t deadline) {
     static const char *const NAME[] = {"open", "alive", "closed"};
     static int last_alive = -1;   // the last heartbeat's outcome (0 ok, 1 not), dirty in bit 1 (the upload thread's only)
-    char u[1400], dev[200]; ss_qenc(dev, sizeof dev, C.cfg.device);
-    snprintf(u, sizeof u, "%s/session?state=%s&dirty=%d&device=%s", C.base, NAME[state], dirty ? 1 : 0, dev);
-    hres r; int got = http_do(E, "POST", u, NULL, 0, NULL, 3000, deadline, 64 << 10, &r, NULL); int ok = !got && r.code == 200;
+    hres r; int got = -1;
+    for (int again = 0; again < 2; again++) {   // a refused token: once more with the new one (token_refused)
+        char u[1400], dev[200];
+        pthread_mutex_lock(&C.mu); ss_qenc(dev, sizeof dev, C.cfg.device); snprintf(u, sizeof u, "%s/session?state=%s&dirty=%d&device=%s", C.base, NAME[state], dirty ? 1 : 0, dev); pthread_mutex_unlock(&C.mu);
+        got = http_do(E, "POST", u, NULL, 0, NULL, 3000, deadline, 64 << 10, &r, NULL);
+        if (got || !ss_refused(r.code) || again) break;
+        ss_buf_free(&r.body); unsigned g = r.gen;
+        if (!token_refused(E, g)) { LOG("cloud: session %s: the token was refused and this device is not linked now", NAME[state]); return -1; }
+    }
+    int ok = !got && r.code == 200;
     int quiet = 0;
     if (state == SESS_ALIVE) { int o = (ok ? 0 : 1) | (dirty ? 2 : 0); quiet = o == last_alive; last_alive = o; }
     else last_alive = -1;
@@ -434,15 +448,16 @@ static void start_check(JNIEnv *E, int recheck) {
         else if (net == SS_NET_FAIL) LOG("[RED] cloud: the server answered HTTP %d%s", r.code, r.code == 200 ? " with a meta that cannot be read" : "");
         // (a 404 still carries the session, {"error":"none","session":…}: a game another device runs before its first upload is seen too)
         ss_buf_free(&r.body);
-        if (net == SS_NET_FAIL || net == SS_NET_UNAUTH) {
-            pthread_mutex_lock(&C.mu); C.st.auth = net == SS_NET_UNAUTH; int p; ss_decide(net, &m, &C.st, loc, &p); if (p) C.st.pending = 1; C.offline = net == SS_NET_FAIL; C.meta_ok = 0; st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
-            if (net == SS_NET_UNAUTH) {
-                LOG("[RED] cloud: the server refused the token (sync.txt's token=, %.4s...)", C.cfg.token);
-                ask_view(DM_CLOUD_ICON_WARN, ko ? "기기 연결이 끊겼어요 (토큰)" : "This device is no longer linked (token)", ko ? "sync.txt의 토큰을 확인해 주세요. 이 기기 세이브로 시작해요." : "Check the token in sync.txt. The game starts with this device's save.", NULL,
-                         1, ko ? "그래도 플레이" : "Play anyway", NULL, NULL, NULL);
-                if (ask(10000, "%d초 뒤 자동으로 시작해요", "Starting by itself in %d s") >= 0) finish(0, 0, 0);
-                break;
-            }
+        if (net == SS_NET_UNAUTH) {   // the token was refused: sync.txt aside, link/start once (token_refused); linked, the check again with the new token
+            wait_view("기기 확인 중…", "Looking for the link…");
+            if (token_refused(E, r.gen)) { if (ended()) break; continue; }
+            pthread_mutex_lock(&C.mu); int p; ss_decide(net, &m, &C.st, loc, &p); if (p) C.st.pending = 1; C.st.auth = 0; if (C.state_path[0]) st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
+            LOG("cloud: the game starts with this device's save, without the sync (not linked: the launcher's Cloud save page links it, the next start asks again)");
+            link_none();   // (the step "Not linked", no question; the start goes on)
+            break;
+        }
+        if (net == SS_NET_FAIL) {
+            pthread_mutex_lock(&C.mu); C.st.auth = 0; int p; ss_decide(net, &m, &C.st, loc, &p); if (p) C.st.pending = 1; C.offline = 1; C.meta_ok = 0; st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
             ask_view(DM_CLOUD_ICON_OFFLINE, ko ? "클라우드에 연결할 수 없어요" : "The cloud cannot be reached", ko ? "이 기기 세이브로 시작해요. 연결되면 나중에 올려요." : "The game starts with this device's save; it goes up once there is a connection.", NULL,
                      2, ko ? "그래도 플레이" : "Play anyway", ko ? "다시 시도" : "Retry", NULL, NULL);
             int c = ask(10000, "%d초 뒤 자동으로 시작해요", "Starting by itself in %d s");
@@ -543,7 +558,6 @@ static void start_check(JNIEnv *E, int recheck) {
     }
 }
 static int autolink(JNIEnv *E);
-static void link_none(void);
 static void *start_thread(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "cloudstart");
     JNIEnv *E = jattach();
@@ -646,12 +660,13 @@ static int upload(JNIEnv *E, int64_t deadline) {
     }
     if (r) { LOG("[RED] cloud: the save cannot be archived for the upload: %s", err); pthread_mutex_lock(&C.mu); C.st.pending = 1; C.next_try = now_ms() + BACKOFF[3]; changed_locked(); pthread_mutex_unlock(&C.mu); return UP_ERR; }
     int64_t files = ss_tar_files(t.p, t.n);   // (the server keeps it beside the size: another device's conflict card shows both)
-    pthread_mutex_lock(&C.mu); C.st.pending = 1; C.uploading = 1; ss_up_begin(&C.notes, now_ms()); changed_locked(); pthread_mutex_unlock(&C.mu); menu_redraw();   // the spinner
-    int rc = UP_ERR, note = SS_NOTE_NONE;
-    for (int round = 0; round < 2; round++) {
-        char u[1700], dev[200], gv[100], bd[100], fc[32] = ""; ss_qenc(dev, sizeof dev, C.cfg.device); ss_qenc(gv, sizeof gv, C.gver); ss_qenc(bd, sizeof bd, C.build);
+    pthread_mutex_lock(&C.mu); C.st.pending = 1; C.uploading = 1; ss_up_begin(&C.notes, now_ms()); changed_locked(); pthread_mutex_unlock(&C.mu);   // the spinner
+    int rc = UP_ERR, note = SS_NOTE_NONE, zeroed = 0, relinked = 0;
+    for (;;) {   // again: once with base 0 (the server has no save any more), once with a new token (the old one refused: token_refused)
+        char u[1700], dev[200], gv[100], bd[100], fc[32] = ""; ss_qenc(gv, sizeof gv, C.gver); ss_qenc(bd, sizeof bd, C.build);
         if (files >= 0) snprintf(fc, sizeof fc, "&files=%lld", (long long)files);
-        snprintf(u, sizeof u, "%s/data?base=%llu&device=%s&gameVersion=%s&build=%s%s", C.base, (unsigned long long)base, dev, gv, bd, fc);
+        pthread_mutex_lock(&C.mu); ss_qenc(dev, sizeof dev, C.cfg.device);
+        snprintf(u, sizeof u, "%s/data?base=%llu&device=%s&gameVersion=%s&build=%s%s", C.base, (unsigned long long)base, dev, gv, bd, fc); pthread_mutex_unlock(&C.mu);
         hres h; int got = http_do(E, "PUT", u, t.p, t.n, sha, 5000, deadline, 256 << 10, &h, NULL);
         ss_meta m; memset(&m, 0, sizeof m);
         pthread_mutex_lock(&C.mu);
@@ -672,13 +687,19 @@ static int upload(JNIEnv *E, int64_t deadline) {
             LOG("cloud: the save went up: seq %llu, %zu bytes, %lld files, %.12s", (unsigned long long)seq, t.n, (long long)files, sha);
         } else if (h.code == 409) {
             int k = ss_conflict_parse((const char *)h.body.p, h.body.n, &m);
-            if (k == 0 && base && round == 0) {   // the server has no save (it was cleared): again with base 0
-                LOG("cloud: the server has no save any more: sent again as the first one"); base = 0; C.st.seq = 0; C.st.force = 0;
+            if (k == 0 && base && !zeroed) {   // the server has no save (it was cleared): again with base 0
+                LOG("cloud: the server has no save any more: sent again as the first one"); base = 0; C.st.seq = 0; C.st.force = 0; zeroed = 1;
                 pthread_mutex_unlock(&C.mu); ss_buf_free(&h.body); continue;
             }
             note = ss_after_put(&C.st, 409, 0, sha, &m, 0); C.offline = 0; rc = UP_CONFLICT;   // never overwritten, never asked while the game runs: the next start's cards
             LOG("[RED] cloud: the server moved on (seq %llu from %s, this device's base %llu): a conflict, the next start asks which save to keep", (unsigned long long)m.seq, m.device[0] ? m.device : "-", (unsigned long long)base);
-        } else if (h.code == 401 || h.code == 403) { ss_after_put(&C.st, h.code, 0, sha, NULL, 0); rc = UP_ERR; LOG("[RED] cloud: the server refused the token (sync.txt's token=, %.4s...)", C.cfg.token); }
+        } else if (ss_refused(h.code)) {   // sync.txt aside, link/start once (quietly, the game may run): linked, the same save again with the new token
+            pthread_mutex_unlock(&C.mu); ss_buf_free(&h.body);
+            int k = token_refused(E, h.gen);   // (a second refusal, the new token's: not linked now)
+            pthread_mutex_lock(&C.mu);
+            if (k && !relinked && C.mode == SS_RUN_SYNC) { relinked = 1; pthread_mutex_unlock(&C.mu); LOG("cloud: the upload goes again with the new token"); continue; }
+            C.st.pending = 1; rc = UP_ERR;   // (still owed: it goes up once this device is linked again)
+        }
         else { C.next_try = now_ms() + (h.code == 413 ? 24ll * 3600 * 1000 : BACKOFF[3]); rc = UP_ERR;
                LOG("[RED] cloud: the upload was refused: HTTP %d%s", h.code, h.code == 400 ? " (the hash did not match)" : h.code == 413 ? " (the save is too big for the server)" : ""); }
         C.uploading = 0; ss_up_end(&C.notes, note, now_ms()); st_save_locked(); changed_locked();   // its check (once no upload follows within 3 s), or its note
@@ -686,7 +707,7 @@ static int upload(JNIEnv *E, int64_t deadline) {
         break;
     }
     pthread_mutex_lock(&C.mu); C.uploading = 0; pthread_mutex_unlock(&C.mu);
-    ss_buf_free(&t); menu_redraw();
+    ss_buf_free(&t);
     return rc;
 }
 // The app leaves the screen: what is owed goes up now, then the session closes with what is still owed; under a 15 s wake lock
@@ -704,14 +725,14 @@ static void pause_flush(JNIEnv *E, int *dirty, int syncs, const ss_tick_in *ti) 
     pthread_mutex_lock(&C.mu); C.sess_open = 0; pthread_mutex_unlock(&C.mu);
     wake_lock(E, 0, 0);
 }
-// manual: whether the save the game committed is the one the cloud has (owed or not), for the menu's row and the corner's mark: archived and hashed, nothing sent
+// manual: whether the save the game committed is the one the cloud has (owed or not), for the launcher's page and the corner's mark: archived and hashed, nothing sent
 static void check_owed(void) {
     ss_buf t; char sha[65], err[600]; int64_t nw; int r = snap(&t, sha, &nw, err, sizeof err); if (!r) ss_buf_free(&t);
     if (r < 0) { LOG("[RED] cloud: the save cannot be archived to compare (%s)", err); return; }
     pthread_mutex_lock(&C.mu);
     int owed = C.st.conflict || C.st.force || (r == 0 ? strcmp(sha, C.st.sha) != 0 : C.st.sha[0] != 0);
     if (owed != C.st.pending) { C.st.pending = owed; st_save_locked(); changed_locked(); LOG("cloud: manual: %s", owed ? "a save not sent (Upload now sends it)" : "the save is the cloud's again"); }
-    pthread_mutex_unlock(&C.mu); menu_redraw();
+    pthread_mutex_unlock(&C.mu);
 }
 // The upload thread: the commit count polled every 1.5 s; a burst of commits goes up once a poll saw none (about 3 s after the game saved). Each tick asks savesync.h
 // ss_tick what to do: with no network on the device nothing is tried; when it comes back an owed save goes up at once (its backoff forgotten) and a session that never
@@ -777,34 +798,7 @@ int dm_cloud_flush(int ms) {
 }
 void dm_cloud_resume(void) { pthread_mutex_lock(&C.mu); if (C.up_started) { C.resume_ev = 1; C.next_try = 0; pthread_cond_broadcast(&C.cv); } pthread_mutex_unlock(&C.mu); }
 
-// ---- the pause menu's row and the corner note ----
-int dm_cloud_available(void) { return C.mode != SS_RUN_NONE; }
-int dm_cloud_status(char *note, int cap) {
-    pthread_mutex_lock(&C.mu); note[0] = 0;
-    int s = C.mode == SS_RUN_NONE ? DM_CLOUD_OFF : C.st.mode == SS_MODE_LOCAL ? DM_CLOUD_DISABLED : C.mode == SS_RUN_SUPPRESSED ? (C.trial ? DM_CLOUD_TRIAL : DM_CLOUD_DISABLED) : C.skipped || C.st.offline_play ? DM_CLOUD_SKIPPED
-          : C.uploading ? DM_CLOUD_UPLOADING : C.st.auth ? DM_CLOUD_AUTH : C.st.conflict ? DM_CLOUD_CONFLICT : C.st.pending ? (C.offline ? DM_CLOUD_OFFLINE : DM_CLOUD_PENDING) : DM_CLOUD_UPTODATE;
-    if (C.st.last_up > 0) { time_t t = (time_t)C.st.last_up; struct tm tm; localtime_r(&t, &tm); strftime(note, (size_t)cap, "%H:%M", &tm); }
-    if (s == DM_CLOUD_DISABLED && C.st.mode != SS_MODE_LOCAL) snprintf(note, (size_t)cap, "on at next start");
-    pthread_mutex_unlock(&C.mu); return s;
-}
-unsigned dm_cloud_menu_ver(void) { pthread_mutex_lock(&C.mu); unsigned v = C.ver; pthread_mutex_unlock(&C.mu); return v; }
-void dm_cloud_menu_press(void) {
-    pthread_mutex_lock(&C.mu); int ok = C.up_started && C.st.pending && !C.st.conflict && !C.uploading && C.st.mode != SS_MODE_LOCAL;
-    if (ok) { C.kick = 1; C.next_try = 0; pthread_cond_broadcast(&C.cv); LOG("[menu] cloud save: upload now"); }
-    pthread_mutex_unlock(&C.mu);
-}
-// the menu's switch: on (automatic or manual) to this device only, from now on; off (this device only) to automatic at the next start, whose check is a first connection's.
-// A trial build stays this device only
-void dm_cloud_menu_toggle(void) {
-    pthread_mutex_lock(&C.mu);
-    if (C.mode != SS_RUN_NONE && !C.trial) {
-        int to = C.st.mode == SS_MODE_LOCAL ? SS_MODE_AUTO : SS_MODE_LOCAL; ss_set_mode(&C.st, to);
-        st_save_locked(); changed_locked();
-        LOG("[menu] cloud save %s", to == SS_MODE_LOCAL ? "switched to this device only for this game" : "switched to automatic for this game (from the next start, its check a first connection's)");
-    }
-    pthread_mutex_unlock(&C.mu); menu_redraw();
-}
-int dm_cloud_manual(void) { pthread_mutex_lock(&C.mu); int m = C.mode != SS_RUN_NONE && C.st.mode == SS_MODE_MANUAL; pthread_mutex_unlock(&C.mu); return m; }
+// ---- the corner mark ----
 // The game's corner mark (gfx_vk_present.c ov_mark, at each present): the spinner from an upload's start (the upload thread's ss_up_begin) on while uploads follow
 // each other, then the check, or the waiting or conflict note (savesync.h ss_mark_now). None while the app leaves the screen. NONE: nothing is drawn. *age: ms since
 // the mark began
@@ -863,12 +857,12 @@ void dm_cloud_attach(ANativeActivity *act) {
     C.vm = act->vm; C.act = act->clazz;
     int dbg = 0; app_info(act, &dbg);
     AAsset *as = act->assetManager ? AAssetManager_open(act->assetManager, "nx2a/source.bin", AASSET_MODE_UNKNOWN) : NULL; if (as) AAsset_close(as);
-    char id[128] = "", mf[PROP_VALUE_MAX] = "", md[PROP_VALUE_MAX] = "";
+    char id[128] = "", br[PROP_VALUE_MAX] = "", mf[PROP_VALUE_MAX] = "", md[PROP_VALUE_MAX] = "";
     int have_id = !android_id(act->env, act->clazz, id, sizeof id);
-    __system_property_get("ro.product.manufacturer", mf); __system_property_get("ro.product.model", md);
+    __system_property_get("ro.product.brand", br); __system_property_get("ro.product.manufacturer", mf); __system_property_get("ro.product.model", md);
     pthread_mutex_lock(&C.mu);
     C.trial_base = !as || dbg; if (have_id) ss_link_key(id, C.key); else C.key[0] = 0;
-    ss_link_model(C.model, sizeof C.model, mf, md); if (!C.label[0]) snprintf(C.label, sizeof C.label, "%s", C.pkg);
+    ss_link_model(C.model, sizeof C.model, br, mf, md); if (!C.label[0]) snprintf(C.label, sizeof C.label, "%s", C.pkg);
     C.attached = 1; pthread_mutex_unlock(&C.mu);
     memset(id, 0, sizeof id);
     if (!have_id) LOG("[RED] cloud: the device's ANDROID_ID cannot be read: no device link on this device");
@@ -880,7 +874,7 @@ static int cfg_load_locked(void) {
     if (!root) return 0;
     snprintf(p, sizeof p, "%s/sync.txt", root); char *txt = ds_read(p, &n, 1 << 16);
     if (!txt) return 0;   // no sync.txt: as before the sync existed (or a link to come)
-    int on = ss_cfg_text(txt, &C.cfg); memset(txt, 0, n); free(txt);
+    int on = ss_cfg_text(txt, &C.cfg); memset(txt, 0, n); free(txt); C.cfg_gen++;
     if (!on) { LOG("[RED] cloud: %s has no url= (http:// or https://) and token=: the sync is off", p); return 0; }
     snprintf(C.state_path, sizeof C.state_path, "%s/sync-state.txt", dm_saves_dir());
     char pk[600]; ss_qenc(pk, sizeof pk, C.pkg); snprintf(C.base, sizeof C.base, "%s/api/saves/g/%s", C.cfg.url, pk);
@@ -967,6 +961,45 @@ static int link_take(const ss_link *l) {
     if (C.reached && !C.began && cfg_load_locked() && C.mode == SS_RUN_SUPPRESSED) { ss_mark_offline_play(&C.st); st_save_locked(); }
     changed_locked(); pthread_mutex_unlock(&C.mu);
     return 0;
+}
+// A token the server refused (savesync.h ss_reauth_*): sync.txt to sync.txt.revoked, link/start once a run; linked, the new sync.txt is C.cfg and the request goes again;
+// else not linked: this run on without the sync (sync-state.txt kept), as an app never linked. Never a question (the game may be running). gen: the refused request's
+// hres.gen (another thread dealt with it since: its outcome). 1: send it again, 0: not linked now
+static int token_refused(JNIEnv *E, unsigned gen) {
+    const char *root = getenv("DM_ROOT"); char p[700]; snprintf(p, sizeof p, "%s/sync.txt", root ? root : ".");
+    pthread_mutex_lock(&C.mu);
+    while (C.reauth_busy) pthread_cond_wait(&C.cv, &C.mu);
+    if (C.cfg_gen != gen || !C.began) { int on = C.began && C.mode == SS_RUN_SYNC; pthread_mutex_unlock(&C.mu); return on; }
+    int go = ss_reauth_begin(&C.reauth, C.key[0] != 0, C.trial); C.reauth_busy = 1; char t4[8]; snprintf(t4, sizeof t4, "%.4s", C.cfg.token);
+    pthread_mutex_unlock(&C.mu);
+    LOG("[RED] cloud: the server refused the token (%s...): sync.txt to sync.txt.revoked%s", t4, go == SS_RA_ASK ? ", link/start asked" : ": not linked (asked once this run already, or no key)");
+    if (ss_revoke(p)) LOG("[RED] cloud: sync.txt cannot be moved aside (errno %d)", errno);
+    int k = -1, taken = 0; int64_t t0 = now_ms();
+    if (go == SS_RA_ASK) {
+        ss_link l; char why[200] = ""; k = link_start(E, 3000, t0 + 5000, &l, why, sizeof why);
+        if (k == SS_LK_LINKED && !link_take(&l)) {
+            pthread_mutex_lock(&C.mu); char *txt; size_t n = 0; ss_cfg c;
+            if ((txt = ds_read(p, &n, 1 << 16))) {
+                if (ss_cfg_text(txt, &c)) { char pk[600]; ss_qenc(pk, sizeof pk, C.pkg); C.cfg = c; snprintf(C.base, sizeof C.base, "%s/api/saves/g/%s", C.cfg.url, pk); C.cfg_gen++; C.st.auth = 0; taken = 1; }
+                memset(txt, 0, n); free(txt); memset(&c, 0, sizeof c);
+            }
+            pthread_mutex_unlock(&C.mu);
+        }
+        memset(&l, 0, sizeof l);
+        LOG("cloud: link/start after the refusal (%lld ms): %s", (long long)(now_ms() - t0), taken ? "linked by the device's key: the new token is used now"
+            : k == SS_LK_LINKED ? "linked, but the new sync.txt could not be written or read" : k == SS_LK_CODE ? "not linked (the launcher's Cloud save page links it)"
+            : k == SS_LK_LIMIT ? "asked too often (429)" : why[0] ? why : "no answer");
+    }
+    int ra = ss_reauth_end(k, taken);
+    pthread_mutex_lock(&C.mu);
+    if (ra != SS_RA_RETRY) {   // not linked: as dm_cloud_unlink (the state stays, with what is owed)
+        C.st.auth = 0; if (C.state_path[0]) st_save_locked();
+        C.began = 0; C.mode = SS_RUN_NONE; memset(&C.cfg, 0, sizeof C.cfg); C.cfg_gen++; C.meta_ok = 0; C.offline = 0; C.sess_open = 0; changed_locked();
+    }
+    C.reauth_busy = 0; pthread_cond_broadcast(&C.cv); pthread_mutex_unlock(&C.mu);
+    if (ra != SS_RA_RETRY) { LOG("cloud: this device is not linked now: no sync this run (the next start asks link/start again)"); dm_start_step(STV_CLOUD, STV_SKIP, korean() ? "기기 연결 필요" : "Not linked"); }
+    dm_cloud_screen_poke();
+    return ra == SS_RA_RETRY;
 }
 static int autolink(JNIEnv *E) {   // 1: linked, the check goes on; 0: not linked (the start goes on without the sync); -1: the start ended meanwhile
     ss_link l; char why[200] = ""; int64_t t0 = now_ms(); int k = link_start(E, 3000, t0 + 3000, &l, why, sizeof why);
@@ -1057,7 +1090,7 @@ int dm_cloud_unlink(void) {
     pthread_mutex_lock(&C.mu);
     int ok = C.began && !C.trial && !C.busy && !W.active && !C.up_started;
     if (ok && unlink(p) && errno != ENOENT) { LOG("[RED] cloud: sync.txt cannot be removed (errno %d)", errno); ok = 0; }
-    if (ok) { C.began = 0; C.mode = SS_RUN_NONE; memset(&C.cfg, 0, sizeof C.cfg); C.meta_ok = 0; C.offline = 0; C.result[0] = 0; W.up_after = 0; changed_locked(); }
+    if (ok) { C.began = 0; C.mode = SS_RUN_NONE; memset(&C.cfg, 0, sizeof C.cfg); C.cfg_gen++; C.meta_ok = 0; C.offline = 0; C.result[0] = 0; W.up_after = 0; changed_locked(); }
     pthread_mutex_unlock(&C.mu);
     if (!ok) return -1;
     LOG("cloud: the launcher unlinked this app (sync.txt removed; the device's other games stay linked)");
@@ -1123,8 +1156,12 @@ static void *act_thread(void *a) {
             else if (r == UP_NOTHING) act_result("올릴 진행이 없어요", "Nothing to upload", 0);
             else act_result("올리지 못했어요", "It could not be uploaded", 1);
         } else if (what == DM_CLOUD_ACT_RESTORE) {   // Back to the cloud save: the server's meta now, its save in, this device's to the backup slot
-            char u[1400], why[300] = ""; url_of(u, sizeof u, "meta"); hres r; ss_meta m; memset(&m, 0, sizeof m);
-            int got = http_do(E, "GET", u, NULL, 0, NULL, 3000, now_ms() + 5000, 256 << 10, &r, NULL);
+            char u[1400], why[300] = ""; hres r; ss_meta m; memset(&m, 0, sizeof m); int got;
+            for (int again = 0;; again++) {   // a refused token: once more with the new one (token_refused)
+                url_of(u, sizeof u, "meta"); got = http_do(E, "GET", u, NULL, 0, NULL, 3000, now_ms() + 5000, 256 << 10, &r, NULL);
+                if (got || !ss_refused(r.code) || again) break;
+                ss_buf_free(&r.body); if (!token_refused(E, r.gen)) break;
+            }
             int ok = !got && r.code == 200 && !ss_meta_parse((const char *)r.body.p, r.body.n, &m) && m.seq; ss_buf_free(&r.body);
             LOG("cloud: the launcher's Back to the cloud save: %s", ok ? "the server's save comes in" : got ? r.why : "the server has no save");
             if (!ok) act_result(got ? "클라우드에 연결할 수 없어요" : "클라우드에 세이브가 없어요", got ? "The cloud cannot be reached" : "The cloud has no save", 1);

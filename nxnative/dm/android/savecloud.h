@@ -105,14 +105,6 @@ void dm_cloud_link_end(void);    // Continue on Done: the page goes and, once th
 int dm_cloud_unlink(void);       // Unlink this app: sync.txt removed (the device's other games and the device stay linked on the server); 0, or -1 when it cannot be now
 #endif
 
-// the pause menu's Cloud save row (front_android.c, gfx_vk_present.c)
-enum { DM_CLOUD_OFF, DM_CLOUD_DISABLED, DM_CLOUD_TRIAL, DM_CLOUD_SKIPPED, DM_CLOUD_UPTODATE, DM_CLOUD_PENDING, DM_CLOUD_OFFLINE, DM_CLOUD_UPLOADING, DM_CLOUD_CONFLICT, DM_CLOUD_AUTH };
-int dm_cloud_available(void);              // the row is shown: sync.txt is there
-int dm_cloud_status(char *note, int cap);  // DM_CLOUD_*, and a note (when it last went up)
-int dm_cloud_manual(void);                 // this game's mode is manual: the row says Manual (its switch on)
-unsigned dm_cloud_menu_ver(void);          // changes with the status: the menu's panel is drawn again
-void dm_cloud_menu_press(void);            // the row: Upload now when an upload is owed
-void dm_cloud_menu_toggle(void);           // the row's switch: this game's sync on / off (kept in the sync state)
 // the game's corner mark (gfx_vk_present.c ov_mark), icons only, on a dark disc in the top right corner: a turning arc while an upload runs; a white check on a green disc that pops (0.2 s) and
 // fades after an upload went up; a cloud struck through while the save waits for a network; an orange "!" when another device's save is newer (the next start asks).
 // NONE: nothing is drawn. *age_ms: since the mark began
