@@ -85,7 +85,8 @@ SERVICES = [
 MANIFEST = ('manifest', [(False, 'package', PKG), (True, 'versionCode', ARGS.version_code), (True, 'versionName', ARGS.version_name)], [
     ('uses-sdk', [(True, 'minSdkVersion', MIN_SDK), (True, 'targetSdkVersion', TARGET_SDK)], []),
     *[('uses-permission', [(True, 'name', n)] + [(True, a, v) for a, v in more], []) for n, more in PERMISSIONS],   # (PERMISSIONS above)
-    ('application', [(True, 'label', LABEL)] + ([(True, 'icon', ('ref', ICON_ID))] if ARGS.icon else []) + [(True, 'hasCode', True),   # (the service's dex: every APK has code) (True, 'debuggable', not ARGS.release), (True, 'isGame', True), (True, 'extractNativeLibs', True),
+    ('application', [(True, 'label', LABEL)] + ([(True, 'icon', ('ref', ICON_ID))] if ARGS.icon else []) + [(True, 'hasCode', True),   # (the service's dex: every APK has code)
+        (True, 'debuggable', not ARGS.release), (True, 'isGame', True), (True, 'extractNativeLibs', True),
         (True, 'requestLegacyExternalStorage', True),
         *([(True, 'usesCleartextTraffic', True)] if ARGS.cleartext else []),   # --cleartext: the data server's http:// (front_android.c sync_fetch); off by default from target SDK 28
         (True, 'appCategory', 0),   # a game (appCategory game = 0, and the older isGame): Android's game mode and game dashboard, and the device maker's game tools, apply to it

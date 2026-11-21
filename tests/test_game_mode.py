@@ -141,7 +141,7 @@ class GameMode(unittest.TestCase):
         for gl in (False, True, None):
             with self.subTest(gl=gl), tempfile.TemporaryDirectory(prefix='nx2a_game_pipeline_') as temp:
                 t = Path(temp); p = object.__new__(pipeline.Port)
-                p.g = SimpleNamespace(); p.app_name = 'Synthetic'; p.pkg_ver = 'v0'; p.package = 'org.nx2a.probe'; p.display = '1.0'
+                p.g = SimpleNamespace(); p.app_name = 'Synthetic'; p.stem_name = 'Synthetic'; p.pkg_ver = 'v0'; p.package = 'org.nx2a.probe'; p.display = '1.0'
                 p.o = SimpleNamespace(out=t, vercode_offset=0, external_display=False, native_keyboard=False, vulkan_driver=None, debug=True)
                 p.ap = SimpleNamespace(landscape=False); p.so = t/'host.so'; p.logs = t; p.env = {}; p.result = {}
                 p.icon = p.theme = p.ui_font = lambda: []
