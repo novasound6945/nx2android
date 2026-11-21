@@ -13,8 +13,9 @@
 // An asset of version 2 (porter port --data-pointer) names a pointer file as well: the sync thread reads it before files.json (pointer_resolve), without the Authorization
 // header, and takes the server root and credentials it holds (+ the pack's folder under the root); without an answer, the pointer line it last read (kept in the app's
 // internal storage, encrypted as it came); without that, the asset's own address. An asset of version 1 never goes that way
-// The same screen shows the save's cloud sync at the start (savecloud_android.c dm_cloud_begin, after the shader preparation): its view (savecloud.h dm_cloud_view, which
-// that file fills) is the third step, or a question of its own; the screen shows only once the start took 300 ms, or at once for a question
+// The same screen shows the save's cloud sync at the start (savecloud_android.c: its early check from onCreate beside the data's step, dm_cloud_precheck; its questions
+// and what it puts in place after the shader preparation, dm_cloud_begin): its view (savecloud.h dm_cloud_view, which that file fills) is the third step, or a question
+// of its own; the screen shows only once the start took 300 ms, or at once for a question
 // The background download (bgdl.h decides, java_service/org/nx2a/DownloadService.java keeps the process alive): once bytes come, the download is a foreground
 // service's whose notification shows the game, the progress and the time left, with Pause / Cancel; the screen off, HOME or another app in front, it goes on (a wake lock
 // and a Wi-Fi lock while bytes come). Without a network it waits for one (the service's ConnectivityManager callback, no timed retries); the activity destroyed while it
@@ -248,7 +249,6 @@ static void sync_log(void *u, const char *m) { (void)u; LOG("%s", m); }
 enum { PH_NONE, PH_DATA, PH_PREP, PH_CLOUD, PH_NOTICE };
 static struct {
     int open, closing, closed, phase, shown, first_run, need_net, retry_now, has_server;
-    int unreached;   // the data's step started the game with the device's pack because its server was not reached (dm_data_unreached)
     int64_t t0;
     char name[160], version[128], checked[48];
     stv_step step[STV_NSTEPS];
@@ -405,6 +405,9 @@ static void build_launcher(stv_view *v, const snap_t *x, const stv_step *steps, 
     else if (ci->mode == 2) st_set(&s[2], STV_SKIP, L("클라우드 세이브 · 이 기기만", "Cloud save · this device only"));
     else if (ci->auth) st_set(&s[2], STV_FAIL, L("클라우드 세이브 · 연결 끊김", "Cloud save · unlinked"));
     else if (ci->offline) st_set(&s[2], STV_SKIP, L("클라우드 세이브 · 오프라인", "Cloud save · offline"));
+    else if (ci->pre_go == SS_GO_DOWNLOAD) st_set(&s[2], STV_WAIT, L("클라우드 세이브 · 시작할 때 받아요", "Cloud save · downloaded at the start"));   // (the early check's meta: the
+    else if (ci->pre_go == SS_GO_CONFLICT || ci->pre_go == SS_GO_ASK_OFFLINE || ci->pre_go == SS_GO_ASK_MANUAL)                                       // start's check does it)
+        st_set(&s[2], STV_WAIT, L("클라우드 세이브 · 시작할 때 물어봐요", "Cloud save · asked at the start"));
     else if (ci->local == DM_CLOUD_LOCAL_CONFLICT) st_set(&s[2], STV_FAIL, L("클라우드 세이브 · 고를 게 있어요", "Cloud save · a choice waits"));
     else if (ci->local == DM_CLOUD_LOCAL_OWED) st_set(&s[2], STV_FAIL, L("클라우드 세이브 · 안 올린 진행", "Cloud save · not uploaded"));
     else if (ci->local == DM_CLOUD_LOCAL_PLAYED) st_set(&s[2], STV_SKIP, L("클라우드 세이브 · 동기화 없이 한 플레이", "Cloud save · played without the sync"));
@@ -415,7 +418,9 @@ static void build_launcher(stv_view *v, const snap_t *x, const stv_step *steps, 
         snprintf(l->item[0], sizeof l->item[0], "%s", L("동기화 없이 플레이", "Play without the sync"));
         snprintf(l->note[0], sizeof l->note[0], "%s", ci->avail && ci->mode != 2 ? L("테스트 · 이번 판은 올리지 않아요", "A test · this run is not uploaded") : L("이번 판은 올리지 않아요", "This run is not uploaded"));
         snprintf(l->item[1], sizeof l->item[1], "%s", L("클라우드 세이브", "Cloud save"));
-        if (ci->noserver) snprintf(l->note[1], sizeof l->note[1], "%s", L("클라우드 서버 없음", "No cloud server"));
+        l->item_off[1] = ci->starting;   // (until the start's check ended: the link it may make, what it found)
+        if (ci->starting) snprintf(l->note[1], sizeof l->note[1], "%s", L("확인 중…", "Checking…"));
+        else if (ci->noserver) snprintf(l->note[1], sizeof l->note[1], "%s", L("클라우드 서버 없음", "No cloud server"));
         else if (!ci->avail) snprintf(l->note[1], sizeof l->note[1], "%s", steps[STV_CLOUD].state == STV_SKIP ? L("기기 연결 필요", "Not linked") : L("확인 전", "Not checked yet"));
         else if (ci->trial) snprintf(l->note[1], sizeof l->note[1], "%s", L("시험판 · 이 기기만", "Trial build · this device only"));
         else if (ci->mode == 2) snprintf(l->note[1], sizeof l->note[1], "%s", mname);
@@ -435,7 +440,7 @@ static void build_launcher(stv_view *v, const snap_t *x, const stv_step *steps, 
         static const char *const DKO[3] = {"게임을 끄거나 나갈 때 올려요. 켜 둔 동안은 10분마다", "올리기는 내가 정해요. 시작할 때 올릴지 물어봐요", "받지도 올리지도 않아요. 이 기기 세이브로만 테스트해요"},
                           *const DEN[3] = {"Up when the game closes or leaves; every 10 min while on", "You decide when it goes up; the start asks", "Nothing down or up: this device's save only, for tests"};
         for (int i = 0; i < 3; i++) { snprintf(p->mode[i], sizeof p->mode[i], "%s", ko ? MKO[i] : MEN[i]); snprintf(p->desc[i], sizeof p->desc[i], "%s", ko ? DKO[i] : DEN[i]); }
-        p->checked = ci->mode; p->modes_off = !ci->avail || ci->trial || ci->act || ci->checking;
+        p->checked = ci->mode; p->modes_off = !ci->avail || ci->trial || ci->act || ci->checking || !ci->ready;
         p->link = cp_link_of(ci);
         snprintf(p->note, sizeof p->note, "%s", ci->noserver ? L("이 앱에는 클라우드 서버가 없어요. 이 기기 세이브로만 해요.", "This app has no cloud server: this device's save only.")
                  : p->link == 1 ? L("휴대폰으로 한 번 연결하면 이 기기의 다른 게임도 함께 연결돼요.", "Linked once with a phone, this device's other games are linked too.")
@@ -443,6 +448,7 @@ static void build_launcher(stv_view *v, const snap_t *x, const stv_step *steps, 
                                                                      : L("시작 준비가 끝나면 바꿀 수 있어요.", "It can be changed once the start is ready."))
                  : ci->trial ? L("시험판이라 이 기기 세이브로만 해요. 바꿀 수 없어요.", "A trial build keeps this device's save only. It cannot be changed.")
                  : ci->act || ci->checking ? L("확인하는 중이에요. 끝나면 바꿀 수 있어요.", "Checking. It can be changed once done.")
+                 : !ci->ready ? L("시작 준비가 끝나면 바꿀 수 있어요.", "It can be changed once the start is ready.")
                  : L("이 기기만에서 다시 자동·수동으로 바꾸면, 처음 연결할 때처럼 어느 세이브로 할지 물어봐요.", "Back from this device only to automatic or manual, it asks which save to keep, as at the first link."));
         p->nrow = 4; snprintf(p->key[0], sizeof p->key[0], "%s", L("클라우드", "Cloud")); snprintf(p->key[1], sizeof p->key[1], "%s", L("이 기기", "This device"));
         snprintf(p->key[2], sizeof p->key[2], "%s", L("크기", "Size")); snprintf(p->key[3], sizeof p->key[3], "%s", L("계정", "Account"));
@@ -460,12 +466,14 @@ static void build_launcher(stv_view *v, const snap_t *x, const stv_step *steps, 
         if (ci->act == DM_CLOUD_ACT_UPLOAD) snprintf(p->up_note, sizeof p->up_note, "%s", L("올리는 중…", "Uploading…"));
         else if (n->last_act == DM_CLOUD_ACT_UPLOAD && ci->result[0]) snprintf(p->up_note, sizeof p->up_note, "%s", ci->result);
         else snprintf(p->up_note, sizeof p->up_note, "%s", ci->can_upload ? L("안 올린 진행 있어요", "Progress not uploaded") : !ci->avail || ci->mode == 2 || ci->trial ? L("쓸 수 없어요", "Not available")
+                      : !ci->ready ? L("시작 준비 뒤에 할 수 있어요", "Once the start is ready")
                       : !ci->online ? L("연결 안 됨", "Not connected") : L("올릴 진행 없음", "Nothing to upload"));
         snprintf(p->back, sizeof p->back, "%s", L("클라우드 세이브로 되돌리기", "Back to the cloud save")); p->back_off = !ci->can_restore;
         if (ci->act == DM_CLOUD_ACT_RESTORE) { if (ci->progress >= 0) snprintf(p->back_note, sizeof p->back_note, ko ? "받는 중 · %d%%" : "Downloading · %d%%", ci->progress / 10); else snprintf(p->back_note, sizeof p->back_note, "%s", L("되돌리는 중…", "Restoring…")); }
         else if (n->hint_until > mono) snprintf(p->back_note, sizeof p->back_note, "%s", L("길게 눌러요 (1.5초)", "Hold it (1.5 s)"));
         else if (n->last_act == DM_CLOUD_ACT_RESTORE && ci->result[0]) snprintf(p->back_note, sizeof p->back_note, "%s", ci->result);
         else snprintf(p->back_note, sizeof p->back_note, "%s", ci->can_restore ? L("A 길게 · 이 기기 세이브는 백업 1칸에", "Hold A · this device's save to the backup slot") : !ci->avail || ci->mode == 2 || ci->trial ? L("쓸 수 없어요", "Not available")
+                      : !ci->ready ? L("시작 준비 뒤에 할 수 있어요", "Once the start is ready")
                       : !ci->online ? L("연결 안 됨", "Not connected") : L("클라우드에 세이브 없음", "None in the cloud"));
         p->hold = n->holding ? (int)((mono - n->hold_t0) * 1000 / 1500) : 0;
         if (p->link == 1) { snprintf(p->lbtn, sizeof p->lbtn, "%s", L("기기 연결하기", "Link this device")); snprintf(p->lnote, sizeof p->lnote, "%s", L("휴대폰으로 QR · 코드", "QR · code on a phone")); }
@@ -953,7 +961,7 @@ static void bg_finish_download(void) {
 static void phase_end(void) { char b = 1; if (write(S.pipe[1], &b, 1) != 1) LOG("[RED] start: cannot wake the main thread"); }   // the main thread's sync_ready runs the next step
 static void *sync_thread(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "datasync");
-    JavaVM *vm = S.vm; jhttp h = {0}; int rc = DS_OFFLINE, net = S.base[0] != 0, unreached = 0;   // !net: no server, only the folder's bundles to unpack (dm_sync_begin)
+    JavaVM *vm = S.vm; jhttp h = {0}; int rc = DS_OFFLINE, net = S.base[0] != 0;   // !net: no server, only the folder's bundles to unpack (dm_sync_begin)
     int64_t t_start = now_ms(); struct stat lst; char lp[1100]; snprintf(lp, sizeof lp, "%s/%s", S.root, DS_LIST); int have_list = !stat(lp, &lst);
     if (net && ((*vm)->AttachCurrentThread(vm, &h.E, NULL) != JNI_OK || jhttp_init(&h))) LOG("[RED] data: no Java for the download: the game starts with the data the app has");
     else {
@@ -970,7 +978,7 @@ static void *sync_thread(void *a) {
             if (round > 1 && used) bg_post(BG_ST_RUN, 0, 1);   // (out of a wait: the notification says it downloads again)
             if (ns == 0 && round == 1) LOG("data: the device has no network: the server is not asked");
             if (net && PT.on && !PT.fresh) pointer_resolve(&h);   // (again at each try until the pointer itself answers: a launch before the network is up reaches it later)
-            rc = ds_sync(&c); unreached = rc == DS_OFFLINE && c.unreached;
+            rc = ds_sync(&c);
             if (rc == DS_DONE || rc == DS_UPTODATE || rc == DS_OFFLINE) break;
             int ns2 = net ? dm_net_state(h.E, S.app) : -1;   // the network now: a break of the download is the network gone more often than the server
             pthread_mutex_lock(&S.mu); int paused = S.paused, cancelled = S.cancelled; pthread_mutex_unlock(&S.mu);
@@ -1034,7 +1042,7 @@ static void *sync_thread(void *a) {
     char note[96];
     if (rc == DS_OFFLINE && net) { if (V.checked[0]) snprintf(note, sizeof note, korean() ? "오프라인 · 마지막 확인 %s" : "Offline · last checked %s", V.checked); else snprintf(note, sizeof note, "%s", L("오프라인", "Offline")); }
     else snprintf(note, sizeof note, "%s", rc == DS_DONE && net ? L("받음", "Downloaded") : rc == DS_OFFLINE ? L("준비됨", "Ready") : L("최신", "Up to date"));
-    pthread_mutex_lock(&S.mu); V.need_net = 0; S.status = -1; V.phase = PH_NONE; V.unreached = unreached;
+    pthread_mutex_lock(&S.mu); V.need_net = 0; S.status = -1; V.phase = PH_NONE;
     LN.data_rc = rc; LN.data_net = net && (rc == DS_DONE || rc == DS_UPTODATE); LN.data_off = net && rc == DS_OFFLINE; if (LN.data_net) LN.checked_t = (int64_t)time(NULL); V.step[STV_DATA].state = STV_DONE; snprintf(V.step[STV_DATA].note, sizeof V.step[STV_DATA].note, "%s", note);
     pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
     phase_end();
@@ -1130,9 +1138,6 @@ int dm_cloud_screen_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(v
     pthread_mutex_unlock(&S.mu);
     return ok;
 }
-// 1: the data's step of this start could not reach its server and the game starts with the pack on the device (savecloud_android.c: then the cloud's step asks
-// nothing of its server either, savesync.h ss_start_offline)
-int dm_data_unreached(void) { pthread_mutex_lock(&S.mu); int u = V.unreached; pthread_mutex_unlock(&S.mu); return u; }
 // ---- a notice the start stops at (front_android.c: data rewritten for another host contract): the start screen shows it until the player leaves the app; the game is
 // not started. ko, en: the title and two lines in each language; detail: the log's line, small. 0 when the screen is not open (the caller ends the app) ----
 int dm_notice_begin(ANativeActivity *act, ANativeWindow *w, const char *const ko[3], const char *const en[3], const char *detail) {
@@ -1251,7 +1256,7 @@ static void lnr_activate(int page, int sel, int touch) {   // A (or a touch) on 
     if (page == 0) {
         int ready = lnr_ready(&LN, &ci);   // (Start and Play without the sync are off until then: nothing happens)
         if (sel == 0 && ready) { LN.want = 1; LN.nosync = 1; act = 1; }
-        else if (sel == 1) { LN.page = 1; LN.sel[1] = cp_link_of(&ci) == 1 ? 5 : ci.mode >= 0 && ci.mode <= 2 ? ci.mode : 0; LN.last_act = 0; LN.unarm = 0; }
+        else if (sel == 1 && !ci.starting) { LN.page = 1; LN.sel[1] = cp_link_of(&ci) == 1 ? 5 : ci.mode >= 0 && ci.mode <= 2 ? ci.mode : 0; LN.last_act = 0; LN.unarm = 0; }
         else if (sel == 2) { LN.page = 2; LN.sel[2] = 0; LN.amsg[0] = 0; }
         else if (sel == 3 && ready) { LN.want = 1; LOG("launcher: Start"); }
     } else if (page == 1) {

@@ -42,10 +42,13 @@ void dm_cloud_view_get(dm_cloud_view *v);   // savecloud_android.c: a copy of th
 enum { DM_CLOUD_ACT_NONE, DM_CLOUD_ACT_UPLOAD, DM_CLOUD_ACT_RESTORE, DM_CLOUD_ACT_CHECK };   // what the launcher asked for (Upload now, Back to the cloud save, a check again)
 enum { DM_CLOUD_LOCAL_UNKNOWN, DM_CLOUD_LOCAL_SAME, DM_CLOUD_LOCAL_OWED, DM_CLOUD_LOCAL_ONLY, DM_CLOUD_LOCAL_PLAYED, DM_CLOUD_LOCAL_CONFLICT };   // (savesync.h SS_LOCAL_*)
 typedef struct {
-    int avail;            // sync.txt is there and the start reached the cloud's part (else nothing below is known)
+    int avail;            // sync.txt is there and was read (the early check, or the start's: else nothing below is known)
     int trial;            // a trial build: this device only, not to be changed
     int mode;             // savesync.h SS_MODE_* (0 automatic, 1 manual, 2 this device only)
-    int checking;         // a check runs (the start's, or one the launcher asked for)
+    int checking;         // a check runs (the early one, the start's, or one the launcher asked for)
+    int starting;         // the start's check (the early one beside the data's step, or the start's own) has not ended: the launcher's Cloud save item waits for it
+    int ready;            // the start's check ended: the page's actions (a mode, Upload now, Back to the cloud save, Unlink) can run
+    int pre_go;           // before the start's check: what it will do with the early check's meta (savesync.h SS_GO_*: a download, a question), -1 not known
     int act;              // DM_CLOUD_ACT_* running
     int progress;         // -1, else 0..1000: the cloud save's download
     int online;           // this run's check reached the server
@@ -79,7 +82,6 @@ void dm_start_step(int step, int state, const char *note);   // datasync_android
 void dm_start_screen_open(ANativeActivity *act, const char *root);   // datasync_android.c: the start screen, from onCreate (it shows once the start took 300 ms)
 void dm_start_screen_close(void);                       // before the game takes the window: its thread ended, EGL gone, its fonts, glyphs, icon and canvas freed
 int dm_start_input(const AInputEvent *e);               // the start's input that is not the cloud's (the first start's Retry without a network): 1 when it was the screen's
-int dm_data_unreached(void);                           // datasync_android.c: 1 when this start's data step could not reach its server (savesync.h ss_start_offline)
 int dm_net_state(JNIEnv *E, jobject ctx);               // 1: the device has a connected network, 0: none, -1: not known (ConnectivityManager, ctx the activity)
 void dm_cloud_screen_end(void);
 void dm_cloud_screen_poke(void);                        // the view changed: drawn again now
@@ -89,6 +91,9 @@ int dm_cloud_screen_hit(float x, float y, int *kind);   // a touch at window pix
 // game_start, after the save manager's requests and before the host mounts the save: 1 when the cloud's start runs (its screen; done() is called on the main thread once
 // the game may start, *quit set when the player chose to end the app instead), 0 when there is none (no sync.txt, or a trial build): the game starts at once
 int dm_cloud_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(int quit));
+// onCreate, after the start screen opened: the early check on a thread of its own, beside the data's step (the device link, sync.txt, this device's save, the server's
+// meta with 3 s; no answer is offline). It asks the player nothing and changes no save: dm_cloud_begin takes its outcome (and waits for it when it still runs)
+void dm_cloud_precheck(ANativeActivity *act);
 int dm_cloud_input(const AInputEvent *e);   // an input event before the game (the start screen's): 1 when it was the screen's
 void dm_cloud_pause(void);    // onPause: the pending upload at once (under a wake lock), then the session closed
 void dm_cloud_resume(void);   // onResume: a pending upload tried again now, the session open again

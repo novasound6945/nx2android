@@ -452,11 +452,14 @@ static int ss_decide(int net, const ss_meta *m, const ss_state *st, const char *
     if (m->seq > st->seq && !changed) return SS_GO_DOWNLOAD;
     return SS_GO_CONFLICT;   // the server moved and this device's save changed too (or the server went back to an older seq: neither is overwritten by itself)
 }
-// whether the start's sync asks the server at all: not when the device has no network (dev_net 0; -1 not known asks), nor when the data's step of this start could
-// not reach its server just now (data_unreached; an HTTP error is not that). Then the game starts at once with this device's save, as SS_NET_FAIL decides
-// (SS_GO_OFFLINE: what changed is owed and goes up once there is a connection), without the meta request that could only time out and without the "cannot be
-// reached" question. A first failure of the cloud's own request (the data's server answered) still asks
-static int ss_start_offline(int dev_net, int data_unreached) { return dev_net == 0 || data_unreached; }
+// whether the start's sync goes on offline at once: when the device has no network (dev_net 0; -1 not known asks), or when the cloud's server did not answer the
+// early check (savecloud_android.c dm_cloud_precheck: the meta asked at onCreate, beside the data's step, with 3 s in all; an HTTP error is an answer, not that).
+// Then the game starts with this device's save, as SS_NET_FAIL decides (SS_GO_OFFLINE: what changed is owed and goes up once there is a connection), without a
+// request that could only time out again and without the "cannot be reached" question: the cloud never holds the start
+static int ss_start_offline(int dev_net, int cloud_unreached) { return dev_net == 0 || cloud_unreached; }
+// a meta that does not come (SS_NET_FAIL): the start's own check goes on offline (0: nothing asked); one the player asked for (the launcher's check, Retry after a
+// failure, a check again after a choice) asks Play anyway / Retry (1)
+static int ss_fail_asks(int asked) { return asked != 0; }
 // whether this run syncs: SS_RUN_NONE no sync.txt (nothing at all, as before the sync existed); SS_RUN_SUPPRESSED a trial build (an APK without a data server, a debuggable
 // one, env.txt's DM_SAVESYNC=off: always this device only) or the game's mode SS_MODE_LOCAL: no network, the run is marked offline_play; SS_RUN_SYNC the start's sync
 enum { SS_RUN_NONE, SS_RUN_SUPPRESSED, SS_RUN_SYNC };
@@ -608,8 +611,8 @@ static void ss_link_key(const char *android_id, char out[65]) {
     ds_sha_update(&s, pre, sizeof pre - 1); ds_sha_update(&s, android_id, strlen(android_id)); ds_sha_hex(&s, out); memset(&s, 0, sizeof s);
 }
 // The start's own link (no sync.txt): only when nothing says no. trial: a trial build; mode_local: this game is this device only (its state); net: dm_net_state (0 none,
-// -1 not known: tried); data_unreached: the data's server was not reached just now (an answer from rooms is not likely either). 1: link/start is asked once
-static int ss_link_auto(int has_cfg, int trial, int mode_local, int net, int data_unreached) { return !has_cfg && !trial && !mode_local && net != 0 && !data_unreached; }
+// -1 not known: tried). 1: link/start is asked once (the early check's, beside the data's step: its own 3 s decide whether rooms answers)
+static int ss_link_auto(int has_cfg, int trial, int mode_local, int net) { return !has_cfg && !trial && !mode_local && net != 0; }
 // a JSON string's contents (no quotes): " \ and control bytes escaped; -1 when it does not fit
 static int ss_json_esc(char *o, size_t n, const char *s) {
     size_t k = 0;

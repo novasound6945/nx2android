@@ -180,6 +180,17 @@ int main(int argc, char **argv) {
     ln->status[1].state = STV_WAIT; snprintf(ln->status[1].text, sizeof ln->status[1].text, "셰이더 준비 대기");
     ln->start_permille = 387; snprintf(ln->start_sub, sizeof ln->start_sub, "파일 확인 중 · 38%%");
     stv_draw(&c, &v, 0.7); save(&c, argv[4], "13b-launcher-checking-files");
+    // 13c. the cloud's early check beside the data's (the device link, the server's meta): Cloud save off ("확인 중…") until it ends
+    ln->status[0].state = STV_RUN; snprintf(ln->status[0].text, sizeof ln->status[0].text, "게임 데이터 확인 중");
+    ln->status[2].state = STV_RUN; snprintf(ln->status[2].text, sizeof ln->status[2].text, "클라우드 세이브 확인 중");
+    ln->item_off[1] = 1; char keep1[96]; snprintf(keep1, sizeof keep1, "%s", ln->note[1]); snprintf(ln->note[1], sizeof ln->note[1], "확인 중…");
+    ln->start_permille = -1; snprintf(ln->start_sub, sizeof ln->start_sub, "서버 확인 중");
+    stv_draw(&c, &v, 0.2); save(&c, argv[4], "13c-launcher-cloud-checking");
+    ln->sel = 1; stv_draw(&c, &v, 0.2); save(&c, argv[4], "13d-launcher-cloud-checking-chosen"); ln->sel = 3;
+    // 13e. the early check ended while the data is still checked: Cloud save on, what the start's check will do in the top line
+    ln->item_off[1] = 0; snprintf(ln->note[1], sizeof ln->note[1], "%s", keep1);
+    ln->status[2].state = STV_WAIT; snprintf(ln->status[2].text, sizeof ln->status[2].text, "클라우드 세이브 · 시작할 때 받아요");
+    stv_draw(&c, &v, 0.2); save(&c, argv[4], "13e-launcher-cloud-checked");
     for (int i = 0; i < 3; i++) { ln->status[i].state = STV_DONE; snprintf(ln->status[i].text, sizeof ln->status[i].text, "%s", ST[i]); }
     ln->start_off = 0; ln->item_off[0] = 0;
     // 14. the cloud save's page

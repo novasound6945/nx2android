@@ -201,13 +201,14 @@ static void t_decide(void) {
     CHECK(ss_run_mode(1, 1, 0) == SS_RUN_SUPPRESSED, "a trial build: suppressed");
     CHECK(ss_run_mode(1, 0, 1) == SS_RUN_SUPPRESSED, "switched off: suppressed");
     CHECK(ss_run_mode(1, 0, 0) == SS_RUN_SYNC, "a release with sync.txt: the sync");
-    // the start without asking the server: no network on the device, or the data's step could not reach its server just now; else the meta is asked (and its own
-    // first failure still asks the player)
+    // the start offline at once: no network on the device, or the cloud's server did not answer the early check (3 s, beside the data's step); a meta that did
+    // not come asks the player only in a check the player asked for
     CHECK(ss_start_offline(0, 0) && ss_start_offline(0, 1), "no network on the device: the server is not asked");
-    CHECK(ss_start_offline(1, 1) && ss_start_offline(-1, 1), "the data's server was not reached: the cloud's is not asked either");
-    CHECK(!ss_start_offline(1, 0) && !ss_start_offline(-1, 0), "the data's server answered (or no data step): the cloud's meta is asked");
+    CHECK(ss_start_offline(1, 1) && ss_start_offline(-1, 1), "the cloud did not answer the early check: offline, no question");
+    CHECK(!ss_start_offline(1, 0) && !ss_start_offline(-1, 0), "the cloud answered (or no early check): its meta decides");
+    CHECK(!ss_fail_asks(0) && ss_fail_asks(1), "no meta: the start's own check goes on offline, a check the player asked for asks Play anyway / Retry");
     s = st_of(1, 4, A); m = meta_of(4, A);
-    CHECK(ss_start_offline(1, 1) && ss_decide(SS_NET_FAIL, &m, &s, C, &p) == SS_GO_OFFLINE && p, "skipped for the data's server: a changed save is owed, it goes up once connected");
+    CHECK(ss_start_offline(1, 1) && ss_decide(SS_NET_FAIL, &m, &s, C, &p) == SS_GO_OFFLINE && p, "the cloud not reached: a changed save is owed, it goes up once connected");
     s = st_of(0, 0, NULL); ss_mark_offline_play(&s); m = meta_of(4, B);
     CHECK(ss_decide(SS_NET_OK, &m, &s, A, &p) == SS_GO_CONFLICT, "a trial build played first, then the release finds a save on both: conflict");
     s = st_of(1, 4, B); ss_mark_offline_play(&s); m = meta_of(4, B);
@@ -356,9 +357,9 @@ static void t_link(void) {
     char k[65]; ss_link_key("9774d56d682e549c", k);
     ds_sha h; ds_sha_init(&h); ds_sha_update(&h, "nx2a-savecloud:9774d56d682e549c", 31); char want[65]; ds_sha_hex(&h, want);
     CHECK(!strcmp(k, want) && ss_hex64(k), "the key: %s", k);
-    CHECK(ss_link_auto(0, 0, 0, 1, 0) && ss_link_auto(0, 0, 0, -1, 0), "no sync.txt, online (or not known): asked");
-    CHECK(!ss_link_auto(1, 0, 0, 1, 0) && !ss_link_auto(0, 1, 0, 1, 0) && !ss_link_auto(0, 0, 1, 1, 0) && !ss_link_auto(0, 0, 0, 0, 0) && !ss_link_auto(0, 0, 0, 1, 1),
-          "sync.txt there, a trial build, this device only, no network, the data's server not reached: not asked");
+    CHECK(ss_link_auto(0, 0, 0, 1) && ss_link_auto(0, 0, 0, -1), "no sync.txt, online (or not known): asked (whatever the data's step does: beside it)");
+    CHECK(!ss_link_auto(1, 0, 0, 1) && !ss_link_auto(0, 1, 0, 1) && !ss_link_auto(0, 0, 1, 1) && !ss_link_auto(0, 0, 0, 0),
+          "sync.txt there, a trial build, this device only, no network: not asked");
     char b[600]; CHECK(!ss_link_body(b, sizeof b, k, "Retroid Pocket Nova", "슈퍼로봇대전 \"Y\"", "com.nx2a.srwy"), "the body");
     CHECK(strstr(b, "\"model\":\"Retroid Pocket Nova\"") && strstr(b, "\"game\":\"슈퍼로봇대전 \\\"Y\\\"\"") && strstr(b, "\"pkg\":\"com.nx2a.srwy\"") && strstr(b, k), "%s", b);
     CHECK(ss_link_body(b, 40, k, "m", "g", "p") == -1, "a body too long is refused");

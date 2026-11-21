@@ -1664,6 +1664,7 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
     // (its thread, EGL, fonts and icon gone) before the game takes the window (game_run)
     dm_cloud_attach(act);   // (savecloud_android.c: the device link's key, model and the app's names, before the launcher can ask for a link)
     dm_start_screen_open(act, g_root);
+    dm_cloud_precheck(act);   // (savecloud_android.c: the cloud's early check beside the data's step: the link, the server's meta; its questions wait for game_start)
     atomic_store(&g_syncing, 1);
     if (dm_sync_begin(act, g_root, prep_late)) return;
     if (prep_start()) return;

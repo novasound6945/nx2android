@@ -16,9 +16,13 @@
 // launcher's Cloud save page: this device only) run without the network at all; such a run is marked offline_play in the state (saves/sync-state.txt), and the next start with the sync asks before that
 // run's save goes up.
 //
-// Offline first: a device without a network (ConnectivityManager: none at all) starts the game at once with its save, no question. The start (dm_cloud_begin, from game_start before the host mounts the save, after the save manager's
-// requests) runs on a thread of its own with its screen (datasync_android.c dm_cloud_screen_begin): nothing shows when it ends within 300 ms; the meta is asked for with
-// 3 s to connect and 5 s in all; no answer offers Play anyway (taken by itself after 10 s without input) and Retry. B at any moment plays without the sync this run. When
+// Offline first: a device without a network (ConnectivityManager: none at all) starts the game at once with its save, no question. The early check (dm_cloud_precheck,
+// from onCreate, beside the data's step) links the device (link/start, no sync.txt yet), reads sync.txt, archives this device's save and asks the server's meta with
+// 3 s in all, so the launcher knows the cloud's state from the start; no answer in that time is offline (no question: the cloud never holds the start). It asks the
+// player nothing and puts nothing in place: the start (dm_cloud_begin, from game_start before the host mounts the save, after the save manager's requests, the data
+// and the shaders) takes its meta, archives the save again and decides, on a thread of its own with its screen (datasync_android.c dm_cloud_screen_begin): nothing
+// shows when it ends within 300 ms. A check the player asked for (the launcher's, a Retry) that gets no answer offers Play anyway (taken by itself after 10 s without
+// input) and Retry. B at any moment plays without the sync this run. When
 // the server's save is newer and this device's did not change since the last sync, it is downloaded (a progress bar, 60 s at most), checked against its SHA-256 and swapped
 // in through the save manager's import (saves_android.c dm_saves_import_now: the current save is exported first, <stamp>-before-import). When both changed, the player
 // chooses between two cards (nothing is overwritten by itself; the side not chosen stays: this device's in the import's backup folder, the server's previous save in the
@@ -283,8 +287,14 @@ static struct {
     dm_cloud_view v; int kind, done, quit, applying, choice, auto_ms; int64_t last_input;
     void (*done_cb)(int quit); int up_after;
     int active, recheck;   // a check runs (its view and input are the screen's); recheck: one the launcher asked for (no done_cb: the launcher goes on)
-    int autolink;          // the start's link/start runs (no sync.txt yet): B waits for it (3 s at most)
+    int autolink;          // the start's link/start runs (no sync.txt yet), or the start waits for the early check: B waits for it (a few s at most)
 } W;
+// the early check (dm_cloud_precheck): started; its thread runs; have: its outcome for the start's check (net: SS_NET_OK, SS_NET_NOTFOUND with m, or SS_NET_FAIL: no
+// network or no answer in PC_META_MS), taken once, while sync.txt is the one it was for (gen: C.cfg_gen then) and for PC_FRESH_MS after it came (t: then; a first
+// download of GBs takes longer: the start's check asks again, as without the early one, so another device's upload meanwhile is seen)
+static struct { int started, running, have, net; ss_meta m; unsigned gen; int64_t t; } PC;   // under C.mu
+#define PC_META_MS 3000
+#define PC_FRESH_MS (3 * 60 * 1000)
 void dm_cloud_view_get(dm_cloud_view *v) { pthread_mutex_lock(&C.mu); *v = W.v; if (!W.active) { v->ask = 0; v->urgent = 0; } pthread_mutex_unlock(&C.mu); }
 static void up_start(void);
 enum { UP_NOTHING, UP_OK, UP_FAIL, UP_CONFLICT, UP_ERR };
@@ -447,8 +457,16 @@ static int download_apply(JNIEnv *E, const ss_meta *m, char *why, size_t wcap, c
         slot ? "; this device's is in saves/" : "", slot ? slot : "");
     return 0;
 }
-// The start's check, on the start thread (or one the launcher asked for: recheck): this device's save against the server's meta, the questions, the download, the
-// session. Every way out ends the check (finish): the start goes on, or the launcher does
+// the meta's answer as savesync.h SS_NET_*: m read from a 200 (or a 404's body: the session, {"error":"none","session":…}, a game another device runs before its first
+// upload; seq 0)
+static int net_of(int got, const hres *r, ss_meta *m) {
+    if (got) return SS_NET_FAIL;
+    if (r->code == 200) return ss_meta_parse((const char *)r->body.p, r->body.n, m) ? SS_NET_FAIL : SS_NET_OK;
+    if (r->code == 404) { ss_meta_parse((const char *)r->body.p, r->body.n, m); m->seq = 0; return SS_NET_NOTFOUND; }
+    return r->code == 401 || r->code == 403 ? SS_NET_UNAUTH : SS_NET_FAIL;
+}
+// The start's check, on the start thread (or one the launcher asked for: recheck): this device's save against the server's meta (the early check's, else asked now),
+// the questions, the download, the session. Every way out ends the check (finish): the start goes on, or the launcher does
 static void start_check(JNIEnv *E, int recheck) {
     int ko = korean();
     ss_buf t; char local[65], err[600], why[300]; int64_t local_t = 0, local_files = -1; uint64_t local_size = 0;
@@ -457,27 +475,32 @@ static void start_check(JNIEnv *E, int recheck) {
     const char *loc = lr ? NULL : local;
     pthread_mutex_lock(&C.mu); C.lknown = 1; snprintf(C.lsha, sizeof C.lsha, "%s", loc ? loc : ""); C.lsize = loc ? local_size : 0; C.lfiles = loc ? local_files : 0; C.lt = local_t; pthread_mutex_unlock(&C.mu);
     LOG("cloud: this device's save: %s%s", loc ? loc : "none", recheck ? " (a check the launcher asked for)" : "");
-    int dev_net = dm_net_state(E, C.act), data_unreached = recheck ? 0 : dm_data_unreached();
-    if (ss_start_offline(dev_net, data_unreached)) {   // no network on the device at all (a console without Wi-Fi), or the data's server was not reached just now: no
+    int pre = 0, pnet = SS_NET_FAIL; ss_meta pm; memset(&pm, 0, sizeof pm);
+    if (!recheck) { pthread_mutex_lock(&C.mu); pre = PC.have && PC.gen == C.cfg_gen && now_ms() - PC.t < PC_FRESH_MS; if (pre) { pnet = PC.net; pm = PC.m; } PC.have = 0; pthread_mutex_unlock(&C.mu); }   // (once)
+    int dev_net = pre ? -1 : dm_net_state(E, C.act), unreached = pre && pnet == SS_NET_FAIL;
+    if (ss_start_offline(dev_net, unreached)) {   // no network on the device at all (a console without Wi-Fi), or the cloud did not answer the early check: no
         // question, no request that can only time out; the game starts with this device's save at once ("Offline" in the steps), and the upload thread opens the
         // session and sends what is owed once the network is back
         ss_meta m; memset(&m, 0, sizeof m);
         pthread_mutex_lock(&C.mu); int p; ss_decide(SS_NET_FAIL, &m, &C.st, loc, &p); if (p) C.st.pending = 1; C.offline = 1; C.meta_ok = 0; st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
-        LOG("cloud: %s: the game starts with this device's save%s; the sync goes on once it is back", dev_net == 0 ? "the device has no network" : "the data's server was not reached",
+        LOG("cloud: %s: the game starts with this device's save%s; the sync goes on once it is back", dev_net == 0 ? "the device has no network" : "the cloud did not answer the early check",
             p ? " (owed: it goes up then)" : "");
         finish(0, 0, 0); return;
     }
-    for (;;) {
+    for (int first = 1;; first = 0) {
         wait_view("맞추는 중…", "Syncing…");
-        char u[1400]; url_of(u, sizeof u, "meta"); hres r; ss_meta m; memset(&m, 0, sizeof m); m.files = -1;
-        int got = http_do(E, "GET", u, NULL, 0, NULL, 3000, now_ms() + 5000, 256 << 10, &r, NULL);
-        if (ended()) { ss_buf_free(&r.body); break; }
-        int net = got ? SS_NET_FAIL : r.code == 200 ? (ss_meta_parse((const char *)r.body.p, r.body.n, &m) ? SS_NET_FAIL : SS_NET_OK) : r.code == 404 ? (ss_meta_parse((const char *)r.body.p, r.body.n, &m), m.seq = 0, SS_NET_NOTFOUND)
-                : r.code == 401 || r.code == 403 ? SS_NET_UNAUTH : SS_NET_FAIL;
-        if (got) LOG("cloud: no answer from the server (%s): the game starts with this device's save unless the player retries", r.why);
-        else if (net == SS_NET_FAIL) LOG("[RED] cloud: the server answered HTTP %d%s", r.code, r.code == 200 ? " with a meta that cannot be read" : "");
-        // (a 404 still carries the session, {"error":"none","session":…}: a game another device runs before its first upload is seen too)
-        ss_buf_free(&r.body);
+        int asked = recheck || !first;   // (a check the player asked for, or one again after a choice or a Retry)
+        hres r; memset(&r, 0, sizeof r); ss_meta m; memset(&m, 0, sizeof m); m.files = -1; int net;
+        if (first && pre) { m = pm; net = pnet; LOG("cloud: the early check's meta (seq %llu): not asked again", (unsigned long long)m.seq); }
+        else {
+            char u[1400]; url_of(u, sizeof u, "meta");
+            int got = http_do(E, "GET", u, NULL, 0, NULL, 3000, now_ms() + (asked ? 5000 : PC_META_MS), 256 << 10, &r, NULL);
+            if (ended()) { ss_buf_free(&r.body); break; }
+            net = net_of(got, &r, &m);
+            if (got) LOG("cloud: no answer from the server (%s): the game starts with this device's save%s", r.why, ss_fail_asks(asked) ? " unless the player retries" : "");
+            else if (net == SS_NET_FAIL) LOG("[RED] cloud: the server answered HTTP %d%s", r.code, r.code == 200 ? " with a meta that cannot be read" : "");
+            ss_buf_free(&r.body);
+        }
         if (net == SS_NET_UNAUTH) {   // the token was refused: sync.txt aside, link/start once (token_refused); linked, the check again with the new token
             wait_view("기기 확인 중…", "Looking for the link…");
             if (token_refused(E, r.gen)) { if (ended()) break; continue; }
@@ -488,6 +511,7 @@ static void start_check(JNIEnv *E, int recheck) {
         }
         if (net == SS_NET_FAIL) {
             pthread_mutex_lock(&C.mu); C.st.auth = 0; int p; ss_decide(net, &m, &C.st, loc, &p); if (p) C.st.pending = 1; C.offline = 1; C.meta_ok = 0; st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
+            if (!ss_fail_asks(asked)) { LOG("cloud: offline: the game starts with this device's save%s; the sync goes on once the server answers", p ? " (owed: it goes up then)" : ""); finish(0, 0, 0); break; }
             ask_view(DM_CLOUD_ICON_OFFLINE, ko ? "클라우드에 연결할 수 없어요" : "The cloud cannot be reached", ko ? "이 기기 세이브로 시작해요. 연결되면 나중에 올려요." : "The game starts with this device's save; it goes up once there is a connection.", NULL,
                      2, ko ? "그래도 플레이" : "Play anyway", ko ? "다시 시도" : "Retry", NULL, NULL);
             int c = ask(10000, "%d초 뒤 자동으로 시작해요", "Starting by itself in %d s");
@@ -589,10 +613,23 @@ static void start_check(JNIEnv *E, int recheck) {
     }
 }
 static int autolink(JNIEnv *E);
+enum { PLAN_WAIT = -1, PLAN_NONE, PLAN_LINK, PLAN_CHECK };   // the start's cloud: wait for the early check first; nothing to do; link/start, then the check; the check
+static int begin_plan(JNIEnv *E, jobject ctx);
+static void start_none(void) {   // the start's cloud ended with nothing to do (its step says why): the screen's phase ends, the start goes on
+    pthread_mutex_lock(&C.mu); W.done = 1; W.active = 0; W.autolink = 0; W.up_after = 0; pthread_mutex_unlock(&C.mu);
+    dm_cloud_screen_end(); dm_cloud_screen_poke();
+}
 static void *start_thread(void *a) {
-    (void)a; pthread_setname_np(pthread_self(), "cloudstart");
+    int plan = (int)(intptr_t)a; pthread_setname_np(pthread_self(), "cloudstart");
     JNIEnv *E = jattach();
-    pthread_mutex_lock(&C.mu); int al = W.autolink; pthread_mutex_unlock(&C.mu);
+    if (plan == PLAN_WAIT) {   // the early check still ran when the start came (a quick start: no data to get, no shaders): its outcome first
+        pthread_mutex_lock(&C.mu); while (PC.running) pthread_cond_wait(&C.cv, &C.mu); pthread_mutex_unlock(&C.mu);
+        plan = begin_plan(E, C.act);
+        if (plan == PLAN_NONE) { start_none(); if (E) (*C.vm)->DetachCurrentThread(C.vm); return NULL; }
+        pthread_mutex_lock(&C.mu); W.autolink = plan == PLAN_LINK; if (plan == PLAN_CHECK) wait_locked("맞추는 중…", "Syncing…"); else W.v.nbtn = 0; pthread_mutex_unlock(&C.mu);
+        dm_cloud_screen_poke();
+    }
+    int al = plan == PLAN_LINK;
     if (!E) { LOG("[RED] cloud: no Java for the sync: this run plays without it"); if (al) link_none(); else finish(0, 1, 0); return NULL; }
     if (al) { int r = autolink(E); if (r <= 0) { if (!r) link_none(); (*C.vm)->DetachCurrentThread(C.vm); return NULL; } }
     start_check(E, 0);
@@ -901,7 +938,8 @@ static int android_id(JNIEnv *E, jobject act, char *out, size_t cap) {
     return out[0] ? 0 : -1;
 }
 // the server (savesync.h ss_link_server): sync.txt's url= while it is read, else env.txt's DM_SAVESYNC_URL, else the APK's assets/nx2a/savecloud.txt. 0, -1 none ("")
-static int link_base_locked(char *o, size_t n) { return ss_link_server(o, n, C.began ? C.cfg.url : NULL, getenv("DM_SAVESYNC_URL"), C.srv_asset); }
+static char g_env_url[600];   // (env.txt's DM_SAVESYNC_URL read at onCreate: env_early)
+static int link_base_locked(char *o, size_t n) { const char *e = getenv("DM_SAVESYNC_URL"); return ss_link_server(o, n, C.began ? C.cfg.url : NULL, e && *e ? e : g_env_url, C.srv_asset); }
 static int link_base(char *o, size_t n) { pthread_mutex_lock(&C.mu); int r = link_base_locked(o, n); pthread_mutex_unlock(&C.mu); return r; }
 // assets/nx2a/savecloud.txt (url=: the cloud save server the porter's savecloud.txt named), read once: without it (and without env.txt's DM_SAVESYNC_URL or a sync.txt)
 // the app has no cloud save server, and the cloud save is off (no link asked, the launcher says so). AAssetManager only: no Java, any thread
@@ -960,52 +998,150 @@ static int cfg_load_locked(void) {
         : ": this device only (the game's mode)");
     return 1;
 }
+// The start's cloud once the early check ended (C.mu not held; E, ctx: dm_net_state's, E may be NULL): PLAN_NONE when there is nothing to do (no server, not linked
+// and no link to ask, this device only or a trial build, Play without the sync chosen before; the step says so), PLAN_LINK (no sync.txt and the early check asked no
+// link/start: no network then), PLAN_CHECK
+static int begin_plan(JNIEnv *E, jobject ctx) {
+    pthread_mutex_lock(&C.mu);
+    if (!C.began && !cfg_load_locked()) {   // (cfg_load_locked: a link by hand on the launcher's page since the early check wrote sync.txt)
+        char sb[600]; if (link_base_locked(sb, sizeof sb)) { pthread_mutex_unlock(&C.mu); dm_start_step(STV_CLOUD, STV_SKIP, korean() ? "클라우드 서버 없음" : "No cloud server"); return PLAN_NONE; }   // (said once, at attach)
+        ss_state st; char sp[700]; snprintf(sp, sizeof sp, "%s/sync-state.txt", dm_saves_dir()); int key = C.key[0] != 0, tried = C.auto_tried, trial = C.trial;
+        pthread_mutex_unlock(&C.mu);
+        ss_state_load(sp, &st);
+        int net = key && !tried ? dm_net_state(E, ctx) : 0, go = key && !tried && ss_link_auto(0, trial, st.mode == SS_MODE_LOCAL, net);
+        if (!go) { if (key && !tried) LOG("cloud: no sync.txt and %s: no link asked this start", trial ? "a trial build" : st.mode == SS_MODE_LOCAL ? "this game is this device only" : "no network");
+                   dm_start_step(STV_CLOUD, STV_SKIP, korean() ? "기기 연결 필요" : "Not linked"); return PLAN_NONE; }
+        pthread_mutex_lock(&C.mu); C.auto_tried = 1; pthread_mutex_unlock(&C.mu);
+        return PLAN_LINK;
+    }
+    if (C.mode == SS_RUN_SUPPRESSED) {   // no network at all; the next start with the sync asks before what this run saves goes up
+        ss_mark_offline_play(&C.st); st_save_locked();
+        changed_locked(); pthread_mutex_unlock(&C.mu);
+        dm_start_step(STV_CLOUD, STV_SKIP, korean() ? (C.trial ? "시험판" : "이 기기만") : (C.trial ? "Trial build" : "This device only")); return PLAN_NONE;
+    }
+    if (C.skip_req) {   // the launcher's Play without the sync, pressed before the check: none is made
+        C.skipped = 1; ss_mark_offline_play(&C.st); st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
+        LOG("cloud: this run plays without the sync (the launcher's choice; the next start asks before its save goes up)");
+        dm_start_step(STV_CLOUD, STV_SKIP, korean() ? "건너뜀" : "Skipped"); return PLAN_NONE;
+    }
+    pthread_mutex_unlock(&C.mu);
+    return PLAN_CHECK;
+}
 int dm_cloud_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(int quit)) {
     if (!getenv("DM_ROOT")) return 0;
     dm_cloud_attach(act);
     const char *env = getenv("DM_SAVESYNC"); int env_off = env && (!strcmp(env, "off") || !strcmp(env, "0"));
     const char *gv = getenv("DM_GAME_VERSION"); snprintf(C.gver, sizeof C.gver, "%s", gv ? gv : "");
+    dm_cloud_precheck(act);   // (started at onCreate; an app that did not: now, and the start waits for it)
     pthread_mutex_lock(&C.mu);
-    C.reached = 1; C.trial = C.trial_base || env_off;
-    if (!C.began && !cfg_load_locked()) {
-        // no sync.txt: the start's own link. Another game on this device linked it already: link/start answers with the token at once (3 s at most), sync.txt is written
-        // and the check goes on as if it had always been there. A code is not shown (the launcher's Cloud save page links by hand): the start goes on without the sync
-        char sb[600]; if (link_base_locked(sb, sizeof sb)) { pthread_mutex_unlock(&C.mu); dm_start_step(STV_CLOUD, STV_SKIP, korean() ? "클라우드 서버 없음" : "No cloud server"); return 0; }   // (said once, at attach)
-        ss_state st; char sp[700]; snprintf(sp, sizeof sp, "%s/sync-state.txt", dm_saves_dir()); int key = C.key[0] != 0, tried = C.auto_tried, trial = C.trial;
-        pthread_mutex_unlock(&C.mu);
-        ss_state_load(sp, &st);
-        int net = key && !tried ? dm_net_state(act->env, act->clazz) : 0, go = key && !tried && ss_link_auto(0, trial, st.mode == SS_MODE_LOCAL, net, dm_data_unreached());
-        if (!go) { if (key && !tried) LOG("cloud: no sync.txt and %s: no link asked this start", trial ? "a trial build" : st.mode == SS_MODE_LOCAL ? "this game is this device only" : net == 0 ? "no network" : "the data's server was not reached"); return 0; }
-        pthread_mutex_lock(&C.mu); C.auto_tried = 1;
-        memset(&W, 0, sizeof W); W.choice = -1; W.done_cb = done; W.active = 1; W.autolink = 1;
-        wait_locked("기기 확인 중…", "Looking for the link…"); W.v.nbtn = 0;
-        pthread_mutex_unlock(&C.mu);
-        if (!dm_cloud_screen_begin(act, w, screen_done)) { pthread_mutex_lock(&C.mu); W.done_cb = NULL; W.done = 1; W.active = 0; W.autolink = 0; pthread_mutex_unlock(&C.mu); return 0; }
-        pthread_t t;
-        if (pthread_create(&t, NULL, start_thread, NULL)) { LOG("[RED] cloud: cannot start the link thread"); link_none(); } else pthread_detach(t);
-        return 1;
-    }
-    if (C.mode == SS_RUN_SUPPRESSED) {   // no network at all; the next start with the sync asks before what this run saves goes up
-        ss_mark_offline_play(&C.st); st_save_locked();
-        changed_locked(); pthread_mutex_unlock(&C.mu);
-        dm_start_step(STV_CLOUD, STV_SKIP, korean() ? (C.trial ? "시험판" : "이 기기만") : (C.trial ? "Trial build" : "This device only")); return 0;
-    }
-    if (C.skip_req) {   // the launcher's Play without the sync, pressed before the check: none is made
-        C.skipped = 1; ss_mark_offline_play(&C.st); st_save_locked(); changed_locked(); pthread_mutex_unlock(&C.mu);
-        LOG("cloud: this run plays without the sync (the launcher's choice; the next start asks before its save goes up)");
-        dm_start_step(STV_CLOUD, STV_SKIP, korean() ? "건너뜀" : "Skipped"); return 0;
-    }
-    memset(&W, 0, sizeof W); W.choice = -1; W.done_cb = done; W.active = 1;
-    wait_locked("맞추는 중…", "Syncing…");
+    C.reached = 1; C.trial = C.trial_base || env_off;   // (env.txt is read now: the data may have brought it)
+    if (C.began) C.mode = ss_run_mode(1, C.trial, C.st.mode == SS_MODE_LOCAL);
+    int plan = PC.running ? PLAN_WAIT : PLAN_CHECK;
+    pthread_mutex_unlock(&C.mu);
+    if (plan != PLAN_WAIT) plan = begin_plan(act->env, act->clazz);
+    if (plan == PLAN_NONE) return 0;
+    pthread_mutex_lock(&C.mu);
+    memset(&W, 0, sizeof W); W.choice = -1; W.done_cb = done; W.active = 1; W.autolink = plan != PLAN_CHECK;   // (a link, or the early check: B waits for it)
+    if (plan == PLAN_CHECK) wait_locked("맞추는 중…", "Syncing…");
+    else { wait_locked(plan == PLAN_LINK ? "기기 확인 중…" : "확인 중…", plan == PLAN_LINK ? "Looking for the link…" : "Checking…"); W.v.nbtn = 0; }
     pthread_mutex_unlock(&C.mu);
     if (!dm_cloud_screen_begin(act, w, screen_done)) {   // no screen to ask on: this run without the sync (never a start that waits on nothing)
         LOG("[RED] cloud: no start screen: this run plays without the sync");
-        pthread_mutex_lock(&C.mu); W.done_cb = NULL; finish_locked(0, 1); pthread_mutex_unlock(&C.mu); return 0;
+        pthread_mutex_lock(&C.mu); W.done_cb = NULL; W.autolink = 0; if (C.began) finish_locked(0, 1); else { W.done = 1; W.active = 0; } pthread_mutex_unlock(&C.mu); return 0;
     }
     pthread_t t;
-    if (pthread_create(&t, NULL, start_thread, NULL)) { LOG("[RED] cloud: cannot start the sync thread: this run plays without it"); finish(0, 1, 0); }
+    if (pthread_create(&t, NULL, start_thread, (void *)(intptr_t)plan)) { LOG("[RED] cloud: cannot start the sync thread: this run plays without it"); if (plan == PLAN_CHECK) finish(0, 1, 0); else link_none(); }
     else pthread_detach(t);
     return 1;
+}
+
+// ---- the early check (onCreate, beside the data's step; see the top of this file): what the start's check needs of the network, done before it is needed. It asks
+// nothing of the player and puts nothing in place (no download, no session): those wait for the start's check, after the data and the shaders ----
+static int g_env_off;   // env.txt's DM_SAVESYNC_URL and DM_SAVESYNC=off (front_android.c puts env.txt in the environment only later)
+static void env_early(void) {   // (the main thread, before the early check's thread starts: read only after)
+    const char *root = getenv("DM_ROOT"); char p[700]; size_t n = 0; char *t = NULL, off[16] = "";
+    if (root) { snprintf(p, sizeof p, "%s/env.txt", root); t = ds_read(p, &n, 1 << 16); }
+    for (char *q = t; q && *q; ) {   // KEY=VALUE a line (# comments), as front_android.c env_file: the last one of a key wins
+        char *e = q; while (*e && *e != '\n') e++; char c = *e; *e = 0;
+        char *z = e; while (z > q && (z[-1] == '\r' || z[-1] == ' ')) *--z = 0;
+        if (*q && *q != '#') { char *eq = strchr(q, '=');
+            if (eq && eq - q == 11 && !strncmp(q, "DM_SAVESYNC", 11)) snprintf(off, sizeof off, "%s", eq + 1);
+            else if (eq && eq - q == 15 && !strncmp(q, "DM_SAVESYNC_URL", 15)) snprintf(g_env_url, sizeof g_env_url, "%s", eq + 1); }
+        *e = c; q = *e ? e + 1 : e;
+    }
+    free(t);
+    const char *ev = getenv("DM_SAVESYNC"), *uv = getenv("DM_SAVESYNC_URL");
+    if (!off[0] && ev) snprintf(off, sizeof off, "%s", ev);
+    if (!g_env_url[0] && uv) snprintf(g_env_url, sizeof g_env_url, "%s", uv);
+    g_env_off = !strcmp(off, "off") || !strcmp(off, "0");
+}
+static void local_now(void);
+static int link_start(JNIEnv *E, int conn_ms, int64_t deadline, ss_link *l, char *why, size_t wcap); static int link_take(const ss_link *l);
+static void pre_check(JNIEnv *E) {
+    pthread_mutex_lock(&C.mu);
+    if (!C.began && !cfg_load_locked()) {   // no sync.txt: the start's own link (another game on this device linked it already: the token comes at once)
+        char sb[600]; int none = link_base_locked(sb, sizeof sb) != 0, key = C.key[0] != 0, trial = C.trial;
+        char sp[700]; snprintf(sp, sizeof sp, "%s/sync-state.txt", dm_saves_dir());
+        pthread_mutex_unlock(&C.mu);
+        if (none || !key) return;   // (no server: said at attach; no key: no link on this device)
+        ss_state st; ss_state_load(sp, &st);
+        int net = dm_net_state(E, C.act);
+        if (!ss_link_auto(0, trial, st.mode == SS_MODE_LOCAL, net)) { if (!trial && st.mode != SS_MODE_LOCAL) LOG("cloud: early check: no sync.txt and no network: no link asked now"); return; }
+        pthread_mutex_lock(&C.mu); C.auto_tried = 1; pthread_mutex_unlock(&C.mu);
+        ss_link l; char why[200] = ""; int64_t t0 = now_ms(); int k = link_start(E, 3000, t0 + 3000, &l, why, sizeof why);
+        int took = k == SS_LK_LINKED && !link_take(&l); memset(&l, 0, sizeof l);
+        if (!took) { LOG("cloud: early check: link/start: %s (%lld ms): not linked (the launcher's Cloud save page links it)", k == SS_LK_CODE ? "no device link yet" : k == SS_LK_LIMIT ? "asked too often (429)"
+                         : k == SS_LK_LINKED ? "linked, but sync.txt could not be written" : why[0] ? why : "no answer", (long long)(now_ms() - t0)); return; }
+        LOG("cloud: early check: link/start: linked by the device's key (%lld ms)", (long long)(now_ms() - t0));
+        pthread_mutex_lock(&C.mu);
+        if (!C.began && !cfg_load_locked()) { pthread_mutex_unlock(&C.mu); return; }
+    }
+    int sync = C.mode == SS_RUN_SYNC; unsigned gen = C.cfg_gen;
+    pthread_mutex_unlock(&C.mu);
+    if (!sync) return;   // this device only, a trial build: nothing asked of the server (the start's check marks the run)
+    local_now();   // (the launcher's page; the start's check archives it again: the save manager's requests come between)
+    int dev_net = dm_net_state(E, C.act), net = SS_NET_FAIL; ss_meta m; memset(&m, 0, sizeof m); m.files = -1; int64_t t0 = now_ms(); char why[200] = "";
+    for (int again = 0; dev_net != 0 && again < 2; again++) {   // a refused token: once more with the new one (token_refused)
+        char u[1400]; url_of(u, sizeof u, "meta"); hres r; memset(&m, 0, sizeof m); m.files = -1;
+        int got = http_do(E, "GET", u, NULL, 0, NULL, PC_META_MS, now_ms() + PC_META_MS, 256 << 10, &r, NULL);
+        net = net_of(got, &r, &m); if (got) snprintf(why, sizeof why, "%s", r.why); else if (net == SS_NET_FAIL) snprintf(why, sizeof why, "HTTP %d", r.code);
+        ss_buf_free(&r.body);
+        if (net != SS_NET_UNAUTH || !token_refused(E, r.gen)) break;
+        pthread_mutex_lock(&C.mu); gen = C.cfg_gen; pthread_mutex_unlock(&C.mu);
+    }
+    pthread_mutex_lock(&C.mu);
+    if (net == SS_NET_UNAUTH) {   // refused, and not linked now (token_refused: sync.txt aside): what changed is owed for when it is linked again; the start goes on without the sync
+        int p; ss_decide(net, &m, &C.st, C.lknown && C.lsha[0] ? C.lsha : NULL, &p); if (p) C.st.pending = 1; if (C.state_path[0]) st_save_locked();
+    } else if (C.cfg_gen == gen) {
+        if (net == SS_NET_FAIL) { C.offline = 1; C.meta_ok = 0; }
+        else { C.st.auth = 0; C.offline = 0; C.meta = m; C.meta_ok = 1; C.st.checked = (int64_t)time(NULL); you_seen_locked(m.you);
+               snprintf(C.st.m_device, sizeof C.st.m_device, "%s", m.seq ? m.device : ""); C.st.m_time = m.seq ? m.time : 0; }
+        PC.have = 1; PC.net = net; PC.m = m; PC.gen = C.cfg_gen; PC.t = now_ms();
+    }
+    changed_locked(); pthread_mutex_unlock(&C.mu);
+    if (net == SS_NET_UNAUTH) LOG("cloud: early check: the token was refused and this device is not linked now");
+    else if (net == SS_NET_FAIL) LOG("cloud: early check: %s: offline (the start goes on with this device's save)", dev_net == 0 ? "the device has no network" : why[0] ? why : "no answer");
+    else LOG("cloud: early check: the server's meta in %lld ms (seq %llu)", (long long)(now_ms() - t0), (unsigned long long)m.seq);
+}
+static void *pre_thread(void *a) {
+    (void)a; pthread_setname_np(pthread_self(), "cloudpre");
+    JNIEnv *E = jattach();
+    if (!E) LOG("[RED] cloud: no Java for the early check: the start's check asks itself");
+    else { pre_check(E); (*C.vm)->DetachCurrentThread(C.vm); }
+    pthread_mutex_lock(&C.mu); PC.running = 0; changed_locked(); pthread_cond_broadcast(&C.cv); pthread_mutex_unlock(&C.mu);
+    dm_cloud_screen_poke();
+    return NULL;
+}
+void dm_cloud_precheck(ANativeActivity *act) {
+    if (!getenv("DM_ROOT")) return;
+    dm_cloud_attach(act);
+    pthread_mutex_lock(&C.mu); int was = PC.started; PC.started = 1; pthread_mutex_unlock(&C.mu);
+    if (was) return;
+    env_early(); dm_saves_paths(getenv("DM_ROOT"));   // (the save's paths: dm_saves_start sets the same ones later)
+    pthread_mutex_lock(&C.mu); C.trial = C.trial_base || g_env_off; PC.running = 1; changed_locked(); pthread_mutex_unlock(&C.mu);
+    pthread_t t;
+    if (pthread_create(&t, NULL, pre_thread, NULL)) { LOG("[RED] cloud: cannot start the early check: the start's check asks itself"); pthread_mutex_lock(&C.mu); PC.running = 0; pthread_mutex_unlock(&C.mu); }
+    else pthread_detach(t);
 }
 
 // ---- the device link: the start's (autolink: link/start once, its token only) and the launcher's (link_thread: a code, polled every 3 s, until it is linked, runs
@@ -1143,7 +1279,7 @@ void dm_cloud_link_get(dm_cloud_link *o) {
 }
 int dm_cloud_link_begin(void) {
     pthread_mutex_lock(&C.mu);
-    char sb[600]; int ok = C.attached && C.vm && C.key[0] && !C.trial_base && !C.began && !W.active && K.state != DM_LINK_BUSY && K.state != DM_LINK_CODE && !link_base_locked(sb, sizeof sb), gen = 0;
+    char sb[600]; int ok = C.attached && C.vm && C.key[0] && !C.trial_base && !C.began && !W.active && !PC.running && K.state != DM_LINK_BUSY && K.state != DM_LINK_CODE && !link_base_locked(sb, sizeof sb), gen = 0;
     if (ok) { gen = ++K.gen; K.state = DM_LINK_BUSY; K.limit = 0; K.code[0] = K.qr[0] = K.host[0] = K.device[0] = 0; K.until = 0; }
     pthread_mutex_unlock(&C.mu);
     if (!ok) return -1;
@@ -1162,7 +1298,7 @@ int dm_cloud_unlink(void) {
     const char *root = getenv("DM_ROOT"); char p[700]; if (!root) return -1;
     snprintf(p, sizeof p, "%s/sync.txt", root);
     pthread_mutex_lock(&C.mu);
-    int ok = C.began && !C.trial && !C.busy && !W.active && !C.up_started;
+    int ok = C.began && !C.trial && !C.busy && !W.active && !C.up_started && C.reached && !PC.running;
     if (ok && unlink(p) && errno != ENOENT) { LOG("[RED] cloud: sync.txt cannot be removed (errno %d)", errno); ok = 0; }
     if (ok) { C.began = 0; C.mode = SS_RUN_NONE; memset(&C.cfg, 0, sizeof C.cfg); C.cfg_gen++; C.meta_ok = 0; C.offline = 0; C.result[0] = 0; W.up_after = 0; changed_locked(); }
     pthread_mutex_unlock(&C.mu);
@@ -1179,20 +1315,24 @@ void dm_cloud_info_get(dm_cloud_info *o) {
     memset(o, 0, sizeof *o); o->progress = -1; o->files = -1;
     pthread_mutex_lock(&C.mu);
     o->avail = C.began; o->trial = C.trial; o->mode = C.trial ? SS_MODE_LOCAL : C.st.mode;
-    o->checking = W.active; o->act = C.busy; o->progress = (C.busy || W.active) && C.prog >= 0 ? C.prog : -1;
+    o->checking = W.active || PC.running; o->act = C.busy; o->progress = (C.busy || W.active) && C.prog >= 0 ? C.prog : -1;
+    o->starting = PC.running || (W.active && !W.recheck);   // the start's check (the early one, or its own) has not ended
+    o->ready = C.reached && !o->starting;                     // (the page's actions wait for the start's check: it may still put the cloud's save in place)
+    o->pre_go = -1;
+    if (!C.reached && PC.have && C.began && C.mode == SS_RUN_SYNC && C.lknown && PC.gen == C.cfg_gen) { int p; o->pre_go = ss_decide(PC.net, &PC.m, &C.st, C.lsha[0] ? C.lsha : NULL, &p); }
     o->online = C.meta_ok; o->offline = C.offline; o->skipped = C.skipped || C.skip_req; o->auth = C.st.auth;
     o->local = C.began ? ss_local_state(&C.st, C.lknown ? C.lsha : NULL) : SS_LOCAL_UNKNOWN;
     if (C.trial) o->local = SS_LOCAL_ONLY;
     const char *cd = C.meta_ok ? (C.meta.seq ? C.meta.device : "") : C.st.m_device; o->cloud_time = C.meta_ok ? (C.meta.seq ? C.meta.time : 0) : C.st.m_time;
     snprintf(o->cloud_dev, sizeof o->cloud_dev, "%s", ss_name_mine(&C.cfg, cd) ? C.cfg.device : cd);   // (uploaded under an older name of this device's: its name now)
     o->checked = C.st.checked; o->size = C.lknown ? C.lsize : 0; o->files = C.lknown ? C.lfiles : -1; snprintf(o->device, sizeof o->device, "%s", C.cfg.device);
-    int free_ = C.began && !C.trial && C.st.mode != SS_MODE_LOCAL && C.meta_ok && !C.busy && !W.active && !C.st.auth;
+    int free_ = C.began && !C.trial && C.st.mode != SS_MODE_LOCAL && C.meta_ok && !C.busy && !W.active && !C.st.auth && o->ready;
     o->can_upload = free_ && (o->local == SS_LOCAL_OWED || o->local == SS_LOCAL_PLAYED);
     o->can_restore = free_ && C.meta.seq != 0;
     snprintf(o->result, sizeof o->result, "%s", C.result); o->result_bad = C.result_bad;
     char sb[600]; o->noserver = !C.began && link_base_locked(sb, sizeof sb);
-    o->linkable = C.attached && C.vm && C.key[0] && !C.trial_base && !C.began && !W.active && !o->noserver;
-    o->can_unlink = C.began && !C.trial && !C.busy && !W.active && !C.up_started;
+    o->linkable = C.attached && C.vm && C.key[0] && !C.trial_base && !C.began && !W.active && !PC.running && !o->noserver;
+    o->can_unlink = C.began && !C.trial && !C.busy && !W.active && !C.up_started && o->ready;
     pthread_mutex_unlock(&C.mu);
 }
 static void local_now(void) {   // this device's save archived again, for the page (before the game: nothing commits)
@@ -1202,7 +1342,7 @@ static void local_now(void) {   // this device's save archived again, for the pa
     pthread_mutex_unlock(&C.mu);
     if (!r) ss_buf_free(&t);
 }
-void dm_cloud_local_refresh(void) { pthread_mutex_lock(&C.mu); int go = C.began && !C.lknown && !C.busy && !W.active; pthread_mutex_unlock(&C.mu); if (go) local_now(); }
+void dm_cloud_local_refresh(void) { pthread_mutex_lock(&C.mu); int go = C.began && !C.lknown && !C.busy && !W.active && !PC.running; pthread_mutex_unlock(&C.mu); if (go) local_now(); }
 static void act_result(const char *ko, const char *en, int bad) {
     pthread_mutex_lock(&C.mu); snprintf(C.result, sizeof C.result, "%s", korean() ? ko : en); C.result_bad = bad; changed_locked(); pthread_mutex_unlock(&C.mu); dm_cloud_screen_poke();
 }
@@ -1251,7 +1391,7 @@ static void *act_thread(void *a) {
 }
 int dm_cloud_act(int what) {   // (takes no lock of datasync_android.c's: the screen's thread may call it holding its own)
     pthread_mutex_lock(&C.mu);
-    int ok = what > DM_CLOUD_ACT_NONE && what <= DM_CLOUD_ACT_CHECK && C.began && C.vm && !C.trial && !C.busy && !W.active;
+    int ok = what > DM_CLOUD_ACT_NONE && what <= DM_CLOUD_ACT_CHECK && C.began && C.vm && !C.trial && !C.busy && !W.active && C.reached && !PC.running;
     if (ok) { C.busy = what; C.prog = -1; C.result[0] = 0; changed_locked(); }
     pthread_mutex_unlock(&C.mu);
     if (!ok) return -1;
@@ -1262,7 +1402,7 @@ int dm_cloud_act(int what) {   // (takes no lock of datasync_android.c's: the sc
 }
 int dm_cloud_set_mode(int mode) {
     pthread_mutex_lock(&C.mu);
-    if (!C.began || C.trial || C.busy || W.active || mode < SS_MODE_AUTO || mode > SS_MODE_LOCAL || mode == C.st.mode) { pthread_mutex_unlock(&C.mu); return -1; }
+    if (!C.began || C.trial || C.busy || W.active || !C.reached || PC.running || mode < SS_MODE_AUTO || mode > SS_MODE_LOCAL || mode == C.st.mode) { pthread_mutex_unlock(&C.mu); return -1; }
     int was = C.st.mode; ss_set_mode(&C.st, mode); st_save_locked(); changed_locked(); C.result[0] = 0;
     int again = was == SS_MODE_LOCAL;   // back from this device only: a first connection's check, now
     if (mode == SS_MODE_LOCAL) { C.mode = SS_RUN_SUPPRESSED; C.meta_ok = 0; }
