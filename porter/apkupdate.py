@@ -3,7 +3,8 @@
 # font, the data server's address nx2a/source.bin, the Vulkan driver and its hooks, classes.dex), and gets libdmhost.so built from this checkout's profile, a new versionCode and
 # versionName (the game's version and the build number: 1.0.1-8) in its manifest, and the profile's Korean name (game.tsv name_ko) as its label when it has another
 # (the launcher's name and the start screen's; axml.py: the rest of the manifest's bytes kept), the permissions this checkout's mkapk.py asks for that it lacks (permissions:
-# WAKE_LOCK, which an APK released before the save's cloud upload has not), the cloud save server as assets/nx2a/savecloud.txt when it has none (from the porter
+# WAKE_LOCK, which an APK released before the save's cloud upload has not), the background download's service (services: its <service> element, hasCode, and its dex,
+# service.dex, as classes.dex in an APK without one or classesN.dex beside the APK's own, replaced by this checkout's when the APK has it already), the cloud save server as assets/nx2a/savecloud.txt when it has none (from the porter
 # computer's savecloud.txt: publish.savecloud_url; an APK that has one keeps it), signed again with the player's key, which must
 # be the APK's signer (it installs over the released app and keeps its saves). Nothing is uploaded or installed.
 # The pack must fit the new host (judge):
@@ -348,9 +349,48 @@ def permissions():
     raise BuildError(f'{src}: no PERMISSIONS list')
 
 
+def services():
+    """([(tag, [(android: attribute, value)])] of mkapk.py's SERVICES literal, {attribute: resource ID} of its ATTR_IDS), read without running mkapk.py: the services
+    apk-update gives a released APK the missing ones of"""
+    src = DM / 'android/apk/mkapk.py'; got = {}
+    for n in ast.parse(src.read_text(encoding='utf-8')).body:
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Name) and t.id in ('SERVICES', 'ATTR_IDS'): got[t.id] = ast.literal_eval(n.value)
+    if set(got) != {'SERVICES', 'ATTR_IDS'}: raise BuildError(f'{src}: no SERVICES or ATTR_IDS')
+    return [(tag, list(attrs)) for tag, attrs in got['SERVICES']], got['ATTR_IDS']
+
+
+SERVICE_DEX = DM / 'android/apk/service.dex'
+SERVICE_MARK = b'Lorg/nx2a/DownloadService;'   # (build_service_dex.py MARK: the class's descriptor, how the service's dex is told from the APK's own)
+DEX_NAME = re.compile(r'classes(\d*)\.dex')
+
+
+def with_service_dex(entries):
+    """(entries with this checkout's service.dex in, 'added' | 'updated' | 'kept'): the dex that has the service is replaced; without one it goes in as the next
+    classesN.dex (classes.dex in an APK without code, classes2.dex beside a native keyboard's classes.dex)"""
+    dex = SERVICE_DEX.read_bytes()
+    nums = {}
+    for i, (n, data, _) in enumerate(entries):
+        mt = DEX_NAME.fullmatch(n)
+        if mt: nums[int(mt.group(1) or 1)] = i
+    for k in sorted(nums):
+        n, data, al = entries[nums[k]]
+        if SERVICE_MARK in data:
+            if data == dex: return entries, 'kept'
+            entries = list(entries); entries[nums[k]] = (n, dex, al); return entries, 'updated'
+    k = 1
+    while k in nums: k += 1
+    if k > 1 and k - 1 not in nums: raise BuildError(f'the APK\'s dex files are not numbered one after the other ({", ".join(entries[nums[x]][0] for x in sorted(nums))})')
+    name = 'classes.dex' if k == 1 else f'classes{k}.dex'
+    at = max(nums.values()) + 1 if nums else next((i + 1 for i, (n, _, _) in enumerate(entries) if n == LIB), len(entries))
+    return entries[:at] + [(name, dex, 4)] + entries[at:], 'added'
+
+
 def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None):
     """apk (a released port's APK file) with this checkout's host and build number build, judged against its data pack pack, written into the folder out (with a new
     nx2a-data.json and files.json when the profile's hash changed). → {'apk', 'package', 'version_code', 'version_name', 'label', 'old', 'host', 'permissions_added',
+    'services_added', 'service_dex' ('added', 'updated', 'kept'),
     'savecloud' ('kept': the APK's own assets/nx2a/savecloud.txt, 'added': the porter's savecloud.txt, None: no cloud save server), 'data_files', 'judgment'}"""
     from porter import pipeline
     apk, out = Path(apk), Path(out)
@@ -386,6 +426,9 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
     want_perms = permissions()   # a permission a later mkapk.py asks for (WAKE_LOCK: the save's cloud upload as the app leaves the screen), for an APK released before it
     manifest, added = axml.add_permissions(manifest, want_perms)
     if added: say(f'permissions added (this checkout\'s mkapk.py asks for them): {", ".join(added)}')
+    want_svc, ids = services()   # the background download's service (DownloadService), for an APK released before it
+    manifest, svc_added = axml.add_services(manifest, want_svc, ids); manifest = axml.set_has_code(manifest)
+    if svc_added: say(f'services added (this checkout\'s mkapk.py declares them): {", ".join(svc_added)}')
     fonts = {n: f for n, f in pipeline.ui_font_assets().items() if f'assets/{n}' not in have}   # the overlay's font, for an APK released before it came; the APK's own is kept
     icon = host.start_icon_asset(apk, cache, pipeline.start_icon)   # the start screen's icon, for an APK released before it came: from its launcher icon
     if icon: fonts[icon[1].split('=', 1)[0]] = icon[1].split('=', 1)[1]
@@ -396,6 +439,8 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
         if url.startswith('http://'): say('[RED] the cloud save server is an http:// address: an APK ported without cleartext HTTP cannot reach it (port it again, or use https://)')
     else: cloud = None; say(f'cloud save server: none (the APK has no assets/{publish.SAVECLOUD_ASSET}, and no {publish.SAVECLOUD_FILE} in the porter folder): the app\'s cloud save is off')
     entries, _, _ = apkdriver.rebuild(str(apk), apkdriver.KEEP, host=str(so), assets=fonts, manifest=axml.set_version(manifest, code, name))
+    entries, svc_dex = with_service_dex(entries)
+    say(f'the background download\'s service: {svc_dex} ({next(n for n, d, _ in entries if d == SERVICE_DEX.read_bytes())})')
     k = {n: int(v) for n, v in kj.items() if n != 'cert'}
     z, cd, eocd = apksign.build_zip(entries)
     tmp = dst.with_name(dst.name + '.partial'); tmp.write_bytes(apksign.sign_v2(z, cd, eocd, k, crt))
@@ -404,6 +449,10 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
         tmp.unlink(); raise BuildError(f'the APK written does not read back as {old["package"]} {code} ({name}) labelled {label!r} with the same signer')
     with zipfile.ZipFile(tmp) as z: missing = [p for p, _ in want_perms if p not in axml.permissions(z.read('AndroidManifest.xml'))]
     if missing: tmp.unlink(); raise BuildError(f'the APK written lacks the permissions {", ".join(missing)}')
+    with zipfile.ZipFile(tmp) as z:
+        lack = [dict(a)['name'] for _, a in want_svc if dict(a)['name'] not in axml.services(z.read('AndroidManifest.xml'))]
+        if not any(SERVICE_MARK in z.read(n) for n in z.namelist() if DEX_NAME.fullmatch(n)): lack.append('service.dex')
+    if lack: tmp.unlink(); raise BuildError(f'the APK written lacks {", ".join(lack)}')
     os.replace(tmp, dst)
     pipeline.build_number(old['package'], offset)   # remembered: the next port or update counts on from it
     say(f'{dst}: {old["version_name"]} ({old["version_code"]}) → {name} ({code}), host {so.stat().st_size / 2**20:.1f} MB, signer {old["signers"][0][:16]}…')
@@ -421,4 +470,4 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
         say(f'the host was built from the derived profile {derived_dir(r["title_id"])}; its header is {cache / "gen" / r["title_id"] / "game_profile.h"}: a later update on another '
             f'computer needs it (--profile-header)')
     return {'apk': str(dst), 'package': old['package'], 'version_code': code, 'version_name': name, 'label': new['label'], 'old': {k: old[k] for k in ('version_code', 'version_name', 'label')},
-            'host': so.stat().st_size, 'permissions_added': added, 'savecloud': cloud, 'data_files': written, 'judgment': {k: v for k, v in r.items() if k != 'manifest'}}
+            'host': so.stat().st_size, 'permissions_added': added, 'services_added': svc_added, 'service_dex': svc_dex, 'savecloud': cloud, 'data_files': written, 'judgment': {k: v for k, v in r.items() if k != 'manifest'}}

@@ -19,6 +19,8 @@ KO = 'A열차로 가자: 시작해요 관광지 개발'   # its name_ko (the Kor
 WAKE = 'android.permission.WAKE_LOCK'
 RELEASED = Path.home() / 'd2rm/ports/release-2026-11-21/OnePieceGrandGourmet/OnePieceGrandGourmet.apk'   # a released port (read only), when this computer has it
 AAPT2 = Path.home() / 'Library/Android/sdk/build-tools/32.1.0-rc1/aapt2'
+APKSIGNER = AAPT2.with_name('apksigner')
+SERVICE_BASE = '5f6f417b4eeaaa49a00ac065ff816a423b7ea574'   # the last mkapk.py from before the background download's service
 HAS_GIT = subprocess.run(['git', 'rev-parse', '--git-dir'], cwd=TOOLS, capture_output=True).returncode == 0
 
 
@@ -166,7 +168,7 @@ class ApkUpdate(unittest.TestCase):
 
     def old_apk(self, name='old.apk', without=(WAKE,)):   # the APK of an older mkapk.py, one that did not ask for the permissions without (a copy with them left out)
         d = self.t / 'oldmkapk'; d.mkdir(exist_ok=True)
-        shutil.copy(APK / 'apksign.py', d)
+        shutil.copy(APK / 'apksign.py', d); shutil.copy(APK / 'service.dex', d)
         src = (APK / 'mkapk.py').read_text(encoding='utf-8')
         for p in without:
             line = f"    ('{p}', []),\n"; self.assertIn(line, src); src = src.replace(line, '')
@@ -228,7 +230,8 @@ class ApkUpdate(unittest.TestCase):
         with zipfile.ZipFile(RELEASED) as a: man = a.read('AndroidManifest.xml')
         n, added = axml.add_permissions(man, apkupdate.permissions())
         if WAKE in axml.permissions(man): self.skipTest(f'{RELEASED} has {WAKE} already')
-        self.assertEqual(added, [WAKE])
+        self.assertEqual(added, [p for p, _ in apkupdate.permissions() if p not in axml.permissions(man)])   # WAKE_LOCK, and the background download's
+        self.assertIn(WAKE, added)
         out = self.t / 'released.apk'
         with zipfile.ZipFile(RELEASED) as a, zipfile.ZipFile(out, 'w') as b:
             for i in a.infolist():
@@ -236,8 +239,54 @@ class ApkUpdate(unittest.TestCase):
         dump = lambda what, apk: subprocess.run([str(AAPT2), 'dump', what, str(apk)], capture_output=True, text=True, check=True).stdout
         self.assertIn(f"uses-permission: name='{WAKE}'", dump('permissions', out))
         before, after = dump('badging', RELEASED), dump('badging', out)
-        self.assertEqual([x for x in after.splitlines() if WAKE not in x], before.splitlines())   # the label, the version, the rest as they were
+        self.assertEqual([x for x in after.splitlines() if not any(p in x for p in added)], before.splitlines())   # the label, the version, the rest as they were
         self.assertIn("application-label:", after)
+
+    def base_apk(self, name, own_dex):   # a port of the mkapk.py from before the background download's service (no <service>, no service dex; hasCode only with a dex)
+        d = self.t / 'basemkapk'; d.mkdir(exist_ok=True)
+        for f in ('mkapk.py', 'apksign.py'):
+            r = subprocess.run(['git', '-C', str(REPO), 'show', f'{SERVICE_BASE}:nxnative/dm/android/apk/{f}'], capture_output=True)
+            if r.returncode: self.skipTest(f'{SERVICE_BASE[:8]} not in this clone')
+            (d / f).write_bytes(r.stdout)
+        args = self.mkapk_args if own_dex else [a for i, a in enumerate(self.mkapk_args) if a not in ('--dex', '--activity') and self.mkapk_args[i - 1] not in ('--dex', '--activity')]
+        out = self.t / name
+        subprocess.run([sys.executable, str(d / 'mkapk.py'), str(self.t / 'libdmhost.so'), str(out)] + args, check=True, capture_output=True)
+        return out
+
+    def test_update_service_added(self):   # a released APK without the service: its <service>, hasCode, the permissions and the dex (classes.dex, or classes2.dex beside its own)
+        d = make_pack(self.t / 'pack'); svc = (APK / 'service.dex').read_bytes()
+        for own, dex_name, out in ((False, 'classes.dex', 'out-a'), (True, 'classes2.dex', 'out-b')):
+            old = self.base_apk(f'base-{own}.apk', own)
+            with zipfile.ZipFile(old) as z: self.assertFalse(any(apkupdate.SERVICE_MARK in z.read(n) for n in z.namelist() if n.endswith('.dex')))
+            r = apkupdate.update(old, apkupdate.Pack(d), self.t / out, build=8, jobs=1)
+            self.assertEqual((r['service_dex'], r['services_added']), ('added', ['org.nx2a.DownloadService']))
+            for p in ('android.permission.FOREGROUND_SERVICE', 'android.permission.FOREGROUND_SERVICE_DATA_SYNC', 'android.permission.POST_NOTIFICATIONS'): self.assertIn(p, r['permissions_added'])
+            with zipfile.ZipFile(r['apk']) as z, zipfile.ZipFile(old) as a:
+                self.assertEqual(z.read(dex_name), svc)
+                if own: self.assertEqual(z.read('classes.dex'), a.read('classes.dex'))   # the port's own dex kept
+                self.assertEqual([n for n in z.namelist() if n != dex_name], a.namelist())   # every other entry kept, in order
+                m = z.read('AndroidManifest.xml')
+            self.assertEqual(axml.services(m), ['org.nx2a.DownloadService'])
+            self.assertEqual(axml.info(m)['activity'], axml.info(old.read_bytes() and zipfile.ZipFile(old).read('AndroidManifest.xml'))['activity'])
+            if AAPT2.is_file():
+                tree = subprocess.run([str(AAPT2), 'dump', 'xmltree', '--file', 'AndroidManifest.xml', r['apk']], capture_output=True, text=True, check=True).stdout
+                self.assertIn('android:foregroundServiceType(0x01010599)=0x00000001', tree); self.assertIn('android:hasCode(0x0101000c)=true', tree)
+            if APKSIGNER.is_file():
+                v = subprocess.run([str(APKSIGNER), 'verify', '--min-sdk-version', '29', r['apk']], capture_output=True, text=True)
+                self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
+            r2 = apkupdate.update(r['apk'], apkupdate.Pack(d), self.t / (out + '2'), build=9, jobs=1)   # again: nothing more
+            self.assertEqual((r2['service_dex'], r2['services_added'], r2['permissions_added']), ('kept', [], []))
+
+    def test_update_service_replaced(self):   # the service's dex an earlier update put in, replaced by this checkout's in its place
+        d = make_pack(self.t / 'pack'); older = b'dex\n035\0' + apkupdate.SERVICE_MARK + b' an older build'
+        src = self.t / 'older.apk'
+        with zipfile.ZipFile(self.apk) as a: entries = [(i.filename, older if i.filename == 'classes2.dex' else a.read(i), 16384 if i.filename.startswith('lib/') else 4) for i in a.infolist()]
+        import apksign, json as _j
+        kj = _j.loads(paths.signing_key().read_text()); k = {n: int(v) for n, v in kj.items() if n != 'cert'}
+        z, cd, eocd = apksign.build_zip(entries); src.write_bytes(apksign.sign_v2(z, cd, eocd, k, bytes.fromhex(kj['cert'])))
+        r = apkupdate.update(src, apkupdate.Pack(d), self.t / 'out', build=8, jobs=1)
+        self.assertEqual(r['service_dex'], 'updated')
+        with zipfile.ZipFile(r['apk']) as z: self.assertEqual(z.read('classes2.dex'), (APK / 'service.dex').read_bytes()); self.assertNotIn('classes3.dex', z.namelist())
 
     def test_mkapk_korean_label(self):   # mkapk.py's pool: the label's length in UTF-16 units
         out = self.t / 'ko.apk'
