@@ -331,6 +331,21 @@ class Sync(unittest.TestCase):
         self.assertEqual(len(x['fetched']), len([b for b in files.values() if b]) + 4)   # every file (an empty one is not asked for), env.txt, settings.txt, the manifest, files.json
         self.assertEqual(sync(s, r)['result'], 'UPTODATE'); self.assertEqual(sync('-', r)['result'], 'OFFLINE')
 
+    def test_check_notes_by_time(self):   # a folder with the pack's files but no files.json (every file hashed, as a device whose list is gone): the check notes its
+        # progress every DS_NOTE_MS (200 ms) of the sync's clock, whatever the files' count, and the bytes hashed are its progress; not more often than that
+        s, files, _ = make_pack(self.t, 'plain-notes', bundles=None)
+        def notes(step):
+            r = self.root(f'notes-{step}'); shutil.copytree(s, r, dirs_exist_ok=True); (r / publish.FILES).unlink()
+            x = sync(s, r, '--notes', '--clock-step', step); self.assertIn(x['result'], ('DONE', 'UPTODATE'), x['text'])
+            return [tuple(map(int, ln.split()[1:])) for ln in x['text'].splitlines() if ln.startswith('note ')]
+        fast = notes(50)   # 50 ms a read of the clock: a note every 4 reads (one a file, one each MB hashed)
+        n = len(files) + 3
+        self.assertGreater(len(fast), n // 3, fast)   # (the old rule, a note every 4,096 files: 1 for this pack)
+        done = [d for _, _, d, _ in fast]; total = fast[0][3]
+        self.assertEqual(done, sorted(done)); self.assertGreater(done[-1], total * 3 // 4); self.assertTrue(all(t == total for *_, t in fast))
+        self.assertEqual([k for _, k, _, _ in fast], sorted(k for _, k, _, _ in fast))   # (the file's number goes up with it)
+        self.assertLessEqual(len(notes(1)), 3)   # 1 ms a read: the whole check is a few hundred ms of the clock, so a note or two after the first
+
 
 @unittest.skipUnless(CC, NO_CC)
 class Tar(unittest.TestCase):

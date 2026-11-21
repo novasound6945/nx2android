@@ -71,6 +71,14 @@ class Note(unittest.TestCase):
         self.assertEqual(self.note(1, DONE, 2 * self.GB, 2 * self.GB)[1:], (-1, '슈퍼로봇대전 Y', '다운로드 완료 · 눌러서 시작', '', ''))   # no buttons: the tap starts it
         self.assertEqual(self.note(1, RUN, game='')[2], '게임 데이터')
 
+    def test_checking_the_files(self):   # a try that hashes the folder's files again: the check's words and bar, no time left; the download's otherwise
+        CHECK, DOWNLOAD = 1, 2   # datasync.h DS_PH_*
+        notep = lambda ko, ph, done, total, eta=-1: fx('notep', ko, '슈퍼마리오', RUN, ph, done, total, eta, 0).split('|')
+        self.assertEqual(notep(1, CHECK, int(1.2 * self.GB), int(3.1 * self.GB), 40)[1:], ['387', '슈퍼마리오', '파일 확인 중 · 1.2 / 3.1 GB', '일시정지', '취소'])
+        self.assertEqual(notep(0, CHECK, 300 << 20, 600 << 20)[3], 'Checking the files · 300 / 600 MB')
+        self.assertEqual(notep(1, DOWNLOAD, self.GB, 2 * self.GB, 40)[3], '게임 데이터 받는 중 · 1.0 / 2.0 GB · 약 40초 남음')
+        self.assertEqual(notep(1, CHECK, 0, 0)[1:4], ['-1', '슈퍼마리오', '파일 확인 중'])
+
     def test_korean_words_are_in_the_start_font(self):   # the notification uses the system's font, but the same words show on the start screen's Noto subset (2,350 syllables)
         hangul = {chr(c) for c in range(0xAC00, 0xD7A4)}
         ks = {bytes([a, b]).decode('euc-kr') for a in range(0xB0, 0xC9) for b in range(0xA1, 0xFF)}

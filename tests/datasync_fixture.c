@@ -1,8 +1,10 @@
 // nxnative/dm/android/datasync.h on the computer (tests/test_datasync.py builds and drives it): the "server" is a folder, read by a fetch that can break off after some
 // bytes; '-' is a server that cannot be reached, 'none' no server at all (ds_ctx.fetch NULL: an APK ported without --data-url). -DDS_H="<path>" builds it with another
 // datasync.h (an app from before bundles).
-// datasync_fixture <server dir|-|none> <root> <package> [--break BYTES] [--free BYTES]
+// datasync_fixture <server dir|-|none> <root> <package> [--break BYTES] [--free BYTES] [--notes] [--clock-step MS]
 // Prints "fetch <path> <from>" for each file the server sent, then: result <R> fetched_files <n> fetched_bytes <b> space_need <B> space_free <B> [err <c->err>]
+// --notes: "note <phase> <file_no> <done> <total>" for each progress note of the check (DS_PH_CHECK); --clock-step: the sync's clock (ds_ctx.clock) moves on that many
+// ms each time it is read, so how often the check notes is the same on every computer
 // The pointer file and the APK's asset (a datasync.h with them, DS_PTR_MAX):
 // datasync_fixture --hmac <key hex> <message hex>   prints the HMAC-SHA256 in hex
 // datasync_fixture --pointer <key hex> <file>       prints "ok <root>" and "cred <cred>" on two lines (ds_pointer_open), or "bad <why>"
@@ -41,6 +43,10 @@ static int fetch(void *u, const char *rel, uint64_t from, uint64_t *start, int64
 }
 static uint64_t freeb(void *u, const char *root) { (void)root; return *(uint64_t *)u; }
 static void logf_(void *u, const char *m) { (void)u; printf("log: %s\n", m); }
+static void notef(void *u, const ds_progress *p) { (void)u; if (p->phase == DS_PH_CHECK) printf("note %d %d %llu %llu\n", p->phase, p->file_no, (unsigned long long)p->done, (unsigned long long)p->total); }
+#ifdef DS_NOTE_MS
+static int64_t fake_clock(void *u) { int64_t *t = u; return *t += t[1]; }   // t[0] the time, t[1] the step
+#endif
 static const char *NAMES[] = {"DONE", "UPTODATE", "OFFLINE", "ERR_NET", "ERR_SERVER", "ERR_PACKAGE", "ERR_SPACE", "ERR_DATA", "ERR_DISK", "ERR_LOCAL"};
 
 #ifdef DS_PTR_MAX
@@ -82,9 +88,11 @@ int main(int argc, char **argv) {
 #endif
     if (argc < 4) { fprintf(stderr, "usage: datasync_fixture <server|-|none> <root> <package> [--break N] [--free N]\n"); return 2; }
     int none = !strcmp(argv[1], "none");
-    srv s = {strcmp(argv[1], "-") && !none ? argv[1] : NULL, -1, 0, 0}; uint64_t fr = 0; int use_free = 0, verify = 0;
+    srv s = {strcmp(argv[1], "-") && !none ? argv[1] : NULL, -1, 0, 0}; uint64_t fr = 0; int use_free = 0, verify = 0, notes = 0; int64_t clk[2] = {0, 0};
     for (int i = 4; i < argc; i++) {
         if (!strcmp(argv[i], "--verify")) verify = 1;
+        else if (!strcmp(argv[i], "--notes")) notes = 1;
+        else if (!strcmp(argv[i], "--clock-step") && i + 1 < argc) clk[1] = atoll(argv[++i]);
         else if (!strcmp(argv[i], "--break") && i + 1 < argc) s.brk = atoll(argv[++i]);
         else if (!strcmp(argv[i], "--free") && i + 1 < argc) { fr = (uint64_t)atoll(argv[++i]); use_free = 1; }
     }
@@ -93,6 +101,12 @@ int main(int argc, char **argv) {
     c.verify = verify;
 #else
     (void)verify;
+#endif
+    if (notes) c.note = notef;
+#ifdef DS_NOTE_MS
+    if (clk[1]) { c.clock = fake_clock; c.cu = clk; }
+#else
+    (void)clk;
 #endif
     int rc = ds_sync(&c);
     unsigned long long need = 0, fr0 = 0;

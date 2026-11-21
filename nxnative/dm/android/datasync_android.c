@@ -364,6 +364,7 @@ static void build_launcher(stv_view *v, const snap_t *x, const stv_step *steps, 
     stv_launcher *l = &v->ln; stv_status *s = l->status;
     if (n->vrun) { int p = n->vpr.total ? (int)(n->vpr.done * 100 / n->vpr.total) : 0;
         snprintf(t, sizeof t, ko ? "게임 데이터 %s · %d%%" : "Game data: %s · %d%%", n->vpr.phase == DS_PH_DOWNLOAD || n->vpr.phase == DS_PH_UNPACK ? L("받는 중", "downloading") : L("확인 중", "checking"), p); st_set(&s[0], STV_RUN, t); }
+    else if (x->phase == PH_DATA && x->p.phase == DS_PH_CHECK && x->p.total) { stv_fmt_bytes(a, sizeof a, x->p.done, x->p.total); snprintf(t, sizeof t, ko ? "파일 확인 중 · %s" : "Checking the files · %s", a); st_set(&s[0], STV_RUN, t); }
     else if (x->phase == PH_DATA || steps[STV_DATA].state == STV_RUN) st_set(&s[0], STV_RUN, L("게임 데이터 확인 중", "Checking the game data"));
     else if (steps[STV_DATA].state == STV_WAIT) st_set(&s[0], STV_WAIT, L("게임 데이터 대기", "Game data waiting"));
     else if (n->data_off) st_set(&s[0], STV_SKIP, L("게임 데이터 · 오프라인", "Game data · offline"));
@@ -484,6 +485,14 @@ static void build_view(stv_view *v, const snap_t *x, const stv_rate *rate, dm_cl
         const ds_progress *p = &x->p; stv_step *s = &v->step[STV_DATA]; s->state = STV_RUN;
         stv_fmt_int(a, sizeof a, p->file_no); stv_fmt_int(b, sizeof b, p->files);
         if (p->phase == DS_PH_CONNECT) snprintf(s->note, sizeof s->note, "%s", L("서버 확인 중…", "Checking the server…"));
+        else if (p->phase == DS_PH_CHECK && p->total) {   // the files the folder has, hashed when its list does not know them: the bytes so far (a pack of GBs takes a minute)
+            char by[64]; stv_fmt_bytes(by, sizeof by, p->done, p->total); snprintf(s->note, sizeof s->note, ko ? "파일 확인 중 · %s" : "Checking the files · %s", by);
+            if (!x->ln.on) {   // (the launcher shows it in its line and on Start: the check does not take the screen as a download does)
+                v->bar = (int)((p->done < p->total ? p->done : p->total) * 1000 / p->total); snprintf(v->bar_title, sizeof v->bar_title, "%s", L("파일 확인 중", "Checking the files"));
+                snprintf(v->bar_left, sizeof v->bar_left, "%s", by); stv_fmt_eta(v->bar_right, sizeof v->bar_right, rate->eta, ko);
+                snprintf(v->hint, sizeof v->hint, "%s", L("기기에 있는 게임 데이터가 맞는지 확인해요", "Making sure the game data on the device is right"));
+            }
+        }
         else if (p->phase == DS_PH_CHECK) snprintf(s->note, sizeof s->note, "%s", L("파일 확인 중…", "Checking the files…"));
         else if (p->phase == DS_PH_FINISH) snprintf(s->note, sizeof s->note, "%s", L("마무리 중…", "Finishing…"));
         else snprintf(s->note, sizeof s->note, ko ? "파일 %s / %s" : "%s / %s files", a, b);
@@ -593,7 +602,7 @@ static void gl_show(stv_canvas *c, ANativeWindow *w) {
 }
 static void *screen_thread(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "startscreen");
-    stv_canvas c = {0}; stv_rate rate; stv_rate_reset(&rate); int last_phase = -1, gl_tried = 0;
+    stv_canvas c = {0}; stv_rate rate; stv_rate_reset(&rate); int last_phase = -1, last_dph = -1, gl_tried = 0;
     pthread_mutex_lock(&S.mu);
     for (;;) {
         if (S.lost) { gl_drop(); S.lost = 0; S.released = 1; pthread_cond_broadcast(&S.cv); }
@@ -610,8 +619,8 @@ static void *screen_thread(void *a) {
         stv_step steps[STV_NSTEPS]; memcpy(steps, V.step, sizeof steps); ANativeWindow *w = S.win; int64_t t = now_ms();
         dm_cloud_view cv; memset(&cv, 0, sizeof cv); cv.progress = -1;
         if (x.phase == PH_CLOUD || LN.on) dm_cloud_view_get(&cv);   // (savecloud.h: its lock is never held while this file's is taken)
-        if (x.phase != last_phase) { stv_rate_reset(&rate); last_phase = x.phase; }
-        if (x.phase == PH_DATA && (x.p.phase == DS_PH_DOWNLOAD || x.p.phase == DS_PH_UNPACK) && x.p.total)   // network bytes only: a resumed part's bytes join done at once, not the speed
+        if (x.phase != last_phase || (x.phase == PH_DATA && x.p.phase != last_dph)) { stv_rate_reset(&rate); last_phase = x.phase; last_dph = x.p.phase; }   // (the check's bytes, then the download's)
+        if (x.phase == PH_DATA && (x.p.phase == DS_PH_DOWNLOAD || x.p.phase == DS_PH_UNPACK || x.p.phase == DS_PH_CHECK) && x.p.total)   // network bytes only: a resumed part's bytes join done at once, not the speed
             stv_rate_feed(&rate, t, x.p.phase == DS_PH_DOWNLOAD ? (double)x.p.net : (double)x.p.done, (double)(x.p.total - (x.p.done < x.p.total ? x.p.done : x.p.total)));
         if (x.phase == PH_PREP && x.pt) stv_rate_feed(&rate, t, x.pd, x.pt - x.pd);
         int urgent = x.phase == PH_NOTICE || (x.phase == PH_CLOUD && cv.urgent) || (x.phase == PH_DATA && x.status >= 0);
@@ -822,7 +831,7 @@ static void bg_post(int state, int wait_s, int force) {
     int svc = S.svc, used = S.svc_used, can = !S.cancelled && (svc || (S.visible && !S.detached && (state == BG_ST_RUN || used))); ds_progress p = S.pr;
     pthread_mutex_unlock(&S.mu);
     if (state == BG_ST_DONE ? !used : !can) return;
-    bg_note_t n; bg_note(&n, korean(), V.name, state, p.done, p.total, BP.rate.eta, wait_s);
+    bg_note_t n; bg_note_phase(&n, korean(), V.name, state, p.phase, p.done, p.total, BP.rate.eta, wait_s);
     int64_t t = now_ms();
     if (!force && !bg_due(t, BP.t, state, BP.state, n.permille, BP.permille)) return;
     if ((*E)->PushLocalFrame(E, 16)) { jx(E, NULL, 0); return; }
@@ -840,11 +849,12 @@ static void bg_post(int state, int wait_s, int force) {
     pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
     BP.t = t; BP.state = state; BP.permille = n.permille;
 }
-static void bg_progress(const ds_progress *p) {   // (sync_note, the sync thread) bytes came: the notification's bar, the speed and the time left
-    if (!BE || !S.svc_cls || (p->phase != DS_PH_DOWNLOAD && p->phase != DS_PH_UNPACK) || !p->total) return;
+static void bg_progress(const ds_progress *p) {   // (sync_note, the sync thread) bytes came: the notification's bar, the speed and the time left; the check's bytes hashed
+    if (!BE || !S.svc_cls || (p->phase != DS_PH_DOWNLOAD && p->phase != DS_PH_UNPACK && p->phase != DS_PH_CHECK) || !p->total) return;
     pthread_mutex_lock(&S.mu); int used = S.svc_used, visible = S.visible && !S.detached; pthread_mutex_unlock(&S.mu);
-    if (p->phase == DS_PH_UNPACK && !used) return;   // (only a download starts the service: bundles the folder had are taken out on the screen)
+    if (p->phase != DS_PH_DOWNLOAD && !used) return;   // (only a download starts the service: bundles the folder had are taken out, its files checked, on the screen)
     uint64_t d = p->done < p->total ? p->done : p->total;
+    if (p->phase == DS_PH_CHECK) { bg_post(BG_ST_RUN, 0, 0); return; }   // (a try after a break checks the files again: "Checking the files · 1.2 / 3.1 GB", no speed)
     stv_rate_feed(&BP.rate, now_ms(), p->phase == DS_PH_DOWNLOAD ? (double)p->net : (double)p->done, (double)(p->total - d));
     if (!BP.started && p->phase == DS_PH_DOWNLOAD && visible) { BP.started = 1; bg_call(BE, S.mAsk); }   // Android 13+: the notification permission, once, as the first download starts
     bg_post(BG_ST_RUN, 0, 0);

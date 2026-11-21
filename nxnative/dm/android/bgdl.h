@@ -56,13 +56,16 @@ static void bg_fmt_eta(char *o, size_t n, double s, int ko) {   // as startscree
 }
 
 typedef struct { int state, permille; char title[160], text[200], b_pause[32], b_cancel[32]; } bg_note_t;   // permille -1: no bar (or one that moves)
-// The notification of state for the game named game: done of total bytes, eta seconds left (-1: not known), wait_s the seconds of a timer (BG_ST_WAIT)
-static void bg_note(bg_note_t *n, int ko, const char *game, int state, uint64_t done, uint64_t total, double eta, int wait_s) {
+// The notification of state for the game named game: done of total bytes, eta seconds left (-1: not known), wait_s the seconds of a timer (BG_ST_WAIT). phase
+// (datasync.h DS_PH_*): DS_PH_CHECK while it runs is the check of the files the folder has (a try after a break hashes them again: tens of seconds for a pack of
+// GBs), "Checking the files · 1.2 / 3.1 GB" with its bar and no time left; any other phase is the download's
+static void bg_note_phase(bg_note_t *n, int ko, const char *game, int state, int phase, uint64_t done, uint64_t total, double eta, int wait_s) {
     memset(n, 0, sizeof *n); n->state = state; n->permille = -1;
     snprintf(n->title, sizeof n->title, "%s", game && game[0] ? game : ko ? "게임 데이터" : "Game data");
     char b[64] = "", e[64] = "";
     if (total) { bg_fmt_bytes(b, sizeof b, done < total ? done : total, total); n->permille = (int)((done < total ? done : total) * 1000 / total); }
-    if (state == BG_ST_RUN) {
+    if (state == BG_ST_RUN && phase == DS_PH_CHECK) snprintf(n->text, sizeof n->text, "%s%s%s", ko ? "파일 확인 중" : "Checking the files", b[0] ? " · " : "", b);
+    else if (state == BG_ST_RUN) {
         bg_fmt_eta(e, sizeof e, eta, ko);
         snprintf(n->text, sizeof n->text, "%s%s%s%s%s", ko ? "게임 데이터 받는 중" : "Downloading the game data", b[0] ? " · " : "", b, e[0] ? " · " : "", e);
     } else if (state == BG_ST_PAUSED) snprintf(n->text, sizeof n->text, "%s%s%s", ko ? "일시정지됨" : "Paused", b[0] ? " · " : "", b);
@@ -74,6 +77,7 @@ static void bg_note(bg_note_t *n, int ko, const char *game, int state, uint64_t 
     if (state != BG_ST_DONE && state != BG_ST_NONE) snprintf(n->b_cancel, sizeof n->b_cancel, "%s", ko ? "취소" : "Cancel");
     if (state == BG_ST_WAIT_NET || state == BG_ST_WAIT) n->permille = -1;   // (a stopped bar would look like one moving: none while it waits)
 }
+static void bg_note(bg_note_t *n, int ko, const char *game, int state, uint64_t done, uint64_t total, double eta, int wait_s) { bg_note_phase(n, ko, game, state, DS_PH_DOWNLOAD, done, total, eta, wait_s); }
 // Whether the notification is posted again now (ms clocks): a new state at once, the same one at most once a second and only when its bar or words changed (the time
 // left: every 10 s)
 static int bg_due(int64_t now, int64_t last, int state, int last_state, int permille, int last_permille) {

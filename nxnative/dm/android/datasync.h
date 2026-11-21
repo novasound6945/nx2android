@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -426,10 +427,28 @@ typedef struct {
     int unreached;                     // the last ds_sync: the server was not reached at all (no network, DNS, a connection or a timeout; not an HTTP error)
     int verify;                        // every file's SHA-256 checked against the server's list (the launcher's Check the data again): the list asked for whole, no sample
     int fixed;                         // the last ds_sync: the files it wrote (downloaded or taken out of a bundle) to make the folder the list's
+    int64_t (*clock)(void *u); void *cu;   // ms, for how often the check notes its progress (DS_NOTE_MS); NULL: the monotonic clock (a test gives its own)
+    int64_t note_t;                    // (when the check last noted)
 } ds_ctx;
 #define DS_VERIFY 1   // (ds_ctx.verify and .fixed: tests/datasync_fixture.c's --verify)
 #define DS_LOG(c, ...) do { if ((c)->log) { char _m[512]; snprintf(_m, sizeof _m, __VA_ARGS__); (c)->log((c)->lu, _m); } } while (0)
 static void ds_note(ds_ctx *c) { if (c->note) c->note(c->nu, &c->pr); }
+// The check of the folder's files (DS_PH_CHECK) notes its progress by the time, not by the files: a pack of 3,745 files, none known to the folder (no files.json on
+// the device), hashed 3.1 GB in 53 s with the screen at 0 % (a note every 4,096 files, and inside a file every 16 MB, never came for files smaller than that)
+#define DS_NOTE_MS 200
+static int64_t ds_clock_ms(void) {
+    struct timespec t;
+#ifdef _WIN32
+    timespec_get(&t, TIME_UTC);
+#else
+    clock_gettime(CLOCK_MONOTONIC, &t);
+#endif
+    return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+static void ds_note_due(ds_ctx *c) {   // a note when DS_NOTE_MS went by since the last one of the check
+    int64_t t = c->clock ? c->clock(c->cu) : ds_clock_ms();
+    if (t - c->note_t >= DS_NOTE_MS || t < c->note_t) { c->note_t = t; ds_note(c); }
+}
 static void ds_path(char *out, size_t cap, const ds_ctx *c, const char *rel) { snprintf(out, cap, "%s/%s", c->root, rel); }
 static const char *ds_local_name(const char *rel) { return !strcmp(rel, "env.txt") ? DS_ENV_PACK : rel; }   // where the pack's copy of a file is kept
 
@@ -510,8 +529,8 @@ static void ds_val_save(const ds_ctx *c, const char *id, const ds_val *v, const 
 }
 static int ds_hash_file(const char *path, char out[65], ds_ctx *c, uint64_t *done) {   // 0, or -1 when it cannot be read
     FILE *f = fopen(path, "rb"); if (!f) return -1;
-    ds_sha s; ds_sha_init(&s); static uint8_t b[1 << 20]; size_t k; int64_t t = 0;
-    while ((k = fread(b, 1, sizeof b, f)) > 0) { ds_sha_update(&s, b, k); if (done) { *done += k; if ((t += (int64_t)k) >= (16 << 20)) { t = 0; ds_note(c); } } }
+    ds_sha s; ds_sha_init(&s); static uint8_t b[1 << 20]; size_t k;
+    while ((k = fread(b, 1, sizeof b, f)) > 0) { ds_sha_update(&s, b, k); if (done) { *done += k; ds_note_due(c); } }   // (the bytes hashed are the check's progress)
     int bad = ferror(f); fclose(f); if (bad) return -1;
     ds_sha_hex(&s, out); return 0;
 }
@@ -795,11 +814,11 @@ static int ds_apply(ds_ctx *c, const ds_list *l, const ds_list *known, const cha
     int rc = 0, nneed = 0, nown = 0, nmem = 0, nbloc = 0, nbdl = 0, lack = 0;
     c->pr.phase = DS_PH_CHECK; c->pr.files = l->n;
     for (int i = 0; i < l->n; i++) c->pr.total += l->f[i].size;
-    ds_note(c);
+    ds_note(c); c->note_t = c->clock ? c->clock(c->cu) : ds_clock_ms();
     uint64_t want = 0, parts = 0, unpack = 0, bwant = 0, maxb = 0;
     for (int i = 0; i < l->n; i++) {
         const ds_file *f = &l->f[i]; c->pr.file_no = i + 1; snprintf(c->pr.file, sizeof c->pr.file, "%s", f->path);
-        if (!(i & 4095)) ds_note(c);   // (a pack of 200,000 files takes a while to look through)
+        ds_note_due(c);   // (a pack of 200,000 files takes a while to look through; one of large files, to hash)
         if (!strcmp(f->path, DS_LIST)) { c->pr.done += f->size; continue; }
         ds_path(p, sizeof p, c, ds_local_name(f->path));
         int64_t sz = ds_size(p);
