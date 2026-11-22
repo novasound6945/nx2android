@@ -541,6 +541,11 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
                 g_tex_sseq = b->kind == RK_TEX && b->reg >= 0 && b->reg < 256 ? S.tex_sseq[st][b->reg] : 0;
                 if (g_nalias && b->kind == RK_TEX && cnt == 1) h = bind_alias(st, s, b, h);
                 int num = tex_desc_for(st, b, h, &ii[nii + k], 0);
+                // a binding a depth comparison reads stays float (vk_spv_dref.h): an integer view there (one handle of Luigi's Mansion 3's 32-texture shadow array)
+                // takes a float dummy instead of retyping the whole binding, whose Dref gathers Turnip refused (the pipeline failed, its draws were left out)
+                if (num && i < 64 && (s->dref_bind >> i & 1)) {
+                    VkDescriptorImageInfo *di = &ii[nii + k]; di->imageView = vk_dummy_view(b->dim == 0xff ? 1 : b->dim, b->flags & 1, (b->flags & 2) != 0, 0, 0); di->sampler = samp_for(st, b, h, 0); num = 0;
+                    static int n; if (n++ < 8) VKLOG("[RED] shader %016llx binding %d: an integer view where a depth comparison reads: a float dummy instead (texture handle %#llx)", (unsigned long long)s->key, (int)b->binding, (unsigned long long)h); }
                 if (num && i < 64) { if (num == 1) g_num_um |= 1ull << i; else g_num_im |= 1ull << i; }
             }
             wr->pImageInfo = &ii[nii]; nii += (uint32_t)cnt; wr->descriptorCount = (uint32_t)cnt; wr->descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; nw++;

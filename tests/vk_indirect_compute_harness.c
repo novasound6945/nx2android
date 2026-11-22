@@ -59,6 +59,7 @@ VkBuffer vk_support_buffer(void) { abort(); }
 VkBuffer vk_zero_buffer(void) { abort(); }
 static void vk_cross(int k, uint64_t a, uint64_t n, const vkpool_t *p) { abort(); }
 static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImageInfo *i, int storage) { abort(); }
+static VkSampler samp_for(int st, const dmsv_bind *b, uint64_t texh, int nearest) { abort(); }
 VkSampler vk_samp_by_id(int id) { abort(); }
 VkSampler vk_dummy_sampler(void) { abort(); }
 vkimg_t *vk_tex_by_id(int id, const view_t **v, const tex_t **t) { abort(); }

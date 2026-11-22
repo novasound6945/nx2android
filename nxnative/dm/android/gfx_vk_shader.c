@@ -8,6 +8,7 @@
 #include "zstd.h"
 #include "vk_spv_vertex.h"
 #include "vk_spv_fragout.h"
+#include "vk_spv_dref.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <fcntl.h>
 #include <string.h>
@@ -401,6 +402,7 @@ static vkshader_t *vk_shader_q(uint64_t key, int stage, int quiet) {
             else VKLOG("[RED] shader %016llx: DM_VK_FS_NOKILL found no discard it can take out: left as it is", (unsigned long long)key); } }
     spv_io_locs(w, nw, &s->in_locs, &s->out_locs);
     if (stage == 1) { s->fout_locs = spv_float_out_locs(w, nw); s->int_writer = spv_int_writer(w, nw); }   // the float outputs an integer target retypes, and whether it writes integers there (vk_spv_fragout.h)
+    { uint16_t bn[64]; int nb = s->nbind < 64 ? s->nbind : 64; for (int i = 0; i < nb; i++) bn[i] = s->b[i].binding; s->dref_bind = spv_dref_bindings(w, nw, bn, nb); }   // the bindings a depth comparison reads (vk_spv_dref.h)
     VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, (size_t)nw * 4, w};
     VkResult vr = vkCreateShaderModule(V.dev, &ci, NULL, &s->mod); s->spv = w; s->nspv = nw;
     if (!vr) { __atomic_fetch_add(&g_spv_n, 1, __ATOMIC_RELAXED); __atomic_fetch_add(&g_spv_bytes, (uint64_t)nw * 4, __ATOMIC_RELAXED); }
@@ -696,6 +698,7 @@ static VkShaderModule vk_shader_module_(vkshader_t *s, uint64_t um, uint64_t im,
     if (af >= 8 || s->stage != 1) af = 0;
     if (s->stage != 1) iu = is = 0;
     iu &= s->fout_locs; is &= s->fout_locs;
+    um &= ~s->dref_bind; im &= ~s->dref_bind;   // a depth comparison's image stays float (vk_spv_dref.h; stage_set gives such a binding no integer view)
     if (!(um | im | xo | (uint32_t)fd | (uint32_t)dual | (uint32_t)af | vi | iu | is) || !s->spv) return s->mod;
     enum { NVAR = (int)(sizeof s->var / sizeof s->var[0]) };
     if (xo == 1u << 31) {   // DM_VK_SPV_ALT

@@ -155,9 +155,13 @@ static gfskey gpl_fs_key(const vkshader_t *fs, uint64_t um, uint64_t im, uint32_
 }
 // a shader part: from its table, else made now (*made: its time, for the statistics; 0 when it was there)
 static VkPipeline gpl_part(int fs_part, const void *key, vkshader_t *a, vkshader_t *b, uint64_t *made) {
+    // a part the driver refused once is not made again: every other draw state with the same shaders would compile it again (one compile each, a few ms on the
+    // replay thread), only to be refused again; its draws are left out as the first one's (graphics_pipeline, gfx_vk_exec_draws.inc)
+    static nvn_hmap bad_pr = {.klen = sizeof(gprkey)}, bad_fs = {.klen = sizeof(gfskey)}; nvn_hmap *bad = fs_part ? &bad_fs : &bad_pr;
     nvn_hmap *m = fs_part ? &g_gfs : &g_gpr; VkPipeline p = gpl_get(m, key); *made = 0; if (p) return p;
+    if (gpl_get(bad, key)) return VK_NULL_HANDLE;
     uint64_t t0 = tick(); p = fs_part ? gpl_fs_make(key, a) : gpl_pr_make(key, a, b); *made = tick() - t0 + 1;
-    if (!p) { pthread_mutex_lock(&g_glib_mu); g_gst.part_fail++; pthread_mutex_unlock(&g_glib_mu); return VK_NULL_HANDLE; }
+    if (!p) { pthread_mutex_lock(&g_glib_mu); g_gst.part_fail++; if (!nvn_hm_get(bad, key)) nvn_hm_put(bad, key, (void *)1); pthread_mutex_unlock(&g_glib_mu); return VK_NULL_HANDLE; }
     return gpl_put(m, key, p);
 }
 static int gpl_eligible(const pkey *k) {
