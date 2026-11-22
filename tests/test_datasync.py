@@ -58,8 +58,8 @@ def fixture(old=False):   # the harness, once a run; old: with the datasync.h of
     _built[old] = exe; return exe
 
 
-def sync(server, root, *a, old=False, timeout=None):   # timeout: seconds, else the test fails (a sync that does not end)
-    try: r = subprocess.run([str(fixture(old)), str(server), str(root), PKG, *map(str, a)], capture_output=True, text=True, encoding='utf-8', timeout=timeout)
+def sync(server, root, *a, old=False, timeout=None, package=PKG):   # timeout: seconds, else the test fails (a sync that does not end); package: the app's
+    try: r = subprocess.run([str(fixture(old)), str(server), str(root), package, *map(str, a)], capture_output=True, text=True, encoding='utf-8', timeout=timeout)
     except subprocess.TimeoutExpired: raise AssertionError(f'the sync did not end in {timeout} s (a loop)') from None
     lines = r.stdout.splitlines(); last = (lines or [''])[-1].split(' ', 10)
     if last[:1] != ['result']: return dict(result=None, text=r.stdout + r.stderr + f'\n(exit {r.returncode & 0xffffffff:#x})', fetched=[])
@@ -183,6 +183,15 @@ class Sync(unittest.TestCase):
         self.assertIn('RomFS/Data/big.bin', x['fetched']); self.assertIn('taken out of', x['text'])
         y = sync(self.server, r); self.assertEqual((y['result'], y['files']), ('UPTODATE', 1), y['text'])
         self.assertEqual(sync('-', r)['result'], 'OFFLINE')
+
+    def test_renamed_app(self):   # an APK renamed by porter apk-update --package: the pack (the old package's) is refused without its alias, taken with it (download, offline)
+        new = 'kr.example.renamed'
+        r = self.root('renamed'); x = sync(self.server, r, package=new)
+        self.assertEqual(x['result'], 'ERR_PACKAGE', x['text']); self.assertIn(f'for {PKG}, not this app ({new})', x['err'])
+        x = sync(self.server, r, '--alias', PKG, package=new); self.assertEqual(x['result'], 'DONE', x['text']); self.whole(r)
+        self.assertEqual(sync(self.server, r, '--alias', PKG, package=new)['result'], 'UPTODATE')
+        self.assertEqual(sync('-', r, '--alias', PKG, package=new)['result'], 'OFFLINE')
+        self.assertEqual(sync(self.server, r, '--alias', 'kr.example.other', package=new)['result'], 'ERR_PACKAGE')   # another alias: still not this app's pack
 
     def test_one_small_file_changed(self):   # a new pack with one small file changed (same size): its bundle only, and the list
         r = self.root('changed'); self.assertEqual(sync(self.server, r)['result'], 'DONE')

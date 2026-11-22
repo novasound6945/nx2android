@@ -12,6 +12,7 @@
 #include "pad_slots.h"
 #include "overlay_layout.h"
 #include "stick_axis.h"
+#include "env_path.h"
 #include "pixel_font.h"
 #include "saves_android.h"
 #include "savecloud.h"
@@ -1522,13 +1523,20 @@ static void *host_thread(void *a) {
     _exit(rc);
 }
 static void env_file(const char *path) {   // KEY=VALUE per line (# comments): switches without rebuilding, as the iOS app's Documents/env.txt
-    FILE *f = fopen(path, "r"); char line[1024];
+    FILE *f = fopen(path, "r"); char line[1024], own[1200];
     if (!f) return;
+    static int said;   // (env.txt is read at the shader preparation and again at the game's start: the rewrites are logged once)
+    int moved = 0;
     while (fgets(line, sizeof line, f)) {
         char *e = line + strlen(line); while (e > line && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' ')) *--e = 0;
         if (!line[0] || line[0] == '#') continue;
-        char *eq = strchr(line, '='); if (!eq) continue; *eq = 0; setenv(line, eq + 1, 1);
+        char *eq = strchr(line, '='); if (!eq) continue; *eq = 0;
+        if (dm_env_own_path(eq + 1, g_root, own, sizeof own)) {   // env_path.h: a pack ported under another package (an APK renamed by porter apk-update --package)
+            if (!said) LOG("env: %s=%s is another package's files folder: read as %s", line, eq + 1, own);
+            setenv(line, own, 1); moved = 1;
+        } else setenv(line, eq + 1, 1);
     }
+    if (moved) said = 1;
     fclose(f);
 }
 // ---- which rewrite of the game's code: mods/, or mods-4x3/ (a data pack with the variant, android.tsv variant 4x3: the game rendering 4:3) on a screen narrower than

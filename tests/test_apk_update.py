@@ -353,6 +353,71 @@ class ApkUpdate(unittest.TestCase):
         self.assertIn('another key', str(e.exception))
         self.assertEqual(self.builds, [])   # refused before the host was built
 
+    def mkapk(self, name, *over):   # an APK of this checkout's mkapk.py with some of its arguments replaced (flag, value pairs)
+        args = list(self.mkapk_args)
+        for k, v in zip(over[::2], over[1::2]): args[args.index(k) + 1] = v
+        out = self.t / name
+        subprocess.run([sys.executable, str(APK / 'mkapk.py'), str(self.t / 'libdmhost.so'), str(out)] + args, check=True, capture_output=True)
+        return out
+
+    def test_manifest_package(self):   # the package replaced in place; class names relative to the old package written out with it; what cannot be renamed refuses
+        rel = self.mkapk('rel.apk', '--activity', '.GameActivity')
+        with zipfile.ZipFile(rel) as z: m = z.read('AndroidManifest.xml')
+        n, changed = axml.set_package(m, 'kr.example.atrain')
+        self.assertEqual(changed, [('activity', '.GameActivity', PKG + '.GameActivity')])
+        a, b = axml.parse(m), axml.parse(n)
+        self.assertEqual(axml.info(n), dict(axml.info(m), package='kr.example.atrain', activity=PKG + '.GameActivity'))
+        self.assertEqual(b['strings'][:len(a['strings'])], a['strings'])   # appended only: the resource map's indexes stay
+        self.assertEqual(axml.services(n), axml.services(m)); self.assertEqual(axml.permissions(n), axml.permissions(m))
+        with zipfile.ZipFile(self.apk) as z: m2 = z.read('AndroidManifest.xml')
+        n2, changed = axml.set_package(m2, 'kr.wook.srw.srwvswitchns')
+        self.assertEqual(changed, []); self.assertEqual(axml.info(n2)['package'], 'kr.wook.srw.srwvswitchns'); self.assertEqual(axml.info(n2)['activity'], 'org.nx2a.GameActivity')
+        self.assertEqual(axml.set_package(m2, PKG), (m2, []))   # the same package: the same bytes
+        for bad in ('srwv', 'kr.wook.', 'kr..x', 'kr.1x', 'kr.wook-srw', 'kr.한글', ''):
+            with self.assertRaises(ValueError, msg=bad): axml.set_package(m2, bad)
+
+    @unittest.skipUnless(AAPT2.is_file(), 'aapt2 (the Android SDK) on this computer')
+    def test_manifest_package_aapt2(self):   # aapt2 reads the renamed manifest as Android would: the new package, the activity and the label as they were
+        rel = self.mkapk('rel2.apk', '--activity', '.GameActivity')
+        out = self.t / 'renamed.apk'
+        with zipfile.ZipFile(rel) as a, zipfile.ZipFile(out, 'w') as b:
+            for i in a.infolist(): b.writestr(i, axml.set_package(a.read(i), 'kr.example.atrain')[0] if i.filename == 'AndroidManifest.xml' else a.read(i))
+        dump = subprocess.run([str(AAPT2), 'dump', 'badging', str(out)], capture_output=True, text=True, check=True).stdout
+        self.assertIn("package: name='kr.example.atrain'", dump)
+        self.assertIn(f"launchable-activity: name='{PKG}.GameActivity'", dump)
+
+    def test_update_package(self):   # --package: another app with the old one's everything (label, signer, services, the data server), reading the old package's pack
+        new = 'kr.example.atrain'; d = make_pack(self.t / 'pack')
+        def seen():
+            try: return json.loads((paths.user_dir() / 'builds.json').read_text())
+            except (OSError, ValueError): return {}
+        want = max(5, seen().get(PKG, 0), seen().get(new, 0)) + 1   # one more than the APK's build (5) and both packages' last
+        said = []
+        with mock.patch.object(apkupdate, 'say', side_effect=said.append): r = apkupdate.update(self.apk, apkupdate.Pack(d), self.t / 'out', jobs=1, package=new)
+        self.assertEqual((r['package'], r['data_package'], r['renamed'], r['version_name']), (new, PKG, [], f'1.0.1-{want}'))
+        self.assertGreater(r['version_code'], 65542); self.assertEqual(seen()[new], want)
+        self.assertEqual(self.builds[-1][0], ATRAIN)
+        self.assertIn(f'package: {PKG} → {new}', '\n'.join(said))
+        oi, ni = axml.apk_info(self.apk), axml.apk_info(r['apk'])
+        self.assertEqual(ni, dict(oi, package=new, version_code=r['version_code'], version_name=r['version_name'], label=KO))
+        with zipfile.ZipFile(self.apk) as a, zipfile.ZipFile(r['apk']) as b:
+            self.assertEqual(b.read('assets/' + apkupdate.DATAPKG_ASSET), (PKG + '\n').encode())
+            self.assertEqual([n for n in b.namelist() if n not in a.namelist()], ['assets/' + apkupdate.DATAPKG_ASSET])
+            self.assertEqual(axml.services(b.read('AndroidManifest.xml')), axml.services(a.read('AndroidManifest.xml')))
+            self.assertEqual(axml.permissions(b.read('AndroidManifest.xml')), axml.permissions(a.read('AndroidManifest.xml')))
+        self.assertEqual(apkupdate.data_package(r['apk']), PKG); self.assertEqual(apkupdate.data_package(self.apk), PKG)
+        self.assertEqual(apkupdate.source_of(r['apk']), ('https://example.invalid/pack/', 'u:p'))
+        # the renamed APK updated again (no --package): it stays the new app, reads the same pack, its build goes on
+        r2 = apkupdate.update(r['apk'], apkupdate.Pack(d), self.t / 'out2', jobs=1)
+        self.assertEqual((r2['package'], r2['data_package'], r2['version_name']), (new, PKG, f'1.0.1-{want + 1}'))
+        with zipfile.ZipFile(r2['apk']) as z: self.assertEqual(z.namelist().count('assets/' + apkupdate.DATAPKG_ASSET), 1)
+        # an APK of another package (not renamed) still refuses the pack; a package name Android would not take refuses before the host is built
+        with self.assertRaises(BuildError) as e: apkupdate.update(self.mkapk('other.apk', '--package', 'org.nx2a.other'), apkupdate.Pack(d), self.t / 'out3', build=60)
+        self.assertIn('not this game', str(e.exception))
+        n = len(self.builds)
+        with self.assertRaises(BuildError) as e: apkupdate.update(self.apk, apkupdate.Pack(d), self.t / 'out4', build=61, package='kr.wook-srw')
+        self.assertIn('--package', str(e.exception)); self.assertEqual(len(self.builds), n)
+
     def test_update_new_profile_h(self):   # a host-only profile change: the pack's nx2a-data.json again, and its files.json with that file's new hash
         cur = host.profile_header(ATRAIN); old = cur + b'#define DM_GAME_FPS_HOLD 0\n'
         d = make_pack(self.t / 'pack', profile_h=sha(old))

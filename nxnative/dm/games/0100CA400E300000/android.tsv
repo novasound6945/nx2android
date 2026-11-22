@@ -3,7 +3,7 @@
 # settings carry over; the game profile beside this is the provisional one porter wrote from the survey (not checked by hand); the shader tables are its own.
 # Text is drawn with the system shared font (nn::fontll): build with --shared-font <Korean TTF>, or the Korean text has no glyphs (the device's Roboto has no Hangul).
 status	experimental
-package	org.nx2a.t0100ca400e300000
+package	kr.wook.srw.srwvswitchns
 orientation	landscape
 # Invalidate-only barriers keep the pass open, as for SUPER ROBOT WARS T (its android.tsv: menu 21 -> 60 fps on the Retroid Pocket Nova)
 env	DM_VK_INVAL_KEEP=1

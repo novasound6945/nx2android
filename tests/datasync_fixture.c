@@ -88,10 +88,12 @@ int main(int argc, char **argv) {
 #endif
     if (argc < 4) { fprintf(stderr, "usage: datasync_fixture <server|-|none> <root> <package> [--break N] [--free N]\n"); return 2; }
     int none = !strcmp(argv[1], "none");
+    const char *alias = NULL;
     srv s = {strcmp(argv[1], "-") && !none ? argv[1] : NULL, -1, 0, 0}; uint64_t fr = 0; int use_free = 0, verify = 0, notes = 0; int64_t clk[2] = {0, 0};
     for (int i = 4; i < argc; i++) {
         if (!strcmp(argv[i], "--verify")) verify = 1;
         else if (!strcmp(argv[i], "--notes")) notes = 1;
+        else if (!strcmp(argv[i], "--alias") && i + 1 < argc) alias = argv[++i];
         else if (!strcmp(argv[i], "--clock-step") && i + 1 < argc) clk[1] = atoll(argv[++i]);
         else if (!strcmp(argv[i], "--break") && i + 1 < argc) s.brk = atoll(argv[++i]);
         else if (!strcmp(argv[i], "--free") && i + 1 < argc) { fr = (uint64_t)atoll(argv[++i]); use_free = 1; }
@@ -101,6 +103,11 @@ int main(int argc, char **argv) {
     c.verify = verify;
 #else
     (void)verify;
+#endif
+#ifdef DS_ALIAS
+    c.alias = alias;
+#else
+    (void)alias;
 #endif
     if (notes) c.note = notef;
 #ifdef DS_NOTE_MS

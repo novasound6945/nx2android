@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # axml.py: read and change an APK's binary AndroidManifest.xml (AXML, as mkapk.py writes it: one UTF-16 string pool, a resource map, the element tree), and read the signer
 # certificates of its APK Signature Scheme v2 block, with the Python standard library only. porter apk-update (porter/apkupdate.py) gives a released APK a new versionCode and
-# versionName (and its label, set_label, the permissions this checkout's mkapk.py asks for that it lacks, add_permissions, its services, add_services, and hasCode) this way: every other byte of the manifest stays as
+# versionName (and its label, set_label, the permissions this checkout's mkapk.py asks for that it lacks, add_permissions, its services, add_services, hasCode, and with --package another package, set_package) this way: every other byte of the manifest stays as
 # the APK's port wrote it (the package, the label, the activity, the permissions of that port's mkapk.py).
 # Usage: axml.py <app.apk>   → prints the manifest's package, versionCode, versionName, debuggable, label and the signer certificates' SHA-256 (JSON)
 import hashlib, json, struct, sys, zipfile
@@ -129,6 +129,44 @@ def set_label(data, label):
     data, idx, at = _with_string(data, m, label); out = bytearray(data)
     a = at(app['android:label'][0]); struct.pack_into('<IHBBI', out, a + 8, idx, 8, 0, T_STRING, idx)
     return bytes(out)
+
+
+CLASS_TAGS = ('application', 'activity', 'activity-alias', 'service', 'receiver', 'instrumentation')   # elements whose android:name is a class
+
+
+def _set_string_attr(data, el_index, key, text):   # data with the el_index-th element's attribute key = the string text (appended to the pool as in set_version)
+    m = parse(data); attrs = m['elements'][el_index][1]
+    data, idx, at = _with_string(data, m, text); out = bytearray(data)
+    a = at(attrs[key][0]); struct.pack_into('<IHBBI', out, a + 8, idx, 8, 0, T_STRING, idx)
+    return bytes(out)
+
+
+def set_package(data, package):
+    """data with the manifest's package = package (the app installs as another app: porter apk-update --package). A class name written relative to the package
+    (".GameActivity", or a name without a dot: Android resolves both against the manifest's package) is written out in full with the old package first, so it names
+    the same class under the new one. A <provider> or a <permission> (an authority or a permission name is unique on the device and usually carries the package, so
+    the new app would clash with the old one) raises ValueError: not one mkapk.py writes. Every other byte as it was (the strings appended as in set_version).
+    → (data, [(element, old name, new name)] of the class names written out)"""
+    if '.' not in package or not all(p and (p[0].isalpha() or p[0] == '_') and all(c.isascii() and (c.isalnum() or c == '_') for c in p) for p in package.split('.')):
+        raise ValueError(f'package {package!r}: not a Java package name of two parts or more (a.b)')
+    m = parse(data)
+    if any(tag in ('provider', 'permission', 'permission-group', 'permission-tree') for tag, _ in m['elements']):
+        raise ValueError('AXML: the manifest has a <provider> or a <permission> (its authority or name would clash with the old app\'s): not one mkapk.py writes')
+    i_man = next((i for i, (tag, _) in enumerate(m['elements']) if tag == 'manifest'), None)
+    if i_man is None or 'package' not in m['elements'][i_man][1]: raise ValueError('AXML: the manifest has no package attribute')
+    old = _value(m['strings'], m['elements'][i_man][1]['package'])
+    changed = []
+    for i in range(len(m['elements'])):
+        tag, attrs = m['elements'][i]
+        if tag not in CLASS_TAGS: continue
+        for key in ('android:name', 'android:targetActivity') if tag == 'activity-alias' else ('android:name',):
+            if key not in attrs or attrs[key][2] != T_STRING: continue
+            name = m['strings'][attrs[key][3]]
+            if name.startswith('.') or '.' not in name:
+                full = old + (name if name.startswith('.') else '.' + name)
+                data = _set_string_attr(data, i, key, full); changed.append((tag, name, full)); m = parse(data)
+    if package != old: data = _set_string_attr(data, i_man, 'package', package)
+    return data, changed
 
 
 def permissions(data):

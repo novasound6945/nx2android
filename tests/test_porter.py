@@ -705,6 +705,8 @@ class Saves(unittest.TestCase):   # porter/saves.py: the save folders on the dev
         self.assertEqual(saves.pick_app(two, 'org.nx2a.b'), 'org.nx2a.b')
         with self.assertRaises(BuildError): saves.pick_app(two, '')
         with self.assertRaises(BuildError): saves.pick_app(two, 'org.nx2a.c')
+        mixed = self.FakeAdb({}, {}, ('com.android.chrome', 'kr.wook.srw.srwvswitchns', 'kr.wook.srwdb', 'org.nx2a.a'))   # a renamed port (porter apk-update --package), not the launcher
+        self.assertEqual(saves.apps(mixed), ['kr.wook.srw.srwvswitchns', 'org.nx2a.a'])
 
     def test_zip(self):   # a .zip of one folder imports that folder; one of loose files imports them; a path out of the archive is refused
         import zipfile

@@ -1,7 +1,7 @@
 # SUPER ROBOT WARS T on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android")
 # SDK 6, NVN, update 1.0.5. The game profile beside this is the provisional one porter wrote from the survey (not checked by hand); the shader tables are its own.
 status	experimental
-package	org.nx2a.t01006c900cc60000
+package	kr.wook.srw.srwtps4
 orientation	landscape
 # Invalidate-only barriers keep the pass open (android/gfx_vk_exec.c g_inval_keep): the menus and the battle pop-ups put an NVN barrier 0x30 (INVALIDATE_TEXTURE |
 # INVALIDATE_SHADER) between almost every two draws of their text and sprite quads, and each barrier ended the render pass: one pass per draw (600 frames:

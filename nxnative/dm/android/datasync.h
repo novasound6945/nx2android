@@ -418,6 +418,8 @@ typedef int (*ds_fetch_fn)(void *u, const char *rel, uint64_t from, uint64_t *st
 typedef struct { int phase, files, file_no; uint64_t total, done, net; char file[256]; } ds_progress;   // net: bytes that came over the network (the speed); done also counts a resumed part's bytes
 typedef struct {
     const char *root, *package;                       // the files folder; the app's package (a list of another app's pack is refused)
+    const char *alias;                                // NULL or "": none; else the package of the pack this app reads too (an APK renamed by porter apk-update --package
+                                                      // reads the pack the old package was ported with: its assets/nx2a/datapkg.txt), taken as the app's own
     ds_fetch_fn fetch; void *fu;
     uint64_t (*free_bytes)(void *u, const char *root); void *bu;   // NULL: not checked
     void (*note)(void *u, const ds_progress *p); void *nu;         // progress, from the sync's own thread
@@ -431,6 +433,10 @@ typedef struct {
     int64_t note_t;                    // (when the check last noted)
 } ds_ctx;
 #define DS_VERIFY 1   // (ds_ctx.verify and .fixed: tests/datasync_fixture.c's --verify)
+#define DS_ALIAS 1   // (ds_ctx.alias: tests/datasync_fixture.c's --alias)
+static int ds_mine(const ds_ctx *c, const char *package) {   // a pack of package is this app's: its own package, or the pack's it reads (ds_ctx.alias)
+    return !strcmp(package, c->package) || (c->alias && c->alias[0] && !strcmp(package, c->alias));
+}
 #define DS_LOG(c, ...) do { if ((c)->log) { char _m[512]; snprintf(_m, sizeof _m, __VA_ARGS__); (c)->log((c)->lu, _m); } } while (0)
 static void ds_note(ds_ctx *c) { if (c->note) c->note(c->nu, &c->pr); }
 // The check of the folder's files (DS_PH_CHECK) notes its progress by the time, not by the files: a pack of 3,745 files, none known to the folder (no files.json on
@@ -954,7 +960,7 @@ static int ds_sync(ds_ctx *c) {
             snprintf(c->err, sizeof c->err, "the files folder has bundles, but no list of them beside it: the install did not finish, install the pack again");
             DS_LOG(c, "data: %s", c->err); why = DS_ERR_LOCAL;
         }
-        else if (have_local && !strcmp(local.package, c->package)) {
+        else if (have_local && ds_mine(c, local.package)) {
             if (pending) {   // its bundles taken out, from the folder alone; whole once every file of the list is there
                 int n = 0; why = ds_apply(c, &local, &local, NULL, 0, &n); whole = !why;
                 if (whole) DS_LOG(c, "data: no server; %d files taken out of the bundles in the folder", n);
@@ -965,7 +971,8 @@ static int ds_sync(ds_ctx *c) {
         if (!whole && !stray && !have_local && !have_prev) {   // a pack installed over adb (porter install): its manifest goes last, so with it the pack is whole (a pack with bundles: only
             // by its files.json, which porter install pushes before the manifest, once the bundles are unpacked)
             char p[1100]; ds_path(p, sizeof p, c, DS_MANIFEST); size_t n; char *t = ds_read(p, &n, 1 << 20);
-            char want[300]; snprintf(want, sizeof want, "\"package\": \"%s\"", c->package); whole = t && strstr(t, want) && !strstr(t, "\"bundles\":"); free(t);
+            char want[300], also[300]; snprintf(want, sizeof want, "\"package\": \"%s\"", c->package); snprintf(also, sizeof also, "\"package\": \"%s\"", c->alias && c->alias[0] ? c->alias : c->package);
+            whole = t && (strstr(t, want) || strstr(t, also)) && !strstr(t, "\"bundles\":"); free(t);
         }
         if (whole) ds_clean_bundles(c);   // (what an older pack left there: else an APK without a server would run this at every launch)
         if (!stray && (!why || why == DS_ERR_LOCAL)) {
@@ -979,7 +986,7 @@ static int ds_sync(ds_ctx *c) {
     }
     int same = ask && http == 304;   // the server's list is still the folder's: not downloaded
     if (same) {
-        int mine = !strcmp(local.package, c->package);
+        int mine = ds_mine(c, local.package);
         if (mine && !pending && !stray && ds_sample(c, &local, &looked)) {
             DS_LOG(c, "data: the server's " DS_LIST " has not changed (HTTP 304); %d of the pack's %d files looked at", looked, local.n); rc = DS_UPTODATE; goto out0; }
         if (mine) DS_LOG(c, pending ? "data: the server's " DS_LIST " has not changed (HTTP 304); the folder has bundles to unpack" :
@@ -989,7 +996,7 @@ static int ds_sync(ds_ctx *c) {
     free(lraw); lraw = NULL;   // (only a 304 needs the folder's bytes: not kept through a download)
     if (ds_parse(m.b ? m.b : "", m.n, &srv)) { snprintf(c->err, sizeof c->err, "the server's " DS_LIST " is not a data pack's list"); rc = DS_ERR_SERVER; goto out0; }   // (m.b is freed at out0)
     if (srv.format > DS_FORMAT) { snprintf(c->err, sizeof c->err, "the server's " DS_LIST " is format %d; this app reads up to format %d: install the APK ported with that pack", srv.format, DS_FORMAT); rc = DS_ERR_SERVER; goto out1; }
-    if (strcmp(srv.package, c->package)) { snprintf(c->err, sizeof c->err, "the server's data is for %.100s, not this app (%.100s)", srv.package, c->package); rc = DS_ERR_PACKAGE; goto out1; }
+    if (!ds_mine(c, srv.package)) { snprintf(c->err, sizeof c->err, "the server's data is for %.100s, not this app (%.100s)", srv.package, c->package); rc = DS_ERR_PACKAGE; goto out1; }
     if (!same && !c->verify && have_local && !pending && !stray && !strcmp(local.id, srv.id) && ds_sample(c, &srv, &looked)) {   // the server's pack is the folder's
         DS_LOG(c, "data: the server's " DS_LIST " lists the folder's pack; %d of its %d files looked at", looked, srv.n);
         ds_val_save(c, srv.id, &got, ask ? &cond : NULL); rc = DS_UPTODATE; goto out1;   // its validators: the next sync asks for the list only if it changed

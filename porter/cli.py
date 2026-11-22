@@ -133,6 +133,9 @@ def _parser():
     au.add_argument('-o', '--out', default=None, metavar='FOLDER', help='where the new APK (and a changed nx2a-data.json with its files.json) go (default: ./apk-update)')
     au.add_argument('--profile-header', default=None, metavar='FILE',
                     help="the released host's game_profile.h (its port's build folder, android/host/gen/<title ID>/), for a pack whose profile git does not hold (a derived profile's port)")
+    au.add_argument('--package', default=None, metavar='NAME',
+                    help="the APK's new package (another app beside the old one, with its own files and saves; the data pack on the server stays as it is and the build "
+                         "number goes on from the old package's): the label, the permissions and the services are kept as for any update")
     au.add_argument('--check', action='store_true', help='only judge whether the data pack fits this version\'s host (same / different / unknown, with the reasons): no build, no APK')
     au.add_argument('--jobs', type=int, default=os.cpu_count() or 8); au.add_argument('--json', action='store_true')
     pf = sub.add_parser('pack-add-font', help="a published data pack's changed files with the player's shared font added, as porter port --shared-font makes them (standard.ttf, "
@@ -423,12 +426,12 @@ def cmd_apk_update(a):   # porter apk-update: the released APK with this checkou
                 out = apkupdate.judge(pack, old_header); out.pop('manifest', None)
                 if a.apk:   # the APK's own facts beside the judgment
                     out['apk'] = {k: v for k, v in apkupdate.axml.apk_info(a.apk).items() if k != 'activity'}
-                    if out['apk']['package'] != out['package']: out.update(ok=False, verdict='different'); out.setdefault('errors', []).append(f'the APK is {out["apk"]["package"]}, the pack {out["package"]}')
+                    if apkupdate.data_package(a.apk) != out['package']: out.update(ok=False, verdict='different'); out.setdefault('errors', []).append(f'the APK is {out["apk"]["package"]}, the pack {out["package"]}')
                 if not a.json:
                     for ln in apkupdate.report_lines(out): print(ln)
                     if out.get('errors'): print('  ' + '; '.join(out['errors']))
             else:
-                out = apkupdate.update(a.apk, pack, Path(a.out or 'apk-update'), a.build, a.jobs, old_header)
+                out = apkupdate.update(a.apk, pack, Path(a.out or 'apk-update'), a.build, a.jobs, old_header, a.package)
     except BuildError as e:
         if a.json: _print_json({'error': str(e)})
         else: print(e, file=sys.stderr)

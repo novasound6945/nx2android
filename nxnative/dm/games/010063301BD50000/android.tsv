@@ -1,6 +1,6 @@
 # SUPER ROBOT WARS Y (Unity 2022.3.44f1 IL2CPP, CRIWARE, SDK 18.3.5), update 1.4.1 (v720896) with 10 DLC. Started from porter's provisional profile (2026-11-20).
 status	experimental
-package	org.nx2a.t010063301bd50000
+package	kr.wook.srw.srwyps5
 orientation	landscape
 # The RomFS is about 20,000 files, most of them UnityFS bundles: small files in packs read in place (as Trails in the Sky the 1st), not one file each on the device or the server
 data_bundles	1048576	67108864

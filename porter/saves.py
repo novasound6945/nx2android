@@ -11,7 +11,7 @@ from porter import datapack
 from porter.adb import Adb, AdbError
 from porter.upstream import BuildError, say
 
-PREFIX = 'org.nx2a.'   # the packages ports install as (profile key package)
+PREFIXES = ('org.nx2a.', 'kr.wook.srw.')   # the packages ports install as (profile key package; kr.wook.srw.<game><platform>: the Super Robot Wars ports a launcher finds by it)
 NAME_OK = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._ +()-]{0,62}$')
 
 
@@ -20,8 +20,8 @@ def saves_folder(package): return f'{datapack.files_folder(package)}/saves'
 
 def apps(adb):
     """The ported games installed on the device: [package]"""
-    out = adb.shell(f'pm list packages {PREFIX}', check=False)
-    return sorted(ln[len('package:'):].strip() for ln in out.splitlines() if ln.startswith('package:' + PREFIX))
+    out = adb.shell('pm list packages', check=False)
+    return sorted(ln[len('package:'):].strip() for ln in out.splitlines() if ln.startswith(tuple('package:' + p for p in PREFIXES)))
 
 
 def pick_app(adb, package=''):

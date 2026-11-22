@@ -327,10 +327,21 @@ def source_of(apk):
     return rows[0], rows[1] if len(rows) > 1 else ''
 
 
-def next_build(package, apk_offset):   # the build number by default: one more than the APK's and than this computer's last build of the package (builds.json)
+def next_build(package, apk_offset, *more):   # the build number by default: one more than the APK's and than this computer's last build of the package (builds.json), and
+    # of each package in more (--package: the new package goes on counting from the old one's builds)
     try: seen = json.loads((paths.user_dir() / 'builds.json').read_text(encoding='utf-8'))
     except (OSError, ValueError): seen = {}
-    return max(apk_offset, int(seen.get(package, 0))) + 1
+    return max([apk_offset] + [int(seen.get(p, 0)) for p in (package,) + more]) + 1
+
+
+DATAPKG_ASSET = 'nx2a/datapkg.txt'   # the package of the data pack an APK renamed by --package reads (the pack keeps the package it was ported with; datasync.h ds_ctx.alias)
+
+
+def data_package(apk):   # the package of the data pack the APK reads: its assets/nx2a/datapkg.txt (a renamed APK), else its own
+    with zipfile.ZipFile(apk) as z:
+        try: t = z.read('assets/' + DATAPKG_ASSET).decode('utf-8', 'replace').strip()
+        except KeyError: t = ''
+        return t or axml.info(z.read('AndroidManifest.xml'))['package']
 
 
 def profile_label(title_id):   # the profile's Korean name of the game (game.tsv name_ko), '' without one: the label apk-update gives the APK
@@ -387,21 +398,27 @@ def with_service_dex(entries):
     return entries[:at] + [(name, dex, 4)] + entries[at:], 'added'
 
 
-def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None):
+def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None, package=None):
     """apk (a released port's APK file) with this checkout's host and build number build, judged against its data pack pack, written into the folder out (with a new
     nx2a-data.json and files.json when the profile's hash changed). → {'apk', 'package', 'version_code', 'version_name', 'label', 'old', 'host', 'permissions_added',
     'services_added', 'service_dex' ('added', 'updated', 'kept'),
-    'savecloud' ('kept': the APK's own assets/nx2a/savecloud.txt, 'added': the porter's savecloud.txt, None: no cloud save server), 'data_files', 'judgment'}"""
+    'savecloud' ('kept': the APK's own assets/nx2a/savecloud.txt, 'added': the porter's savecloud.txt, None: no cloud save server), 'data_files', 'judgment',
+    'data_package' (the pack's package), 'renamed' (the class names written out in full, [] when the package stays)}.
+    package: the APK's new package (it installs as another app beside the old one, with its own files and saves): the manifest's package is replaced (axml.set_package),
+    the data pack stays the old package's (assets/nx2a/datapkg.txt names it, so the host takes the pack's lists: datasync.h ds_ctx.alias; env.txt's paths into the old
+    package's files folder are read as the app's own: front_android.c env_own_path), and the build number goes on from the old package's (builds.json)"""
     from porter import pipeline
     apk, out = Path(apk), Path(out)
     old = axml.apk_info(apk)
     r = judge(pack, old_header)
-    if old['package'] != r['package']: raise BuildError(f'{apk}: package {old["package"]}, the data pack\'s is {r["package"]}: not this game\'s pack')
+    reads = data_package(apk)
+    if reads != r['package']: raise BuildError(f'{apk}: package {old["package"]}' + (f' (reading the pack of {reads})' if reads != old['package'] else '') + f', the data pack\'s is {r["package"]}: not this game\'s pack')
+    target = package or old['package']
     for ln in report_lines(r): say(ln)
     if not r['ok']: raise BuildError(f'{r["package"]}: the data pack does not fit this checkout\'s host ({r["verdict"]}): port the game again from its files')
     man = r['manifest']
     base = pipeline.version_code(man['version'], 0) - 1   # (the Switch version number)
-    offset = next_build(old['package'], old['version_code'] - base - 1) if build is None else build
+    offset = next_build(old['package'], old['version_code'] - base - 1, target) if build is None else build
     code = pipeline.version_code(man['version'], offset)   # (an offset out of range refuses here)
     name = f'{man["display"]}-{offset}' if offset else man['display']
     if code <= old['version_code']:
@@ -416,8 +433,14 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
     out.mkdir(parents=True, exist_ok=True)
     cache = paths.user_dir() / 'apk-update' / (r['title_id'] + ('-debug' if old['debuggable'] else ''))   # the host's objects, kept between updates (build.py rebuilds what changed)
     cache.mkdir(parents=True, exist_ok=True)
-    so = host.build_host(old['package'], r['title_id'], old['debuggable'], cache, jobs, r['profile']['games_dir'])
     with zipfile.ZipFile(apk) as z: have = set(z.namelist()); manifest = z.read('AndroidManifest.xml')
+    renamed = []
+    if target != old['package']:   # (before the host is built: a manifest it cannot rename refuses first)
+        try: manifest, renamed = axml.set_package(manifest, target)
+        except ValueError as e: raise BuildError(f'--package {target}: {e}') from None
+        say(f'package: {old["package"]} → {target} (another app: its own files and saves; the data pack stays {r["package"]}\'s)')
+        for tag, a, b in renamed: say(f'  <{tag}> {a} → {b} (a class name relative to the old package, written out)')
+    so = host.build_host(target, r['title_id'], old['debuggable'], cache, jobs, r['profile']['games_dir'])
     label = old['label'] if isinstance(old['label'], str) else None
     want = profile_label(r['title_id'])
     if want and want != label:   # the profile's Korean name (name_ko): the launcher's label and the start screen's name (it reads the label)
@@ -438,6 +461,9 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
         say(f'cloud save server: configured ({publish.SAVECLOUD_FILE}) → assets/{publish.SAVECLOUD_ASSET}')
         if url.startswith('http://'): say('[RED] the cloud save server is an http:// address: an APK ported without cleartext HTTP cannot reach it (port it again, or use https://)')
     else: cloud = None; say(f'cloud save server: none (the APK has no assets/{publish.SAVECLOUD_ASSET}, and no {publish.SAVECLOUD_FILE} in the porter folder): the app\'s cloud save is off')
+    if target != r['package'] and f'assets/{DATAPKG_ASSET}' not in have:   # the pack's package, which the renamed app takes the pack's lists of
+        f = cache / 'datapkg.txt'; f.write_text(r['package'] + '\n', encoding='utf-8'); fonts[DATAPKG_ASSET] = str(f)
+        say(f'data pack: {r["package"]}\'s → assets/{DATAPKG_ASSET} (the server\'s pack stays as it is, for the old app too)')
     entries, _, _ = apkdriver.rebuild(str(apk), apkdriver.KEEP, host=str(so), assets=fonts, manifest=axml.set_version(manifest, code, name))
     entries, svc_dex = with_service_dex(entries)
     say(f'the background download\'s service: {svc_dex} ({next(n for n, d, _ in entries if d == SERVICE_DEX.read_bytes())})')
@@ -445,8 +471,9 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
     z, cd, eocd = apksign.build_zip(entries)
     tmp = dst.with_name(dst.name + '.partial'); tmp.write_bytes(apksign.sign_v2(z, cd, eocd, k, crt))
     new = axml.apk_info(tmp)
-    if (new['package'], new['version_code'], new['version_name'], new['signers'], new['label']) != (old['package'], code, name, old['signers'], label if label is not None else old['label']):
-        tmp.unlink(); raise BuildError(f'the APK written does not read back as {old["package"]} {code} ({name}) labelled {label!r} with the same signer')
+    if (new['package'], new['version_code'], new['version_name'], new['signers'], new['label']) != (target, code, name, old['signers'], label if label is not None else old['label']):
+        tmp.unlink(); raise BuildError(f'the APK written does not read back as {target} {code} ({name}) labelled {label!r} with the same signer')
+    if data_package(tmp) != r['package']: tmp.unlink(); raise BuildError(f'the APK written does not read the data pack of {r["package"]}')
     with zipfile.ZipFile(tmp) as z: missing = [p for p, _ in want_perms if p not in axml.permissions(z.read('AndroidManifest.xml'))]
     if missing: tmp.unlink(); raise BuildError(f'the APK written lacks the permissions {", ".join(missing)}')
     with zipfile.ZipFile(tmp) as z:
@@ -454,8 +481,8 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
         if not any(SERVICE_MARK in z.read(n) for n in z.namelist() if DEX_NAME.fullmatch(n)): lack.append('service.dex')
     if lack: tmp.unlink(); raise BuildError(f'the APK written lacks {", ".join(lack)}')
     os.replace(tmp, dst)
-    pipeline.build_number(old['package'], offset)   # remembered: the next port or update counts on from it
-    say(f'{dst}: {old["version_name"]} ({old["version_code"]}) → {name} ({code}), host {so.stat().st_size / 2**20:.1f} MB, signer {old["signers"][0][:16]}…')
+    pipeline.build_number(target, offset)   # remembered: the next port or update counts on from it
+    say(f'{dst}: ' + (f'{old["package"]} → {target}, ' if target != old['package'] else '') + f'{old["version_name"]} ({old["version_code"]}) → {name} ({code}), host {so.stat().st_size / 2**20:.1f} MB, signer {old["signers"][0][:16]}…')
     written = []
     if r['profile']['verdict'] == 'host-only':   # the released host's profile_h no longer describes the APK's: the pack's manifest again, and its list (the app checks each file by it)
         m2 = dict(man, profile_h=r['profile']['profile_h'])
@@ -469,5 +496,5 @@ def update(apk, pack, out, build=None, jobs=os.cpu_count() or 8, old_header=None
     if r['profile']['games_dir']:
         say(f'the host was built from the derived profile {derived_dir(r["title_id"])}; its header is {cache / "gen" / r["title_id"] / "game_profile.h"}: a later update on another '
             f'computer needs it (--profile-header)')
-    return {'apk': str(dst), 'package': old['package'], 'version_code': code, 'version_name': name, 'label': new['label'], 'old': {k: old[k] for k in ('version_code', 'version_name', 'label')},
+    return {'apk': str(dst), 'package': target, 'data_package': r['package'], 'renamed': renamed, 'version_code': code, 'version_name': name, 'label': new['label'], 'old': {k: old[k] for k in ('package', 'version_code', 'version_name', 'label')},
             'host': so.stat().st_size, 'permissions_added': added, 'services_added': svc_added, 'service_dex': svc_dex, 'savecloud': cloud, 'data_files': written, 'judgment': {k: v for k, v in r.items() if k != 'manifest'}}

@@ -49,6 +49,7 @@ const uint8_t *dm_overlay_font(void);   // overlay_theme.c
 static struct {
     pthread_mutex_t mu; pthread_cond_t cv;
     ANativeActivity *act; JavaVM *vm; char root[512], package[256], base[1024], auth[600];
+    char alias[256];                                  // the pack's package when it is not the app's (assets/nx2a/datapkg.txt: an APK renamed by porter apk-update --package), else ""
     ANativeWindow *win; int lost, released;           // the window (on_window_created / destroyed: dm_sync_window), and a destroy waiting for the screen to let it go
     ds_progress pr; int status, wait_s, wait_tot; char msg[256];   // status: -1 working, else the last error (DS_ERR_*); wait_s: seconds to the next try (of wait_tot)
     int retry_now, netdown; int64_t deadline;   // Retry pressed; the device has no network (nothing is asked); the time the server's answer is given up at (0: none)
@@ -965,7 +966,7 @@ static void *sync_thread(void *a) {
     int64_t t_start = now_ms(); struct stat lst; char lp[1100]; snprintf(lp, sizeof lp, "%s/%s", S.root, DS_LIST); int have_list = !stat(lp, &lst);
     if (net && ((*vm)->AttachCurrentThread(vm, &h.E, NULL) != JNI_OK || jhttp_init(&h))) LOG("[RED] data: no Java for the download: the game starts with the data the app has");
     else {
-        ds_ctx c = {.root = S.root, .package = S.package, .fetch = net ? http_fetch : NULL, .fu = &h, .free_bytes = free_bytes, .note = sync_note, .log = sync_log};
+        ds_ctx c = {.root = S.root, .package = S.package, .alias = S.alias, .fetch = net ? http_fetch : NULL, .fu = &h, .free_bytes = free_bytes, .note = sync_note, .log = sync_log};
         BE = net ? h.E : NULL; stv_rate_reset(&BP.rate);
         int delay = 2, last_net = -1;
         for (int round = 1;; round++) {
@@ -1059,6 +1060,15 @@ static int package_name(ANativeActivity *act, char *out, size_t cap) {
     const char *u = (*E)->GetStringUTFChars(E, s, NULL); if (!u) return -1;
     snprintf(out, cap, "%s", u); (*E)->ReleaseStringUTFChars(E, s, u); return 0;
 }
+// assets/nx2a/datapkg.txt: the package of the data pack the app reads, when porter apk-update --package gave the APK another one (the server's pack keeps the package
+// it was ported with, and the old app reads it too). One line, a package name; anything else is no alias
+static void data_alias(ANativeActivity *act, char *out, size_t cap) {
+    out[0] = 0; AAsset *as = act->assetManager ? AAssetManager_open(act->assetManager, "nx2a/datapkg.txt", AASSET_MODE_BUFFER) : NULL; if (!as) return;
+    char t[256]; int n = AAsset_read(as, t, sizeof t - 1); AAsset_close(as); if (n <= 0) return;
+    t[n] = 0; while (n > 0 && (t[n - 1] == '\n' || t[n - 1] == '\r' || t[n - 1] == ' ')) t[--n] = 0;
+    for (int i = 0; i < n; i++) if (!((t[i] >= 'a' && t[i] <= 'z') || (t[i] >= 'A' && t[i] <= 'Z') || (t[i] >= '0' && t[i] <= '9') || t[i] == '_' || t[i] == '.')) { LOG("[RED] data: assets/nx2a/datapkg.txt is not a package name: not used"); return; }
+    if ((size_t)n < cap) memcpy(out, t, (size_t)n + 1);
+}
 static int phase_pipe(const char *what) {   // a pipe of its own for each step (called from the last step's sync_ready, whose fd the looper removes when it returns)
     ALooper *lp = ALooper_forThread(); int np[2];
     if (!lp || pipe(np)) { LOG("[RED] %s: no looper on the main thread", what); return -1; }
@@ -1090,6 +1100,8 @@ int dm_sync_begin(ANativeActivity *act, const char *root, void (*done)(void)) {
         }
     }
     if (package_name(act, S.package, sizeof S.package)) { LOG("[RED] data: the app's package is not known: the game starts with the data the app has"); return 0; }
+    data_alias(act, S.alias, sizeof S.alias); if (!strcmp(S.alias, S.package)) S.alias[0] = 0;
+    if (S.alias[0]) LOG("data: the app (%s) reads the data pack of %s (assets/nx2a/datapkg.txt)", S.package, S.alias);
     snprintf(S.root, sizeof S.root, "%s", root);
     S.vm = act->vm; if (act->internalDataPath) snprintf(S.internal, sizeof S.internal, "%s", act->internalDataPath);
     if (S.base[0]) bg_java_init(act);   // (the application's Context for the download's thread, and the background download's service)
@@ -1229,7 +1241,7 @@ static void *verify_thread(void *a) {   // Check the data again: every file's SH
     if ((*vm)->AttachCurrentThread(vm, &h.E, NULL) != JNI_OK || jhttp_init(&h)) LOG("[RED] launcher: no Java for the data's check");
     else {
         pthread_mutex_lock(&S.mu); S.deadline = 0; S.netdown = 0; pthread_mutex_unlock(&S.mu);
-        ds_ctx c = {.root = S.root, .package = S.package, .fetch = http_fetch, .fu = &h, .free_bytes = free_bytes, .note = verify_note, .log = sync_log, .verify = 1};
+        ds_ctx c = {.root = S.root, .package = S.package, .alias = S.alias, .fetch = http_fetch, .fu = &h, .free_bytes = free_bytes, .note = verify_note, .log = sync_log, .verify = 1};
         int64_t t0 = now_ms(); rc = ds_sync(&c); fixed = c.fixed; snprintf(err, sizeof err, "%s", c.err);
         LOG("launcher: the data checked file by file: %s (%lld ms)", rc == DS_DONE ? "damaged files downloaded again" : rc == DS_UPTODATE ? "nothing damaged" : err, (long long)(now_ms() - t0));
         if (rc == DS_DONE || rc == DS_UPTODATE) { char p[700], t[32]; checked_path(p, sizeof p); int n = snprintf(t, sizeof t, "%lld\n", (long long)time(NULL)); if (p[0]) ds_write(p, t, (size_t)n); }
