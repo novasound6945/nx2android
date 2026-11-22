@@ -1,0 +1,10 @@
+# Luigi's Mansion 3 on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android")
+# Next Level Games' engine on SDK 7.3.2, NVN, update 1.4.0 (v327680); the two Multiplayer Pack DLC (0100DCA0064A7001, 0100DCA0064A7002: Scarescraper / ScreamPark
+# rooms and costumes, nlg archives) go to aoc/. The profile is upstream's (brought up on the Mac and the iPhone), not run on an Android device yet.
+# Port on 2026-11-22: 5,357 of 5,357 Vulkan shaders (5,317 split from init, the 40 more are geometry shader variants; hull / domain / geometry built too, unlike Metal),
+# 588 bindings of the shadow cascades' driver-table texture array (tex_c2a). Open: every pixel shader's colour outputs are float, while about 1,400 of them write the
+# R32Uint + RGBA8Uint G-buffer (Metal's fs_uint has no Vulkan counterpart yet): a float output into an integer attachment is undefined in Vulkan, so the first thing
+# to look at on a device is whether the scene is drawn at all. The game's text uses its own fonts (main imports no nn::pl shared font), and it has no name entry.
+status	experimental
+package	org.nx2a.luigismansion3
+orientation	landscape
