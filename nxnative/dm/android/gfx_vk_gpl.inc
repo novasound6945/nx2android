@@ -19,7 +19,7 @@ void vk_pipeline_cache_save(void);
 
 typedef struct { uint32_t topo, restart, nattr, nbind; struct { uint32_t loc, binding, fmt, off; } attr[16]; struct { uint32_t binding, stride, rate, divisor; } bind[17]; } gvikey;
 typedef struct { uint64_t vs, gs, um0, im0, um2, im2; uint32_t xo0, xo2; gpl_rast r; uint32_t vi0; } gprkey;   // gs: its translation for the draw's topology (vk_shader_gs_topo); vi0: the vertex inputs' signedness flips (vi_flip_of)
-typedef struct { uint64_t fs, um, im; uint32_t fd, ms; } gfskey;   // fd: vk_shader_module's variant bits (the alpha test's function in bits 4-7; its reference is a push constant); ms: samples | a2c << 8 for shaders that need the multisample state (gpl_fs_ms), else 0
+typedef struct { uint64_t fs, um, im; uint32_t fd, ms; } gfskey;   // fd: vk_shader_module's variant bits (the alpha test's function in bits 4-7; its reference is a push constant; integer targets' outputs in 8-23); ms: samples | a2c << 8 for shaders that need the multisample state (gpl_fs_ms), else 0
 typedef struct { uint32_t ncol, cfmt[8], dfmt, samples, a2c, blend_en, logic_en, logic_op, wmask[8]; struct { uint32_t src, dst, srca, dsta, eq, eqa; } bl[8]; } gfokey;
 static nvn_hmap g_gvi = {.klen = sizeof(gvikey)}, g_gpr = {.klen = sizeof(gprkey)}, g_gfs = {.klen = sizeof(gfskey)}, g_gfo = {.klen = sizeof(gfokey)};
 static pthread_mutex_t g_glib_mu = PTHREAD_MUTEX_INITIALIZER;   // the parts' tables and the statistics: the replay, preparation, warm-up and background threads
@@ -168,7 +168,7 @@ static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout) {
     uint32_t xo0 = (gs ? gs->in_locs : fs ? fs->in_locs : 0) & ~vs->out_locs, xo2 = gs ? (fs ? fs->in_locs : 0) & ~gs->out_locs : 0;   // as build_pipeline
     gprkey pk = gpl_pr_key(vs, gs, k->um[0], k->im[0], xo0, k->um[2], k->im[2], xo2, gpl_rast_key(V.gpl_eds3, k->depth_clamp, k->mode, k->clip_neg1, V.has_depth_clip_ctl));
     pk.vi0 = vi_flip_of(k, vs);   // (the preparation's parts have none: a draw that needs a flip makes its part)
-    gfskey fk = gpl_fs_key(fs, k->um[1], k->im[1], (k->fdz ? 1 : 0) | (k->dual ? 2 : 0) | (k->atest & 15) << 4, k->samples, k->a2c);
+    gfskey fk = gpl_fs_key(fs, k->um[1], k->im[1], (k->fdz ? 1 : 0) | (k->dual ? 2 : 0) | (k->atest & 15) << 4 | int_out_bits(k, fs), k->samples, k->a2c);   // (integer targets: their part is made at the draw)
     // DM_VK_GPL_FSMS=1 (live, diagnosis of the colour flashes while a linked pipeline draws): every fragment part of a multisampled (or alpha-to-coverage) draw takes
     // the draw's multisample state, as the whole pipeline's fragment shader does, not only the per-sample shaders (gpl_fs_ms). Valid either way (VUID-...-06633/06635:
     // the same state as the output part's); those parts are made at their first draw (one shader each), the preparation's stay for single-sampled draws

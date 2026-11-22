@@ -7,6 +7,7 @@
 #include "nvn_hmap.h"
 #include "zstd.h"
 #include "vk_spv_vertex.h"
+#include "vk_spv_fragout.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <fcntl.h>
 #include <string.h>
@@ -399,6 +400,7 @@ static vkshader_t *vk_shader_q(uint64_t key, int stage, int quiet) {
             if (w2) { free(w); w = w2; nw = n2; VKLOG("shader %016llx: %u discard%s taken out (DM_VK_FS_NOKILL)", (unsigned long long)key, k2, k2 == 1 ? "" : "s"); }
             else VKLOG("[RED] shader %016llx: DM_VK_FS_NOKILL found no discard it can take out: left as it is", (unsigned long long)key); } }
     spv_io_locs(w, nw, &s->in_locs, &s->out_locs);
+    if (stage == 1) s->fout_locs = spv_float_out_locs(w, nw);   // the float outputs an integer target retypes (vk_spv_fragout.h)
     VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, (size_t)nw * 4, w};
     VkResult vr = vkCreateShaderModule(V.dev, &ci, NULL, &s->mod); s->spv = w; s->nspv = nw;
     if (!vr) { __atomic_fetch_add(&g_spv_n, 1, __ATOMIC_RELAXED); __atomic_fetch_add(&g_spv_bytes, (uint64_t)nw * 4, __ATOMIC_RELAXED); }
@@ -687,17 +689,20 @@ static VkShaderModule vk_shader_module_(vkshader_t *s, uint64_t um, uint64_t im,
 VkShaderModule vk_shader_module(vkshader_t *s, uint64_t um, uint64_t im, uint32_t xo, int fd, uint32_t vi) { extern int g_prof_on; extern uint64_t g_prof_ns[8]; struct timespec a, b; if (g_prof_on) clock_gettime(CLOCK_MONOTONIC, &a);
     VkShaderModule m = vk_shader_module_(s, um, im, xo, fd, vi); if (g_prof_on) { clock_gettime(CLOCK_MONOTONIC, &b); g_prof_ns[3] += (uint64_t)((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec)); } return m; }
 static VkShaderModule vk_shader_module_(vkshader_t *s, uint64_t um, uint64_t im, uint32_t xo, int fd, uint32_t vi) {
-    int dual = fd >> 1 & 1, af = fd >> 4 & 15; fd &= 1;   // fd bit 1: the dual-source variant; bits 4-7: the alpha test's NVN function (spv_alpha_test; 0 and ALWAYS: none)
+    int dual = fd >> 1 & 1, af = fd >> 4 & 15;   // fd bit 1: the dual-source variant; bits 4-7: the alpha test's NVN function (spv_alpha_test; 0 and ALWAYS: none)
+    uint32_t iu = (uint32_t)fd >> 8 & 0xff, is = (uint32_t)fd >> 16 & 0xff; fd &= 1;   // bits 8-15 / 16-23: the float outputs into UINT / SINT targets, retyped (vk_spv_fragout.h)
     if (fd && (s->stage != 1 || s->depth_repl)) fd = 0;
     if (dual && s->stage != 1) dual = 0;
     if (af >= 8 || s->stage != 1) af = 0;
-    if (!(um | im | xo | (uint32_t)fd | (uint32_t)dual | (uint32_t)af | vi) || !s->spv) return s->mod;
+    if (s->stage != 1) iu = is = 0;
+    iu &= s->fout_locs; is &= s->fout_locs;
+    if (!(um | im | xo | (uint32_t)fd | (uint32_t)dual | (uint32_t)af | vi | iu | is) || !s->spv) return s->mod;
     enum { NVAR = (int)(sizeof s->var / sizeof s->var[0]) };
     if (xo == 1u << 31) {   // DM_VK_SPV_ALT
         pthread_mutex_lock(&g_sh_mu); for (int i = 0; i < s->nvar; i++) if (s->var[i].um == 0 && s->var[i].im == 0 && s->var[i].xo == xo) { VkShaderModule m = s->var[i].mod; pthread_mutex_unlock(&g_sh_mu); return m; }
         VkShaderModule m = alt_module(s); if (s->nvar < NVAR) s->var[s->nvar++] = (typeof(s->var[0])){0, 0, xo, 0, m}; pthread_mutex_unlock(&g_sh_mu); return m; }
     xo &= ~(1u << 31);
-    int fdv = fd | dual << 1 | af << 4;   // the variant's key
+    int fdv = fd | dual << 1 | af << 4 | (int)(iu << 8 | is << 16);   // the variant's key
     pthread_mutex_lock(&g_sh_mu);
     for (int i = 0; i < s->nvar; i++) if (s->var[i].um == um && s->var[i].im == im && s->var[i].xo == xo && s->var[i].fd == fdv && s->var[i].vi == vi) { VkShaderModule m = s->var[i].mod; pthread_mutex_unlock(&g_sh_mu); return m; }
     uint16_t bind[64]; uint8_t kind[64]; int nb = 0;
@@ -713,8 +718,12 @@ static VkShaderModule vk_shader_module_(vkshader_t *s, uint64_t um, uint64_t im,
     if (af && (w || !(nb || xo || fd || dual))) { const char *why = ""; uint32_t n2 = 0, *w2 = spv_alpha_test(w ? w : s->spv, w ? nw : s->nspv, af, &n2, &why);
         if (w2) { free(w); w = w2; nw = n2; af_ok = 1;
             static int once; if (!once++) VKLOG("alpha test: the first fragment shader variant that tests it (shader %016llx, NVN function %d; the reference is a push constant)", (unsigned long long)s->key, af); }
-        else { int seen = 0; for (int i = 0; i < s->nvar; i++) seen |= s->var[i].fd >> 4 != 0; static int n;
+        else { int seen = 0; for (int i = 0; i < s->nvar; i++) seen |= (s->var[i].fd >> 4 & 15) != 0; static int n;
             if (!seen && n++ < 32) VKLOG("[RED] shader %016llx: no alpha test variant (NVN function %d): %s; drawn without the test", (unsigned long long)s->key, af, why); } }
+    // the integer targets' outputs after the alpha test (which loads output 0 as a float: the load is cast too). When they cannot be retyped the variant keeps the rest
+    if ((iu | is) && (w || !(nb || xo || fd || dual))) { uint32_t n2 = 0, *w2 = spv_int_outputs(w ? w : s->spv, w ? nw : s->nspv, iu, is, &n2);
+        if (w2) { free(w); w = w2; nw = n2; static int n; if (n++ < 16) VKLOG("shader %016llx: outputs %#x / %#x into UINT / SINT targets stored as their bits (integer output variant)", (unsigned long long)s->key, iu, is); }
+        else { static int n; if (n++ < 32) VKLOG("[RED] shader %016llx: its outputs %#x / %#x into UINT / SINT targets could not be retyped: float outputs there (undefined values)", (unsigned long long)s->key, iu, is); } }
     if (vi) { uint32_t n2 = 0, *w2 = spv_vertex_signedness(w ? w : s->spv, nw, vi, &n2); free(w); w = w2; nw = n2; }
     if (w) { VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, (size_t)nw * 4, w};
         if (vkCreateShaderModule(V.dev, &ci, NULL, &m)) { m = s->mod; VKLOG("[RED] shader %016llx: its variant was refused (bindings %#llx / %#llx, outputs %#x, fragment depth %d, dual source %d, alpha function %d)", (unsigned long long)s->key, (unsigned long long)um, (unsigned long long)im, xo, fd, dual, af_ok ? af : 0); }

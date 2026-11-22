@@ -283,6 +283,29 @@ static uint32_t vi_flip_of(const pkey *k, const vkshader_t *vs) {
     }
     return vi_flip;
 }
+// the fragment shader's float outputs that meet a UINT (bits 8-15) / SINT (bits 16-23) colour target, as vk_shader_module's variant bits: those outputs are retyped to
+// the integer of the same bits (vk_spv_fragout.h; Maxwell writes the output register's bits, Vulkan leaves a float output into an integer attachment undefined). From the
+// attachments' formats, which are in the key already; 0 for a shader with no such output, so its module and its preparation's part are the ones as before.
+// DM_VK_INT_OUT=0 (start-up, A/B): never
+static int color_int_kind(uint32_t f) {   // 1 UINT, 2 SINT, 0 otherwise
+    switch ((VkFormat)f) {
+    case VK_FORMAT_R8_UINT: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8B8_UINT: case VK_FORMAT_B8G8R8_UINT: case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_B8G8R8A8_UINT:
+    case VK_FORMAT_A8B8G8R8_UINT_PACK32: case VK_FORMAT_A2R10G10B10_UINT_PACK32: case VK_FORMAT_A2B10G10R10_UINT_PACK32: case VK_FORMAT_R16_UINT: case VK_FORMAT_R16G16_UINT:
+    case VK_FORMAT_R16G16B16_UINT: case VK_FORMAT_R16G16B16A16_UINT: case VK_FORMAT_R32_UINT: case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32B32_UINT: case VK_FORMAT_R32G32B32A32_UINT: return 1;
+    case VK_FORMAT_R8_SINT: case VK_FORMAT_R8G8_SINT: case VK_FORMAT_R8G8B8_SINT: case VK_FORMAT_B8G8R8_SINT: case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_B8G8R8A8_SINT:
+    case VK_FORMAT_A8B8G8R8_SINT_PACK32: case VK_FORMAT_A2R10G10B10_SINT_PACK32: case VK_FORMAT_A2B10G10R10_SINT_PACK32: case VK_FORMAT_R16_SINT: case VK_FORMAT_R16G16_SINT:
+    case VK_FORMAT_R16G16B16_SINT: case VK_FORMAT_R16G16B16A16_SINT: case VK_FORMAT_R32_SINT: case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32B32_SINT: case VK_FORMAT_R32G32B32A32_SINT: return 2;
+    default: return 0;
+    }
+}
+static uint32_t int_out_bits(const pkey *k, const vkshader_t *fs) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_INT_OUT"); on = !e || atoi(e) != 0; if (!on) VKLOG("DM_VK_INT_OUT=0: float outputs into integer targets as they are"); }
+    if (!on || !fs || k->raster_discard || !fs->fout_locs) return 0;
+    uint32_t u = 0, s = 0;
+    for (uint32_t i = 0; i < k->ncol && i < 8; i++) { int t = color_int_kind(k->cfmt[i]); if (t == 1) u |= 1u << i; else if (t == 2) s |= 1u << i; }
+    u &= fs->fout_locs; s &= fs->fout_locs;
+    return u << 8 | s << 16;
+}
 static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshader_t *const stg_in[3]) {
     // DM_VK_PIPE_LOG: one line per pipeline built, with the state that decides how a material is drawn (shaders, cull/front, depth test/write/func,
     // colour formats, blend). For a game where some materials render wrong and others do not, the lines of the wrong material name the state to compare.
@@ -310,7 +333,7 @@ static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshade
     uint32_t vi_flip = vi_flip_of(k, stg[0]);
     for (int i = 0; i < 3; i++) if (stg[i] && !(i == 1 && k->raster_discard)) {
         VkShaderModule mod = i == 2 && k->gs_split ? stg[i]->gs_mod[k->gs_split - 1] :
-            vk_shader_module(stg[i], k->um[i], k->im[i], k->alt && !k->um[i] && !k->im[i] && !xo[i] ? 1u << 31 : xo[i], i == 1 ? (k->fdz ? 1 : 0) | (k->dual ? 2 : 0) | (int)(k->atest & 15) << 4 : 0, i == 0 ? vi_flip : 0);
+            vk_shader_module(stg[i], k->um[i], k->im[i], k->alt && !k->um[i] && !k->im[i] && !xo[i] ? 1u << 31 : xo[i], i == 1 ? (k->fdz ? 1 : 0) | (k->dual ? 2 : 0) | (int)(k->atest & 15) << 4 | (int)int_out_bits(k, stg[1]) : 0, i == 0 ? vi_flip : 0);
         ss[ns++] = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(fl[i], NULL), 0, fl[i], mod, "main", NULL};   // (pNext: DM_VK_SUBGROUP_PIN)
     }
     int flat = (int)k->debug_mode;
