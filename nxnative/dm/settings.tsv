@@ -288,6 +288,7 @@ DM_VK_GPL_LTO	int		debug	?	gfx_vk_gpl.inc
 DM_VK_GPL_PREP_THREADS	int		debug	?	gfx_vk_gpl.inc	
 DM_VK_GPL_TRACE	int		debug	?	gfx_vk_gpl.inc	
 DM_VK_GS_SPLIT	bool	0	profile	live	gfx_vk_exec.c	1 = split geometry-shader draws (gfx_vk_gs_split.c)
+DM_VK_HANG_S	float	1.5	debug	start	gfx_vk_core.c	seconds a submission may stay unfinished before it is taken for a GPU hang: one `[RED] [hang]` line, the pipelines first used since the last finished submission (vs / fs / gs keys, topology, integer views) and, with `DM_VK_CRUMBS=1`, the last pass the GPU finished, then the log is flushed to storage (fsync) before a device freeze can lose it; `0` waits without the watch
 DM_VK_INT_OUT	bool		debug	start	gfx_vk_exec.c	0: float outputs into UINT / SINT colour targets are left float (no integer output variant)
 DM_VK_INVAL_KEEP	bool		profile	live	gfx_vk_exec.c	an invalidate-only barrier keeps the render pass open (SUPER ROBOT WARS T)
 DM_VK_LIN_BACK	bool		debug	live	gfx_vk_exec.c	what the GPU draws into a linear render target (NVN `LINEAR_RENDER_TARGET`) stays in the Vulkan image, as before (default: copied back to the texture's pool memory after the pass, so the CPU can read it; Super Mario Odyssey's ground fog reads its wave surface this way)
@@ -306,6 +307,7 @@ DM_VK_MIP_MAX	int		debug	start	gfx_vk_tex.c	caps every sampler's `maxLod` at tha
 DM_VK_MT_REPLAY	bool	0	profile	start	gfx_vk_dq.c	two-stage replay: the vkCmd* calls (40 of them) are copied into a 32 MB ring and a "vk record" thread makes the real calls in order; the calls that end, submit or present a command buffer (and pool resets, waits) wait for the ring to empty first; a call with a pNext the copy does not know runs direc
 DM_VK_NAN_MINMAX	str		debug	?	gfx_vk_shader.c	
 DM_VK_NOCULL	str		debug	start	gfx_vk_exec.c	no face culling (test for winding bugs)
+DM_VK_NONUNIFORM	bool	1	debug	start	gfx_vk_shader.c	run-time indexed texture arrays (the driver handle table's, RK_TEX_C2A) are decorated NonUniform where the device has `shaderSampledImageArrayNonUniformIndexing` (vk_spv_nonuniform.h); `0` leaves them as translated (A/B)
 DM_VK_NOPCACHE	str		debug	start	gfx_vk_pipeline_cache.inc	start with an empty Vulkan pipeline cache (the saved one is ignored; app-owned files cannot be deleted over adb)
 DM_VK_NOPREWARM	str		debug	start	gfx_vk_exec.c	no pipeline prewarm, and no compute pipelines made ahead at the first submission
 DM_VK_NO_ZEROCOPY	str		debug	?	gfx_vk_core.c	DM_VK_NO_ZEROCOPY (set at all): every pool copied
@@ -433,6 +435,7 @@ DM_VK_X_RDKEEP	hex		debug	live	gfx_vk_exec.c	runs of rasterizer-discard draws (v
 DM_VK_X_SETVERIFY	bool		debug	?	gfx_vk_exec.c	
 DM_VK_X_SHADOWLIT	bool		debug	start	gfx_vk_tex.c	every depth compare passes (no shadows; A/B)
 DM_VK_X_SKIPFS	hex		debug	live	gfx_vk_exec.c	Skip draws with one of up to 16 fragment shader keys for pass/shader bisection. Diagnostic only: this deliberately removes rendering. `=0` clears the list.
+DM_VK_X_SKIPGS	hex		debug	live	gfx_vk_exec.c	Skip draws with one of up to 8 geometry shader keys (the bundle's key, before its topology variant), as `DM_VK_X_SKIPFS`. Diagnostic only: this deliberately removes rendering.
 DM_VK_X_SKIPVS	hex		debug	live	gfx_vk_exec.c	leave out the draws whose vertex shader key (hex, as the traces print it; up to 8) is listed: bisect which shaders an artifact needs, a group at a time (it found XC3's slivers from 40 candidates in 4 rounds)
 DM_VK_ZC_CHUNK_MB	int		profile	start	gfx_vk_core.c	the size in MB of the chunks a memory pool over 256 MB is mapped in (Trails in the Sky the 1st: 512)
 DM_VK_ZEROCOPY_LAZY	int		debug	start	gfx_vk_core.c	which zero-copy pools get their buffer only when the GPU first uses them (vk_pool_of, pool_back: a slab's slot or a kept buffer as at creation; until then the game's own cached, swappable pages): `0` none; `1` also the chunks of pools over 256 MB (`ZC_CHUNK`; Pokopia on the Thor, 4.96 GB of pools of

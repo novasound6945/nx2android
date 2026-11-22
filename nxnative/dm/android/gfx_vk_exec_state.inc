@@ -121,6 +121,7 @@ static void alias_read(void) {
     }
 }
 static int g_x_nskipfs; static uint64_t g_x_skipfs[16];   // DM_VK_X_SKIPFS: bounded live fragment-shader bisection
+static int g_x_nskipgs; static uint64_t g_x_skipgs[8];    // DM_VK_X_SKIPGS: the same for geometry shaders
 static uint64_t g_x_cutfs, g_prev_fs;   // DM_VK_X_CUTFS: isolate a fragment shader between pass dumps
 static uint64_t g_list_vs, g_list_fs;
 static char g_x_tracesize[40], g_x_traceframe[40]; static int g_x_traceframe_on;
@@ -274,5 +275,6 @@ static void x_read(void) { cpu_ready_config(); const char *c = getenv("DM_VK_CB_
       if ((e = getenv("DM_VK_SAMP_LOG")) && atoi(e) > 0) { if (!(first && atoi(e) == g_vk_samp_log_boot)) g_vk_samp_log = atoi(e); setenv("DM_VK_SAMP_LOG", "0", 1); } first = 0; } g_x_nosetmemo = (e = getenv("DM_VK_X_NOSETMEMO")) && atoi(e); g_x_setverify = (e = getenv("DM_VK_X_SETVERIFY")) && atoi(e); g_c2fast = !((e = getenv("DM_VK_C2_FAST")) && !atoi(e)); g_gs_split = (e = getenv("DM_VK_GS_SPLIT")) && atoi(e);
     g_x_nskipvs = 0; for (const char *q = getenv("DM_VK_X_SKIPVS"); q && *q && g_x_nskipvs < 8;) { char *n; uint64_t v = strtoull(q, &n, 16); if (n == q) break; if (v) g_x_skipvs[g_x_nskipvs++] = v; q = *n ? n + 1 : n; }
     g_x_nskipfs = 0; for (const char *q = getenv("DM_VK_X_SKIPFS"); q && *q && g_x_nskipfs < 16;) { char *n; uint64_t v = strtoull(q, &n, 16); if (n == q) break; if (v) g_x_skipfs[g_x_nskipfs++] = v; q = *n ? n + 1 : n; }
+    g_x_nskipgs = 0; for (const char *q = getenv("DM_VK_X_SKIPGS"); q && *q && g_x_nskipgs < 8;) { char *n; uint64_t v = strtoull(q, &n, 16); if (n == q) break; if (v) g_x_skipgs[g_x_nskipgs++] = v; q = *n ? n + 1 : n; }
     g_x_cutfs = (e = getenv("DM_VK_X_CUTFS")) ? strtoull(e, NULL, 16) : 0;
     alias_read(); }

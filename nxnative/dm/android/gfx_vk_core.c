@@ -354,6 +354,7 @@ void vk_init(void) {
     V.has_dtiming = has_ext(ex, ne, "VK_GOOGLE_display_timing");   // frame pacing on the display (gfx_vk_present.c pace_*)
     V.has_bc = ff.features.textureCompressionBC; V.has_astc = ff.features.textureCompressionASTC_LDR; V.has_gs = ff.features.geometryShader;
     V.has_oq_precise = ff.features.occlusionQueryPrecise;   // (enabled with the rest: en = ff.features)
+    V.has_nu_img = v12 && f12.shaderSampledImageArrayNonUniformIndexing;   // (enabled below with the rest of f12)
     V.has_hqr = v12 ? f12.hostQueryReset : featx(xf, nxf, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES)[0];   // (checked against the entry point below)
     V.has_gs_pointsize = ff.features.shaderTessellationAndGeometryPointSize;
     { const char *e = getenv("DM_VK_X_BC_CPU"); if (e && atoi(e)) V.has_bc = 0; }   // (start-up) BC textures decoded on the CPU as on a device without them (gfx_vk_tex.c bc_decode)
@@ -1906,13 +1907,41 @@ static void pass_spike_flush(void) {
     }
     g_nsf = 0; g_sf_tot = 0;
 }
+// The completion thread waits for each submission in order, in steps of 250 ms. One not done after DM_VK_HANG_S seconds (start-up, default 1.5; 0 waits without
+// steps, as before) is taken for a GPU hang: the log gets one [RED] line, the pipelines first used since the last finished submission (gfx_vk_exec.c
+// vk_hang_report) and, with DM_VK_CRUMBS=1, the last pass the GPU finished, and the log file is flushed to storage at once (fsync). Luigi's Mansion 3 on Turnip
+// froze the whole device about four seconds after its GPU stopped (the GPU time in the frame line stayed at its last value, 3.8 ms), with nothing past the last
+// frame line in the log; the wait goes on afterwards, and a submission that finishes late after all is logged too
+void vk_hang_report(uint64_t late, uint64_t done);
+static void completion_wait(uint64_t f) {
+    static double hang_s = -1; if (hang_s < 0) { const char *e = getenv("DM_VK_HANG_S"); hang_s = e ? atof(e) : 1.5; if (hang_s < 0) hang_s = 0;
+        VKLOG("GPU hang watch: %s", hang_s > 0 ? "a submission not done after DM_VK_HANG_S seconds is reported, and the log flushed" : "off (DM_VK_HANG_S=0)"); if (hang_s > 0) VKLOG("GPU hang watch: %.2f s", hang_s); }
+    VkFence fe = V.has_timeline ? VK_NULL_HANDLE : g_fring[f % NFRING];
+    if (hang_s <= 0) {
+        if (V.has_timeline) wait_fence(f); else { VkResult r = vkWaitForFences(V.dev, 1, &fe, VK_TRUE, UINT64_MAX); if (r != VK_SUCCESS) vk_device_lost("GPU fence wait", r); }
+        return; }
+    struct timespec ts0; clock_gettime(CLOCK_MONOTONIC, &ts0); int told = 0;
+    for (;;) {
+        VkResult r;
+        if (V.has_timeline) { VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, NULL, 0, 1, &g_timeline, &f}; r = vkWaitSemaphores(V.dev, &wi, 250000000ull); }
+        else r = vkWaitForFences(V.dev, 1, &fe, VK_TRUE, 250000000ull);
+        struct timespec ts1; clock_gettime(CLOCK_MONOTONIC, &ts1); double el = (double)(ts1.tv_sec - ts0.tv_sec) + (double)(ts1.tv_nsec - ts0.tv_nsec) / 1e9;
+        if (r == VK_SUCCESS) { if (told) { VKLOG("[hang] submission %llu finished after all, %.2f s after its wait began", (unsigned long long)f, el); fflush(stderr); } return; }
+        if (r != VK_TIMEOUT) { vk_device_lost(V.has_timeline ? "GPU timeline wait" : "GPU fence wait", r); return; }
+        if (!told && el >= hang_s) { told = 1;
+            uint64_t done = 0; if (V.has_timeline) vkGetSemaphoreCounterValue(V.dev, g_timeline, &done);
+            VKLOG("[RED] [hang] GPU submission %llu not done after %.2f s (the GPU finished %llu): a GPU hang? (DM_VK_HANG_S)", (unsigned long long)f, el, (unsigned long long)done);
+            vk_hang_report(f, done);
+            fflush(stderr); fsync(fileno(stderr)); }
+    }
+}
 static void *completion_main(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "dm-vk-complete");
     for (;;) {
         pthread_mutex_lock(&g_cmu);
         while (!g_ch) pthread_cond_wait(&g_ccv, &g_cmu);
         cpend *c = g_ch; pthread_mutex_unlock(&g_cmu);
-        if (V.has_timeline) wait_fence(c->fence); else { VkResult r = vkWaitForFences(V.dev, 1, &g_fring[c->fence % NFRING], VK_TRUE, UINT64_MAX); if (r != VK_SUCCESS) vk_device_lost("GPU fence wait", r); }
+        completion_wait(c->fence);
         if (g_shadow_pools && c->rslot >= 0) pools_copy_back(&g_slot[c->rslot]);
         if (g_tsq && c->slot >= 0) { uint64_t t[2]; if (vkGetQueryPoolResults(V.dev, g_tsq, 2 * (uint32_t)c->slot, 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] > t[0])
             { uint64_t ns = (uint64_t)((double)(t[1] - t[0]) * V.props.limits.timestampPeriod); g_gpu_ns += ns; int k = (int)(c->frame % 64);

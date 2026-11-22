@@ -58,6 +58,7 @@ typedef struct {
     // on the replay thread); gpl_eds3: the VK_EXT_extended_dynamic_state3 states its pre-rasterization parts leave dynamic (1 depth clamp, 2 polygon mode, 4 depth clip -1..1), the
     // others go into their key; gpl_interp: graphicsPipelineLibraryIndependentInterpolationDecoration
     int gpl, gpl_eds3, gpl_interp;
+    int has_nu_img;   // shaderSampledImageArrayNonUniformIndexing (Vulkan 1.2): run-time indexed texture arrays are decorated NonUniform (vk_spv_nonuniform.h)
     int has_oq_precise, has_hqr;   // occlusionQueryPrecise; hostQueryReset with vkResetQueryPool loaded (gfx_vk_core.c occlusion queries)
     int has_fault;   // VK_EXT_device_fault enabled: the driver's own report of a device lost (gfx_vk_core.c vk_device_lost)
     int has_divisor;       // vertexAttributeInstanceRateDivisor (VK_EXT_vertex_attribute_divisor or the KHR one): streams stepping per N instances (build_pipeline)
@@ -169,7 +170,9 @@ void vk_watch(const vkimg_t *im, const char *what);   // DM_VK_WATCH (gfx_vk_exe
 vkimg_t *vk_tex_by_id(int tid, const view_t **view_out, const tex_t **tex_out);   // registered texture ID → image (NULL if none)
 VkSampler vk_samp_by_id(int sid);
 extern __thread VkFormat vk_view_fmt; extern __thread uint32_t vk_view_layers; extern __thread VkImageUsageFlags vk_view_usage;   // the format, layer count and inherited usage of the view vk_tex_view last returned on this thread
-VkImageView vk_dummy_view(int dim, int arrayed, int ms, int storage, int is_int);
+extern __thread VkImageViewType vk_view_type; extern __thread VkImageAspectFlags vk_view_aspect; extern __thread uint32_t vk_view_samples; extern __thread int vk_view_of3d;   // and its type, aspect, the image's samples, and whether it is a 2D (array) view of a 3D image
+enum { VK_DUMMY_FLOAT, VK_DUMMY_UINT, VK_DUMMY_SINT, VK_DUMMY_DEPTH };   // vk_dummy_view kind: the texels the binding declares (a depth comparison: a depth format)
+VkImageView vk_dummy_view(int dim, int arrayed, int ms, int storage, int kind);
 VkSampler vk_dummy_sampler(void);
 VkBufferView vk_dummy_tbuf(int storage);
 void vk_end_pass_land(void);   // vk_end_pass, then the deferred uniform updates land (before copies, dispatches, the submission's end)

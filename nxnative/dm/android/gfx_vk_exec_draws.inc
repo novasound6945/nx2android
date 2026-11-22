@@ -158,6 +158,7 @@ static int prepare_draw(int prim, int indexed) {
     // DM_VK_X_SKIPFS=<key>[,<key>...] (live, up to 16): draws with these pixel shaders are left out (diagnostics, as DM_VK_X_SKIPVS). A left-out full-screen pass keeps what its target
     // held from earlier frames, so it cannot turn off an effect that rewrites a target every frame: Link's Awakening's depth-of-field composite looked the same without it (DM_VK_BIND_ALIAS does that)
     for (int i = 0; i < g_x_nskipfs; i++) if (S.sh[1] && S.sh[1]->key == g_x_skipfs[i]) return 0;
+    for (int i = 0; i < g_x_nskipgs; i++) if (S.sh[2] && S.sh[2]->key == g_x_skipgs[i]) return 0;   // DM_VK_X_SKIPGS=<key>[,<key>...] (live, up to 8): the same for geometry shaders (the key the bundle lists, before its topology variant)
     // A run of draws with rasterizer discard gets a pass of its own: the pass ends where such a run begins and where it ends (and begin_pass puts a barrier
     // before the next). They are vertex shaders that write memory the later draws read: Xenoblade Chronicles 3 transforms its meshes with point draws
     // (724ddce6 then 37d04447, cf66cef4), which share passes with its G-buffer draws. NVN's GPU runs draws in order; Adreno, a tiled GPU, runs the vertex
@@ -343,6 +344,7 @@ static int prepare_draw(int prim, int indexed) {
     uint64_t t1 = tick(); g_vkst.ns_pipe += t1 - t0 - tdesc;
     if (!p) { g_vkst.skip_pipe++; return 0; }
     crumb_draw(k.key[0], k.key[1], k.key[2], (uint32_t)(g_pipe_fast | g_pipe_new << 1));
+    if (g_pipe_first) firstuse_note(k.key[0], k.key[1], k.key[2], k.um[1], k.im[1], k.topo, g_pipe_first);
     g_sub_draws++; if (g_pipe_fast) g_sub_fast_draws++;
     texbind(&k);
     if (g_ubolog_key && g_ubolog_n > 0 && S.sh[0] && S.sh[0]->key == g_ubolog_key) {   // DM_VK_UBO_LOG: the pipeline the draw got, and its key's hash

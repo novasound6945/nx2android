@@ -797,6 +797,7 @@ static VkComponentMapping sample_swizzle(const VkComponentMapping *format, const
         apply(swz_comp(sw[3]),format,VK_COMPONENT_SWIZZLE_A)};
 }
 __thread VkFormat vk_view_fmt; __thread uint32_t vk_view_layers; __thread VkImageUsageFlags vk_view_usage;
+__thread VkImageViewType vk_view_type; __thread VkImageAspectFlags vk_view_aspect; __thread uint32_t vk_view_samples; __thread int vk_view_of3d;   // (gfx_vk.h)
 VkImageView vk_tex_view(const tex_t *t, const view_t *vw, int dim, int arrayed, int as_attachment, vkimg_t **img_out) {
     return vk_tex_view_as(t, vw, dim, arrayed, as_attachment, img_out, 0);
 }
@@ -888,7 +889,8 @@ VkImageView vk_tex_view_as(const tex_t *t, const view_t *vw, int dim, int arraye
     pthread_mutex_lock(&g_view_mu);
     vview *head = nvn_hm_get(&g_views, &im);
     for (vview *v = head; v; v = v->next)
-        if (v->type == type && v->fmt == fmt && v->lv0 == lv0 && v->nlv == nlv && v->ly0 == ly0 && v->nly == nly && v->aspect == aspect && v->attach == (as_attachment != 0) && !memcmp(&v->swz, &swz, sizeof swz)) { pthread_mutex_unlock(&g_view_mu); vk_view_fmt = fmt; vk_view_layers = nly; vk_view_usage = v->usage; return v->v; }
+        if (v->type == type && v->fmt == fmt && v->lv0 == lv0 && v->nlv == nlv && v->ly0 == ly0 && v->nly == nly && v->aspect == aspect && v->attach == (as_attachment != 0) && !memcmp(&v->swz, &swz, sizeof swz)) { pthread_mutex_unlock(&g_view_mu); vk_view_fmt = fmt; vk_view_layers = nly; vk_view_usage = v->usage;
+            vk_view_type = type; vk_view_aspect = aspect; vk_view_samples = im->samples; vk_view_of3d = im->vtype == VK_IMAGE_VIEW_TYPE_3D && type != VK_IMAGE_VIEW_TYPE_3D; return v->v; }
     VkImageViewUsageCreateInfo uci = {VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO, NULL, 0};
     VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(V.pd, fmt, &fp);
     uci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -901,6 +903,7 @@ VkImageView vk_tex_view_as(const tex_t *t, const view_t *vw, int dim, int arraye
     nvn_hm_put(&g_views, &im, nv);
     pthread_mutex_unlock(&g_view_mu);
     vk_view_fmt = fmt; vk_view_layers = nly; vk_view_usage = uci.usage;
+    vk_view_type = type; vk_view_aspect = aspect; vk_view_samples = im->samples; vk_view_of3d = im->vtype == VK_IMAGE_VIEW_TYPE_3D && type != VK_IMAGE_VIEW_TYPE_3D;
     return view;
 }
 
@@ -1075,28 +1078,34 @@ VkSampler vk_dummy_sampler(void) {
     samp_par p = {0}; p.magf = 1; p.minf = 1; p.lod_max = 1000; p.aniso = 1; s = make_sampler(&p); return s;
 }
 // ---------------- dummies: what an unbound slot reads (zeros) ----------------
-VkImageView vk_dummy_view(int dim, int arrayed, int ms, int storage, int is_int) {
-    static VkImageView cache[4][2][2][2][2]; static vkimg_t *imgs[4][2][2][2]; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-    int d = dim == 0 ? 0 : dim == 2 ? 2 : dim == 3 ? 3 : 1; arrayed = !!arrayed; ms = !!ms && d == 1; storage = !!storage; is_int = !!is_int;
+// kind (VK_DUMMY_*): what the binding declares its texels to be, so the view matches the shader's image type: float (RGBA8), uint (RGBA8UI), sint (RGBA8I), or a depth
+// format (D32F) for a binding a depth comparison reads (vk_spv_dref.h: OpImage*Dref* needs a view whose format has depth comparison; Vulkan leaves it undefined on a
+// colour one). A depth dummy is 2D / 2D array / cube only (the dimensions a comparison can take on every device); others fall back to the float one
+VkImageView vk_dummy_view(int dim, int arrayed, int ms, int storage, int kind) {
+    static VkImageView cache[4][2][2][2][4]; static vkimg_t *imgs[4][2][2][4]; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    int d = dim == 0 ? 0 : dim == 2 ? 2 : dim == 3 ? 3 : 1; arrayed = !!arrayed; ms = !!ms && d == 1; storage = !!storage;
+    if (kind < 0 || kind > VK_DUMMY_DEPTH || (kind == VK_DUMMY_DEPTH && (storage || ms || (d != 1 && d != 3)))) kind = VK_DUMMY_FLOAT;
     pthread_mutex_lock(&mu);
-    VkImageView v = cache[d][arrayed][ms][storage][is_int];
+    VkImageView v = cache[d][arrayed][ms][storage][kind];
     if (!v) {
-        vkimg_t **pi = &imgs[d][ms][storage][is_int];
+        vkimg_t **pi = &imgs[d][ms][storage][kind];
         if (!*pi) {
             tex_t t; memset(&t, 0, sizeof t); t.magic = MAGIC('T', 'E', 'X', 0); t.serial = 1;
-            t.d.format = is_int ? 0x27 : 0x25; t.d.width = t.d.height = 1; t.d.depth = d == 3 ? 12 : 6; t.d.levels = 1; t.d.samples = ms ? 4 : 0;
+            t.d.format = kind == VK_DUMMY_UINT ? 0x27 : kind == VK_DUMMY_SINT ? 0x28 : kind == VK_DUMMY_DEPTH ? 0x34 : 0x25;   // RGBA8, RGBA8UI, RGBA8I, DEPTH32F
+            t.d.width = t.d.height = 1; t.d.depth = d == 3 ? 12 : 6; t.d.levels = 1; t.d.samples = ms ? 4 : 0;
             t.d.target = d == 0 ? 3 : d == 2 ? 2 : d == 3 ? 9 : ms ? 6 : 4; t.d.flags = storage ? NVN_TEXTURE_FLAGS_IMAGE : 0;
             if (d == 2) t.d.depth = 1;
             *pi = img_new(&t, vk_fmt(t.d.format));
-            VkCommandBuffer cb = vk_upload_cmd(); vk_tex_prepare(cb, *pi);
+            if (!*pi) { pthread_mutex_unlock(&mu); VKRED_ONCE(177, "dummy image (kind %d, dimension %d) could not be made: the float one", kind, d); return kind ? vk_dummy_view(dim, arrayed, ms, storage, VK_DUMMY_FLOAT) : VK_NULL_HANDLE; }
+            VkCommandBuffer cb = vk_upload_cmd(); vk_tex_prepare(cb, *pi);   // (clears it to zeros: colour or depth)
             VkClearColorValue z = {{0}}; VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
-            if (!ms) vkCmdClearColorImage(cb, (*pi)->img, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &rg);
+            if (!ms && kind != VK_DUMMY_DEPTH) vkCmdClearColorImage(cb, (*pi)->img, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &rg);
         }
         vkimg_t *im = *pi;
         VkImageViewType type = d == 0 ? (arrayed ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : VK_IMAGE_VIEW_TYPE_1D) : d == 2 ? VK_IMAGE_VIEW_TYPE_3D : d == 3 ? (arrayed ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : VK_IMAGE_VIEW_TYPE_CUBE) : (arrayed ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D);
         uint32_t nly = type == VK_IMAGE_VIEW_TYPE_CUBE ? 6 : type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY ? 12 : arrayed ? im->layers : 1;
-        VkImageViewCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, im->img, type, im->fmt, {0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, nly}};
-        VKCHK(vkCreateImageView(V.dev, &ci, NULL, &v)); cache[d][arrayed][ms][storage][is_int] = v;
+        VkImageViewCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, im->img, type, im->fmt, {0}, {kind == VK_DUMMY_DEPTH ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, nly}};
+        VKCHK(vkCreateImageView(V.dev, &ci, NULL, &v)); cache[d][arrayed][ms][storage][kind] = v;
     }
     pthread_mutex_unlock(&mu);
     return v;

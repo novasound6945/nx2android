@@ -9,6 +9,7 @@
 #include "vk_spv_vertex.h"
 #include "vk_spv_fragout.h"
 #include "vk_spv_dref.h"
+#include "vk_spv_nonuniform.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <fcntl.h>
 #include <string.h>
@@ -400,6 +401,11 @@ static vkshader_t *vk_shader_q(uint64_t key, int stage, int quiet) {
         for (int i = 0; i < nn; i++) if (nk[i] == key) { uint32_t n2 = 0, k2 = 0, *w2 = spv_kill_to_merge(w, nw, &n2, &k2);
             if (w2) { free(w); w = w2; nw = n2; VKLOG("shader %016llx: %u discard%s taken out (DM_VK_FS_NOKILL)", (unsigned long long)key, k2, k2 == 1 ? "" : "s"); }
             else VKLOG("[RED] shader %016llx: DM_VK_FS_NOKILL found no discard it can take out: left as it is", (unsigned long long)key); } }
+    // run-time indexed texture arrays: NonUniform (vk_spv_nonuniform.h), where the device has the feature. DM_VK_NONUNIFORM=0 (start-up, A/B): as translated
+    { static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_NONUNIFORM"); on = !(e && !atoi(e));
+          VKLOG("run-time indexed texture arrays: %s", !on ? "as translated (DM_VK_NONUNIFORM=0)" : V.has_nu_img ? "decorated NonUniform" : "as translated (the device has no shaderSampledImageArrayNonUniformIndexing)"); }
+      uint32_t n2 = 0, nd = 0, *w2 = on && V.has_nu_img ? spv_nonuniform_arrays(w, nw, &n2, &nd) : NULL;
+      if (w2) { free(w); w = w2; nw = n2; static int nl; if (nl++ < 8) VKLOG("shader %016llx (stage %d): %u run-time indexed texture array accesses decorated NonUniform", (unsigned long long)key, stage, nd); } }
     spv_io_locs(w, nw, &s->in_locs, &s->out_locs);
     if (stage == 1) { s->fout_locs = spv_float_out_locs(w, nw); s->int_writer = spv_int_writer(w, nw); }   // the float outputs an integer target retypes, and whether it writes integers there (vk_spv_fragout.h)
     { uint16_t bn[64]; int nb = s->nbind < 64 ? s->nbind : 64; for (int i = 0; i < nb; i++) bn[i] = s->b[i].binding; s->dref_bind = spv_dref_bindings(w, nw, bn, nb); }   // the bindings a depth comparison reads (vk_spv_dref.h)

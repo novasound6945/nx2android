@@ -403,6 +403,31 @@ void vk_crumbs_report(void) {
         for (int k = 0; k < c->n; k++) VKLOG("[crumbs]   shaders %016llx %016llx %016llx%s%s%s", (unsigned long long)c->k[k][0], (unsigned long long)c->k[k][1], (unsigned long long)c->k[k][2],
                                              c->fl[k] & 1 ? " (linked pipeline)" : "", c->fl[k] & 2 ? " (linked at this draw)" : "", c->fl[k] & 4 ? " (whole pipeline's first draw)" : ""); }
 }
+// The pipelines first drawn or dispatched with in each submission (graphics_pipeline g_pipe_first; a compute pipeline built at its dispatch), for a GPU hang: a GPU
+// that stops at a draw it never ran before (Luigi's Mansion 3 on Turnip, three times at a cutscene's first draws with new shadow and light pixel shaders, the whole
+// device frozen four seconds later) is named by the submission it stopped in. The replay thread writes the ring; the completion thread reads it without a lock when a
+// submission is late (vk_hang_report): an entry may be torn, which a diagnostic can bear
+typedef struct { uint64_t sub, present, k[3], um, im; int pass, how; uint32_t topo; } firstuse_t;
+enum { FU_N = 256 };
+static firstuse_t g_fu[FU_N]; static volatile unsigned g_fun;
+static void firstuse_note(uint64_t vs, uint64_t fs, uint64_t gs, uint64_t um, uint64_t im, uint32_t topo, int how) {
+    unsigned n = g_fun; firstuse_t *e = &g_fu[n % FU_N];
+    *e = (firstuse_t){mtl_last_fence() + 1, g_tex_frame, {vs, fs, gs}, um, im, g_sub_pass - 1, how, topo};
+    __atomic_store_n(&g_fun, n + 1, __ATOMIC_RELEASE);
+}
+// done: the last submission the GPU finished (0 not known): the first uses of the submissions after it, else the newest 24
+void vk_hang_report(uint64_t late, uint64_t done) {
+    static const char *const how[6] = {"", "built at the draw", "linked at the draw", "whole, after its linked one", "first draw (built ahead)", "compute, built at the dispatch"};
+    unsigned n = __atomic_load_n(&g_fun, __ATOMIC_ACQUIRE), lo = n > FU_N ? n - FU_N : 0, from = n > 24 && n - 24 > lo ? n - 24 : lo, shown = 0;
+    if (done) for (unsigned i = lo; i < n; i++) if (g_fu[i % FU_N].sub > done) { from = i; break; }
+    VKLOG("[hang] submission %llu is late; the GPU finished %llu. Pipelines first used from submission %llu on (%u in the ring, newest last):", (unsigned long long)late, (unsigned long long)done,
+          (unsigned long long)(from < n ? g_fu[from % FU_N].sub : 0), n - lo);
+    for (unsigned i = from; i < n && shown < 48; i++, shown++) { const firstuse_t *e = &g_fu[i % FU_N];
+        VKLOG("[hang]   submission %llu present %llu pass %d: vs %016llx fs %016llx gs/cs %016llx, topology %u, views %#llx/%#llx (%s)", (unsigned long long)e->sub, (unsigned long long)e->present, e->pass,
+              (unsigned long long)e->k[0], (unsigned long long)e->k[1], (unsigned long long)e->k[2], e->topo, (unsigned long long)e->um, (unsigned long long)e->im, e->how > 0 && e->how < 6 ? how[e->how] : "?"); }
+    if (!shown) VKLOG("[hang]   (none: no pipeline was new in those submissions)");
+    if (crumbs_on() > 0) vk_crumbs_report(); else VKLOG("[hang] DM_VK_CRUMBS=1 (start-up) would name the last pass the GPU finished");
+}
 void vk_prof_end(void) {
     if (!g_prof_on || !g_prof_t0) return;
     extern uint64_t g_pkg_ns, g_pkg_n; uint64_t tot = tick() - g_prof_t0; g_prof_t0 = 0;

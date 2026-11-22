@@ -119,7 +119,7 @@ static VkSampler samp_for(int st, const dmsv_bind *b, uint64_t texh, int nearest
 // texture views by ID within a submission: a draw's texture arrays (32 slots) looked every slot up again, each through the registry's and the view table's
 // locks (NEO: about 2 ms a frame). An entry holds while no texture ID is registered again and no view is dropped (g_tex_gen)
 enum { TVC = 4096 };
-static struct { uint64_t epoch, gen; int tid, dim, arr, num, sc; VkImageView v; vkimg_t *im; } g_tvc[TVC];
+static struct { uint64_t epoch, gen; int tid, dim, arr, num, sc, fl, real; VkImageView v; vkimg_t *im; } g_tvc[TVC];   // fl: tex_desc_for's (multisample, storage, depth compared)
 uint64_t g_tvc_hit, g_tvc_miss, g_tvc_cold;   // lookups the cache answered, ones it did not, and of those the ones only an older submission's entry would have answered
 // what a view's texels are, as gfx_vk_shader.c's integer-texel variants need it: 0 float, 1 uint (unsigned integer formats, a stencil), 2 int
 static int view_num(const tex_t *t, const view_t *v) {
@@ -138,21 +138,49 @@ static int img_fmt_cls(uint8_t f) {
 }
 static uint64_t g_num_um, g_num_im;   // stage_set: the sampled bindings of the stage being built that got uint / int views (bit = binding index)
 extern uint64_t g_tex_gen;
-static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImageInfo *ii, int storage) {   // the view's view_num
+// The view type a binding's image declares (dmsv_bind dim, SPIR-V Dim, and flags bit 0 Arrayed), VK_IMAGE_VIEW_TYPE_MAX_ENUM for none or a kind not checked (Rect, Buffer)
+static VkImageViewType bind_vtype(const dmsv_bind *b) {
+    int a = b->flags & 1;
+    switch (b->dim) {
+    case 0: return a ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : VK_IMAGE_VIEW_TYPE_1D;
+    case 1: return a ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    case 2: return VK_IMAGE_VIEW_TYPE_3D;
+    case 3: return a ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : VK_IMAGE_VIEW_TYPE_CUBE;
+    }
+    return VK_IMAGE_VIEW_TYPE_MAX_ENUM;
+}
+// Why the view vk_tex_view just returned on this thread (vk_view_type and the rest, gfx_vk_tex.c) does not fit the binding, or NULL. Vulkan leaves a descriptor whose view
+// type, sample count or (where a depth comparison reads it, vk_spv_dref.h) aspect differs from the shader's image undefined, and on Adreno that can hang the GPU.
+// vk_tex_view_as keeps the texture's own type where it cannot make the declared one (a 1D texture for a 2D binding, a 2D one for a 3D binding), and a texture array
+// read through the driver's handle table (RK_TEX_C2A) takes the stage's other texture slots as its other elements: Luigi's Mansion 3's 32-shadow-map array (a Dref
+// gather, 2D array) held its cube map, a 3D light grid (a uint 2D array view of a 3D image) and colour textures there (shaders 314bd84c4accdf14, ef07efd818bd1ad5)
+static const char *view_misfit(const dmsv_bind *b, int dref) {
+    VkImageViewType want = bind_vtype(b);
+    if (want != VK_IMAGE_VIEW_TYPE_MAX_ENUM && vk_view_type != want) return "view type";
+    if (vk_view_of3d) return "a 2D view of a 3D image";
+    if (((b->flags & 2) != 0) != (vk_view_samples > 1)) return "sample count";
+    if (dref && !(vk_view_aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) return "no depth aspect for a depth comparison";
+    return NULL;
+}
+uint64_t g_desc_misfit;   // descriptors given a typed dummy because the texture's view did not fit the shader's declaration (view_misfit)
+static int g_tdf_real;    // tex_desc_for: the descriptor it wrote is the texture's own view (1), or a dummy (0)
+// dref: a depth comparison reads the binding (vk_shader dref_bind): its view must be a depth view, and a dummy there is a depth one (VK_DUMMY_DEPTH)
+static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImageInfo *ii, int storage, int dref) {   // the view's view_num
     int tid = (int)(h & 0xfffff); const view_t *v = NULL; const tex_t *t = NULL;
-    ii->imageLayout = VK_IMAGE_LAYOUT_GENERAL; ii->sampler = storage ? VK_NULL_HANDLE : samp_for(st, b, h, 0); ii->imageView = VK_NULL_HANDLE;
+    ii->imageLayout = VK_IMAGE_LAYOUT_GENERAL; ii->sampler = storage ? VK_NULL_HANDLE : samp_for(st, b, h, 0); ii->imageView = VK_NULL_HANDLE; g_tdf_real = 0;
     int sc = storage ? img_fmt_cls(b->fmt) : 0;   // FINAL FANTASY TACTICS' UI composite declares its window image r32ui over an RGBA8 texture: the view is in the shader's class
-    unsigned ck = ((unsigned)tid * 2654435761u ^ (unsigned)b->dim * 97u ^ (unsigned)(b->flags & 1) ^ (unsigned)sc * 0x9E37u) % TVC;
+    int fl = (b->flags & 2) | (storage ? 4 : 0) | (dref ? 8 : 0);   // (the rest of what view_misfit and the dummy depend on)
+    unsigned ck = ((unsigned)tid * 2654435761u ^ (unsigned)b->dim * 97u ^ (unsigned)(b->flags & 1) ^ (unsigned)sc * 0x9E37u ^ (unsigned)fl * 0x51u) % TVC;
     int logfs = g_x_logfs && S.sh[1] && S.sh[1]->key == g_x_logfs && st == 1; static int nlogfs; if (logfs && nlogfs >= 60) logfs = 0;
-    if (tid && g_var_now != 3 && !g_tracing && !logfs && g_tvc[ck].epoch == g_set_epoch && g_tvc[ck].gen == g_tex_gen && g_tvc[ck].tid == tid && g_tvc[ck].dim == b->dim && g_tvc[ck].arr == (b->flags & 1) && g_tvc[ck].sc == sc) {
+    if (tid && g_var_now != 3 && !g_tracing && !logfs && g_tvc[ck].epoch == g_set_epoch && g_tvc[ck].gen == g_tex_gen && g_tvc[ck].tid == tid && g_tvc[ck].dim == b->dim && g_tvc[ck].arr == (b->flags & 1) && g_tvc[ck].sc == sc && g_tvc[ck].fl == fl) {
         // (no last_use here: the entry was made in this submission, whose fence the miss below already gave the image; the fence changes only at the commit.
         // Writing it again touched a scattered image record per binding, ~77,000 a frame in Sifu)
-        ii->imageView = g_tvc[ck].v; vk_texdump_note(g_tvc[ck].im); g_tvc_hit++;
+        ii->imageView = g_tvc[ck].v; vk_texdump_note(g_tvc[ck].im); g_tvc_hit++; g_tdf_real = g_tvc[ck].real;
         if (g_tvc[ck].num && !storage) ii->sampler = samp_for(st, b, h, 1);
         return g_tvc[ck].num;
     }
     int num = 0; g_tvc_miss++;
-    if (tid && g_tvc[ck].epoch != g_set_epoch && g_tvc[ck].gen == g_tex_gen && g_tvc[ck].tid == tid && g_tvc[ck].dim == b->dim && g_tvc[ck].arr == (b->flags & 1) && g_tvc[ck].sc == sc) g_tvc_cold++;
+    if (tid && g_tvc[ck].epoch != g_set_epoch && g_tvc[ck].gen == g_tex_gen && g_tvc[ck].tid == tid && g_tvc[ck].dim == b->dim && g_tvc[ck].arr == (b->flags & 1) && g_tvc[ck].sc == sc && g_tvc[ck].fl == fl) g_tvc_cold++;
     if (tid && g_var_now != 3 && vk_tex_by_id(tid, &v, &t) && t) {
         // a storage image the shader declares as integers over a float or unorm texture of the same texel size: a view of the same image in that class, so the shader
         // reads the texels' bits (FINAL FANTASY TACTICS' UI composite loads its RGBA8 window as r32ui; through a float view its blend came out yellow and white). Integer
@@ -185,14 +213,24 @@ static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImag
         if (g_tracing || logfs) VKLOG("  %stexture binding %d handle %#llx id %d: %ux%u nvn format %#x target %d serial %llu pool %p+%#llx size %#llx (mem %p, flags %#x, pool flags %#x, packaged layout %d) → image %p (%ux%u fmt %d layers %u levels %u, gpu-written %d) view %p", logfs ? "logfs " : "", b->binding, (unsigned long long)h, tid, t->d.width, t->d.height, t->d.format, t->d.target,
                              (unsigned long long)t->serial, (const void *)t->pool, (unsigned long long)t->off, (unsigned long long)t->L.size, (const void *)t->mem, (unsigned)t->d.flags, t->pool ? (unsigned)t->pool->flags : 0u, (int)t->has_layout, (void *)im, im ? im->w : 0, im ? im->h : 0, im ? im->fmt : 0, im ? im->layers : 0, im ? im->levels : 0, im ? (int)im->gpu_w : -1, (void *)ii->imageView);
         if (im) im->last_use = mtl_last_fence() + 1;
-        if (ii->imageView) num = view_num(t, v);
-        if (ii->imageView) { g_tvc[ck].epoch = g_set_epoch; g_tvc[ck].gen = g_tex_gen; g_tvc[ck].tid = tid; g_tvc[ck].dim = b->dim; g_tvc[ck].arr = b->flags & 1; g_tvc[ck].v = ii->imageView; g_tvc[ck].im = im; g_tvc[ck].num = num; g_tvc[ck].sc = sc; }
+        int real = 0;
+        if (ii->imageView) { const char *why = view_misfit(b, dref);
+            if (!why) { num = view_num(t, v); real = 1; }
+            else {   // a dummy of the declared type: float (a storage image: its declared class), depth where a comparison reads it
+                g_desc_misfit++; static int nm;
+                if (nm++ < 32) VKLOG("[RED] shader %016llx binding %d: texture id %d (nvn format %#x target %d %ux%ux%u, %u samples) gives a view (type %d, aspect %#x%s) that does not fit the declared image (dimension %d, arrayed %d, multisample %d%s): %s; a typed dummy instead (%llu so far)",
+                                     S.sh[st] ? (unsigned long long)S.sh[st]->key : 0ull, (int)b->binding, tid, t->d.format, t->d.target, t->d.width, t->d.height, t->d.depth, vk_view_samples, (int)vk_view_type, (unsigned)vk_view_aspect,
+                                     vk_view_of3d ? ", of a 3D image" : "", (int)b->dim, b->flags & 1, (b->flags & 2) != 0, dref ? ", depth compared" : "", why, (unsigned long long)g_desc_misfit);
+                ii->imageView = vk_dummy_view(b->dim == 0xff ? 1 : b->dim, b->flags & 1, (b->flags & 2) != 0, storage, dref ? VK_DUMMY_DEPTH : sc);
+            } }
+        if (ii->imageView) { g_tvc[ck].epoch = g_set_epoch; g_tvc[ck].gen = g_tex_gen; g_tvc[ck].tid = tid; g_tvc[ck].dim = b->dim; g_tvc[ck].arr = b->flags & 1; g_tvc[ck].v = ii->imageView; g_tvc[ck].im = im; g_tvc[ck].num = num; g_tvc[ck].sc = sc; g_tvc[ck].fl = fl; g_tvc[ck].real = real; }
+        g_tdf_real = real;
     }
     if (num && !storage) ii->sampler = samp_for(st, b, h, 1);
     if (!ii->imageView) {
         if (g_tracing) VKLOG("  texture binding %d handle %#llx id %d: no texture (%s) → a dummy view", b->binding, (unsigned long long)h, tid, !tid ? "ID 0" : g_var_now == 3 ? "variant 3" : !t ? "the ID is not registered" : "no view");
-        const vkfmt_t *f = t ? vk_fmt(t->d.format) : NULL;
-        ii->imageView = vk_dummy_view(b->dim == 0xff ? 1 : b->dim, b->flags & 1, (b->flags & 2) != 0, storage, f && f->is_int); num = f && f->is_int ? (f->is_sint ? 2 : 1) : 0;
+        const vkfmt_t *f = t ? vk_fmt(t->d.format) : NULL; int cls = !dref && f && f->is_int ? (f->is_sint ? 2 : 1) : 0;
+        ii->imageView = vk_dummy_view(b->dim == 0xff ? 1 : b->dim, b->flags & 1, (b->flags & 2) != 0, storage, dref ? VK_DUMMY_DEPTH : cls); num = cls;
     }
     return num;
 }
@@ -535,19 +573,32 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
             int cnt = b->count ? b->count : 32;
             // Twelve 32-entry arrays fill ii; even a scalar after them needs a capacity check, never a truncated write.
             if (nii + (uint32_t)cnt > sizeof ii / sizeof *ii) die("[RED] [vk] image descriptor array exceeds capacity");
+            // a binding a depth comparison reads (vk_spv_dref.h) is never retyped to integer texels: tex_desc_for gives it depth views or a depth dummy (an integer view
+            // there, one handle of Luigi's Mansion 3's 32-texture shadow array, made the whole binding uint and its Dref gathers invalid: Turnip refused the part)
+            int dref = i < 64 && (s->dref_bind >> i & 1);
+            // An array of handles from the driver's table (RK_TEX_C2A) holds combined handles, whose sampler is in their high bits as for one texture (RS_TEX); bundles
+            // made before say no source (RS_NONE), and every element took the dummy sampler: Luigi's Mansion 3's shadow-map Dref gathers compared nothing
+            dmsv_bind eb = *b; if (b->kind == RK_TEX_C2A && b->samp == RS_NONE) eb.samp = RS_TEX;
+            uint8_t ek[sizeof ii / sizeof *ii], er[sizeof ii / sizeof *ii]; uint64_t eh[sizeof ii / sizeof *ii]; int nreal[3] = {0, 0, 0};
             for (int k = 0; k < cnt; k++) {
                 uint64_t h = b->kind == RK_TEX ? vk_tex_slot_handle(S.tex[st], S.img[st], (unsigned)b->reg) :
                              b->kind == RK_TEX_UBO ? mem_handle(ubo_word(st, b->reg, b->off + 8 * k)) : (b->off >= 0 ? c2_handle(st, b->off + 8 * k) : 0);
                 g_tex_sseq = b->kind == RK_TEX && b->reg >= 0 && b->reg < 256 ? S.tex_sseq[st][b->reg] : 0;
                 if (g_nalias && b->kind == RK_TEX && cnt == 1) h = bind_alias(st, s, b, h);
-                int num = tex_desc_for(st, b, h, &ii[nii + k], 0);
-                // a binding a depth comparison reads stays float (vk_spv_dref.h): an integer view there (one handle of Luigi's Mansion 3's 32-texture shadow array)
-                // takes a float dummy instead of retyping the whole binding, whose Dref gathers Turnip refused (the pipeline failed, its draws were left out)
-                if (num && i < 64 && (s->dref_bind >> i & 1)) {
-                    VkDescriptorImageInfo *di = &ii[nii + k]; di->imageView = vk_dummy_view(b->dim == 0xff ? 1 : b->dim, b->flags & 1, (b->flags & 2) != 0, 0, 0); di->sampler = samp_for(st, b, h, 0); num = 0;
-                    static int n; if (n++ < 8) VKLOG("[RED] shader %016llx binding %d: an integer view where a depth comparison reads: a float dummy instead (texture handle %#llx)", (unsigned long long)s->key, (int)b->binding, (unsigned long long)h); }
-                if (num && i < 64) { if (num == 1) g_num_um |= 1ull << i; else g_num_im |= 1ull << i; }
+                int num = tex_desc_for(st, &eb, h, &ii[nii + k], 0, dref);
+                ek[k] = (uint8_t)num; er[k] = (uint8_t)g_tdf_real; eh[k] = h; if (g_tdf_real && num >= 0 && num <= 2) nreal[num]++;
             }
+            // One texel class for the whole binding: the integer variant (gfx_vk_shader.c spv_int_images) retypes an array's element image, so all its elements must be
+            // views of that class. An array takes an integer class only when every texture in it is of that class; otherwise it stays float, and the elements of
+            // another class take a dummy of the binding's class (for a single texture this is its own class, as before)
+            int cls = cnt == 1 ? ek[0] : nreal[0] || (nreal[1] && nreal[2]) ? 0 : nreal[1] ? 1 : nreal[2] ? 2 : 0;
+            if (dref) cls = 0;
+            for (int k = 0; k < cnt; k++) if (ek[k] != cls) {
+                VkDescriptorImageInfo *di = &ii[nii + k];
+                di->imageView = vk_dummy_view(b->dim == 0xff ? 1 : b->dim, b->flags & 1, (b->flags & 2) != 0, 0, dref ? VK_DUMMY_DEPTH : cls); di->sampler = samp_for(st, &eb, eh[k], cls != 0);
+                static int n; if (er[k] && n++ < 16) VKLOG("[RED] shader %016llx binding %d element %d: a %s view in a %s texture array: a dummy of the array's class instead (texture handle %#llx)", (unsigned long long)s->key, (int)b->binding, k,
+                                                           ek[k] == 1 ? "uint" : ek[k] == 2 ? "int" : "float", cls == 1 ? "uint" : cls == 2 ? "int" : "float", (unsigned long long)eh[k]); }
+            if (cls && i < 64) { if (cls == 1) g_num_um |= 1ull << i; else g_num_im |= 1ull << i; }
             wr->pImageInfo = &ii[nii]; nii += (uint32_t)cnt; wr->descriptorCount = (uint32_t)cnt; wr->descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; nw++;
             continue; }
         case RK_TEXD: case RK_SAMPD: {
@@ -585,7 +636,7 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
                         if (view_num(t, v)) fits = 0; // these arrays declare floating-point texels
                     }
                     dmsv_bind vb = *b; vb.samp = RS_TEX;
-                    tex_desc_for(st, &vb, fits ? h : 0, di, 0);
+                    tex_desc_for(st, &vb, fits ? h : 0, di, 0, i < 64 && (s->dref_bind >> i & 1));
                     di->sampler = VK_NULL_HANDLE; // separate sampled image, not combined
                 }
             }
@@ -597,7 +648,7 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
         case RK_IMG: case RK_IMG_UBO: {
             if (nii >= sizeof ii / sizeof *ii) die("[RED] [vk] storage image descriptor exceeds capacity");
             uint64_t h = b->kind == RK_IMG ? (b->reg >= 0 && b->reg < 32 ? S.img[st][b->reg] : 0) : mem_handle(ubo_word(st, b->reg, b->off));
-            tex_desc_for(st, b, h, &ii[nii], 1); wr->pImageInfo = &ii[nii++]; wr->descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; nw++;
+            tex_desc_for(st, b, h, &ii[nii], 1, 0); wr->pImageInfo = &ii[nii++]; wr->descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; nw++;
             continue; }
         case RK_TBUF: case RK_TBUF_UBO: case RK_IMG_TBUF: {
             if (nbv >= sizeof bv / sizeof *bv) die("[RED] [vk] texel buffer descriptor exceeds capacity");
@@ -615,7 +666,7 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
             else if (b->desc == RD_SAMPLED || b->desc == RD_STORAGE) {
                 int cnt = b->count ? b->count : 32;
                 if (nii + (uint32_t)cnt > sizeof ii / sizeof *ii) die("[RED] [vk] fallback image descriptor array exceeds capacity");
-                ii[nii] = (VkDescriptorImageInfo){b->desc == RD_SAMPLED ? vk_dummy_sampler() : VK_NULL_HANDLE, vk_dummy_view(b->dim == 0xff ? 1 : b->dim, b->flags & 1, (b->flags & 2) != 0, b->desc == RD_STORAGE, 0), VK_IMAGE_LAYOUT_GENERAL};
+                ii[nii] = (VkDescriptorImageInfo){b->desc == RD_SAMPLED ? vk_dummy_sampler() : VK_NULL_HANDLE, vk_dummy_view(b->dim == 0xff ? 1 : b->dim, b->flags & 1, (b->flags & 2) != 0, b->desc == RD_STORAGE, b->desc == RD_SAMPLED && i < 64 && (s->dref_bind >> i & 1) ? VK_DUMMY_DEPTH : VK_DUMMY_FLOAT), VK_IMAGE_LAYOUT_GENERAL};
                 for (int k = 1; k < cnt; k++) ii[nii + k] = ii[nii];
                 wr->pImageInfo = &ii[nii]; nii += (uint32_t)cnt; wr->descriptorCount = (uint32_t)cnt;
                 wr->descriptorType = b->desc == RD_SAMPLED ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; nw++; continue;

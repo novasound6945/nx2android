@@ -107,6 +107,9 @@ static int async_pipe(const pkey *k) {   // 1: queued (the draw is left out); un
 static nvn_hmap g_gfast = {.klen = sizeof(pkey)};   // linked pipelines by key (the replay thread's only; (VkPipeline)1: the link failed), kept after the whole one took over (command buffers may hold them)
 static nvn_hmap g_gtook = {.klen = sizeof(pkey)};   // keys whose whole pipeline has drawn after their linked one (the replay thread's only; vk_ev VKEV_TAKEOVER once per key)
 static int g_pipe_new;   // graphics_pipeline linked a pipeline at this draw (1), or a whole one took over at it (2): the crumbs' flags
+// graphics_pipeline: how this draw's pipeline is new (the hang report's first uses, vk_hang_report): 0 drawn before, 1 built at this draw, 2 linked at it, 3 a whole one
+// taking over from its linked one, 4 its first draw after a background build or a prewarm (g_pipe_drawn: the pipelines drawn with, by handle; the replay thread's)
+static int g_pipe_first; static nvn_hmap g_pipe_drawn = {.klen = sizeof(VkPipeline)};
 static _Atomic uint64_t g_gpl_swaps;   // whole pipelines finished in the background (graphics_pipeline looks again at a memoized linked one when it moves)
 static int g_pipe_fast, g_last_fast; static uint64_t g_last_swaps, g_gpl_dyn_gen;   // graphics_pipeline returned a linked pipeline (its dynamic state: gpl_dyn); the memo's; the command buffer gpl_dyn last set it in
 // DM_VK_SHOTS_FAST (gfx_vk_present.c fastshot_frame): while it is armed, each draw that took a linked pipeline is counted here, by shader keys, until the next present takes the tally
@@ -119,7 +122,7 @@ static void fast_note(const pkey *k) {
 }
 static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout); static int gpl_eligible(const pkey *k); static void gpl_opt_queue(const pkey *k); static void gpl_old_built(uint64_t ns);
 static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
-    uint64_t swaps = atomic_load(&g_gpl_swaps); g_pipe_new = 0;
+    uint64_t swaps = atomic_load(&g_gpl_swaps); g_pipe_new = 0; g_pipe_first = 0;
     if (g_last_p && !memcmp(k, &g_last_k, sizeof *k) && (!g_last_fast || g_last_swaps == swaps)) { g_pipe_fast = g_last_fast;
         if (!g_last_fast) { extern uint64_t g_tex_frame; if (g_last_seen != __atomic_load_n(&g_tex_frame, __ATOMIC_RELAXED)) pipe_seen(g_last_p); }   // (a linked pipeline never goes: vk_pipes_drop_idle takes whole ones)
         return g_last_p == (void *)1 ? VK_NULL_HANDLE : g_last_p; }
@@ -136,14 +139,15 @@ static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
     if (V.gpl && link_on && (link_ms || k->samples <= 1) && (fast_only ? gpl_eligible(k) : gpl_route(V.gpl, gpl_eligible(k), opt) == GPL_USE_FAST)) {
         VkPipeline f = nvn_hm_get(&g_gfast, k);
         if (!f) { f = gpl_link(k, layout); nvn_hm_put(&g_gfast, k, f ? f : (VkPipeline)1); if (f && opt == GPL_OPT_NONE) { gpl_opt_queue(k); opt = GPL_OPT_PENDING; }
-                  if (f) { g_sub_links++; g_pipe_new = 1; vk_ev(VKEV_LINK, k->key[0], k->key[1], (uint64_t)(uintptr_t)f); } }
+                  if (f) { g_sub_links++; g_pipe_new = 1; g_pipe_first = 2; vk_ev(VKEV_LINK, k->key[0], k->key[1], (uint64_t)(uintptr_t)f); } }
         else if (f != (void *)1 && opt == GPL_OPT_NONE) gpl_opt_queue(k);   // (its queue was full before)
         if (f && f != (void *)1) { g_last_k = *k; g_last_p = f; g_last_fast = 1; g_last_swaps = swaps; g_pipe_fast = 1; return f; }
     }   // (no linked pipeline: as without libraries)
     if (p == PIPE_PENDING) return VK_NULL_HANDLE;
     if (p) { g_last_k = *k; g_last_p = p; g_last_fast = 0; pipe_seen(p);
         if (V.gpl && p != (void *)1) { VkPipeline f = nvn_hm_get(&g_gfast, k);   // the whole pipeline's first draw where a linked one drew before (vk_device_lost's report)
-            if (f && f != (void *)1 && !nvn_hm_get(&g_gtook, k)) { nvn_hm_put(&g_gtook, k, (void *)1); g_sub_takeovers++; g_pipe_new = 2; vk_ev(VKEV_TAKEOVER, k->key[0], k->key[1], (uint64_t)(uintptr_t)p); } }
+            if (f && f != (void *)1 && !nvn_hm_get(&g_gtook, k)) { nvn_hm_put(&g_gtook, k, (void *)1); g_sub_takeovers++; g_pipe_new = 2; g_pipe_first = 3; vk_ev(VKEV_TAKEOVER, k->key[0], k->key[1], (uint64_t)(uintptr_t)p); } }
+        if (p != (void *)1 && !nvn_hm_get(&g_pipe_drawn, &p)) { nvn_hm_put(&g_pipe_drawn, &p, (void *)1); if (!g_pipe_first) g_pipe_first = 4; }
         return p == (void *)1 ? VK_NULL_HANDLE : p; }
     if (async_pipe(k)) return VK_NULL_HANDLE;
     vkshader_t *stg[3] = {S.sh[0], S.sh[1], S.sh[2]};
@@ -154,6 +158,7 @@ static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
     else { nvn_hm_put(&g_pipes, k, p); if (p != (void *)1) pipe_record(k); }
     pthread_mutex_unlock(&g_pipe_mu);
     pipe_seen(p);
+    if (p != (void *)1) { nvn_hm_put(&g_pipe_drawn, &p, (void *)1); g_pipe_first = 1; }
     return p == (void *)1 ? VK_NULL_HANDLE : p;
 }
 // Graphics pipelines not drawn with for idle presents under memory pressure go (the replay thread, at a submission's start: gfx_vk_core.c vk_mem_tick's trim), and one met again is built
@@ -170,7 +175,7 @@ uint64_t vk_pipes_drop_idle(uint64_t idle) {
             uintptr_t seen = (uintptr_t)nvn_hm_get(&g_pipe_seen, &p); if (seen < g_seen_since + 1) seen = g_seen_since + 1; if (now - seen < idle) continue;
             memcpy(&ks[c++], g_pipes.keys + (size_t)i * g_pipes.klen, sizeof(pkey)); }
         for (int j = 0; j < c; j++) { VkPipeline p = nvn_hm_get(&g_pipes, &ks[j]); if (!p || p == PIPE_PENDING || p == (void *)1) continue;
-            nvn_hm_del(&g_pipes, &ks[j]); nvn_hm_del(&g_pipe_seen, &p); vk_defer_free_pipeline(p); n++; }
+            nvn_hm_del(&g_pipes, &ks[j]); nvn_hm_del(&g_pipe_seen, &p); nvn_hm_del(&g_pipe_drawn, &p); vk_defer_free_pipeline(p); n++; }
     }
     g_last_p = VK_NULL_HANDLE;
     pthread_mutex_unlock(&g_pipe_mu);

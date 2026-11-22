@@ -448,6 +448,7 @@ static void dispatch(const p_dispatch *d) {
         pthread_mutex_lock(&g_cpipe_mu); VkPipeline had = nvn_hm_get(&g_cpipes, ck);
         if (had) { if (p != (void *)1) vkDestroyPipeline(V.dev, p, NULL); p = had; } else nvn_hm_put(&g_cpipes, ck, p);   // (compute_warm made it meanwhile)
         pthread_mutex_unlock(&g_cpipe_mu);
+        if (p != (void *)1) firstuse_note(0, 0, cs->key, ck[1], ck[2], 0, 5);
     }
     if (p == (void *)1) return;
     vk_img_barrier_all(cb);
