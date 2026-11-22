@@ -288,6 +288,7 @@ DM_VK_GPL_LTO	int		debug	?	gfx_vk_gpl.inc
 DM_VK_GPL_PREP_THREADS	int		debug	?	gfx_vk_gpl.inc	
 DM_VK_GPL_TRACE	int		debug	?	gfx_vk_gpl.inc	
 DM_VK_GS_SPLIT	bool	0	profile	live	gfx_vk_exec.c	1 = split geometry-shader draws (gfx_vk_gs_split.c)
+DM_VK_INT_OUT	bool		debug	start	gfx_vk_exec.c	0: float outputs into UINT / SINT colour targets are left float (no integer output variant)
 DM_VK_INVAL_KEEP	bool		profile	live	gfx_vk_exec.c	an invalidate-only barrier keeps the render pass open (SUPER ROBOT WARS T)
 DM_VK_LIN_BACK	bool		debug	live	gfx_vk_exec.c	what the GPU draws into a linear render target (NVN `LINEAR_RENDER_TARGET`) stays in the Vulkan image, as before (default: copied back to the texture's pool memory after the pass, so the CPU can read it; Super Mario Odyssey's ground fog reads its wave surface this way)
 DM_VK_LIST_AT	str		debug	?	gfx_vk_exec.c	DM_VK_LIST_AT=<present>: the pass list of every submission over two presents from there
