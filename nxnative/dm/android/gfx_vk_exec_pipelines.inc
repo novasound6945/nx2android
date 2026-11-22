@@ -286,6 +286,9 @@ static uint32_t vi_flip_of(const pkey *k, const vkshader_t *vs) {
 // the fragment shader's float outputs that meet a UINT (bits 8-15) / SINT (bits 16-23) colour target, as vk_shader_module's variant bits: those outputs are retyped to
 // the integer of the same bits (vk_spv_fragout.h; Maxwell writes the output register's bits, Vulkan leaves a float output into an integer attachment undefined). From the
 // attachments' formats, which are in the key already; 0 for a shader with no such output, so its module and its preparation's part are the ones as before.
+// When every attached float output meets a UINT target, the float outputs with no attachment are retyped too (no target reads them, so their type does not matter):
+// the variant is then every float output UINT, the one the preparation makes for a shader that writes integers (gfx_vk_gpl.inc, vk_spv_fragout.h spv_int_writer),
+// whatever the draw attaches of them (Luigi's Mansion 3: shaders with outputs 0-2 into its two-target R32Uint + RGBA8Uint G-buffer).
 // DM_VK_INT_OUT=0 (start-up, A/B): never
 static int color_int_kind(uint32_t f) {   // 1 UINT, 2 SINT, 0 otherwise
     switch ((VkFormat)f) {
@@ -298,12 +301,16 @@ static int color_int_kind(uint32_t f) {   // 1 UINT, 2 SINT, 0 otherwise
     default: return 0;
     }
 }
-static uint32_t int_out_bits(const pkey *k, const vkshader_t *fs) {
+static int int_out_on(void) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_INT_OUT"); on = !e || atoi(e) != 0; if (!on) VKLOG("DM_VK_INT_OUT=0: float outputs into integer targets as they are"); }
-    if (!on || !fs || k->raster_discard || !fs->fout_locs) return 0;
-    uint32_t u = 0, s = 0;
-    for (uint32_t i = 0; i < k->ncol && i < 8; i++) { int t = color_int_kind(k->cfmt[i]); if (t == 1) u |= 1u << i; else if (t == 2) s |= 1u << i; }
-    u &= fs->fout_locs; s &= fs->fout_locs;
+    return on;
+}
+static uint32_t int_out_bits(const pkey *k, const vkshader_t *fs) {
+    if (!int_out_on() || !fs || k->raster_discard || !fs->fout_locs) return 0;
+    uint32_t u = 0, s = 0, att = 0, fl = fs->fout_locs & 0xff;
+    for (uint32_t i = 0; i < k->ncol && i < 8; i++) { int t = color_int_kind(k->cfmt[i]); if (t == 1) u |= 1u << i; else if (t == 2) s |= 1u << i; if (k->cfmt[i]) att |= 1u << i; }
+    u &= fl; s &= fl;
+    if (u && !s && !(fl & att & ~u)) u = fl;   // (every attached float output UINT: the unattached ones too)
     return u << 8 | s << 16;
 }
 static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshader_t *const stg_in[3]) {

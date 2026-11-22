@@ -9,7 +9,9 @@
 // and takes over once ready. A part the preparation could not know (integer-texel views, a vertex shader's outputs added for its fragment shader, the fragment
 // depth and dual-source variants, an alpha test other than GREATER, a geometry shader) is made at that draw: one shader, not a whole pipeline. No draw is left out for
 // its pipeline. The alpha test's reference is a push constant (gfx_vk_shader.c spv_alpha_test), so its variant's part does not depend on it: the preparation makes the
-// GREATER one of every fragment shader that takes it (vk_shader_alpha_ok; the function Dark Souls Remastered uses), others are made at their first draw.
+// GREATER one of every fragment shader that takes it (vk_shader_alpha_ok; the function Dark Souls Remastered uses), others are made at their first draw. A fragment
+// shader that writes its float outputs as integers (vk_spv_fragout.h spv_int_writer: Luigi's Mansion 3's ~1,400 G-buffer shaders) also gets its integer output part,
+// every float output UINT (the variant int_out_bits gives a draw into all-UINT targets), so its first G-buffer draw compiles nothing.
 // Not for rasterizer-discard and transform-feedback draws (rare; as before), nor DM_VK_SPV_ALT / DM_VK_X_FLAT_VS pipelines (debugging).
 #include <sys/stat.h>
 VkPipelineLayout vk_pipeline_layout_lib(VkDescriptorSetLayout sets[5], int nsets);
@@ -24,9 +26,10 @@ typedef struct { uint32_t ncol, cfmt[8], dfmt, samples, a2c, blend_en, logic_en,
 static nvn_hmap g_gvi = {.klen = sizeof(gvikey)}, g_gpr = {.klen = sizeof(gprkey)}, g_gfs = {.klen = sizeof(gfskey)}, g_gfo = {.klen = sizeof(gfokey)};
 static pthread_mutex_t g_glib_mu = PTHREAD_MUTEX_INITIALIZER;   // the parts' tables and the statistics: the replay, preparation, warm-up and background threads
 // link: a linked pipeline's whole time at its draw, the parts made there included; link_only: the link call alone; part: a shader part made at a draw; parts_at: those
-// that were alpha test variants (fragment parts with a function in fd); prep_at / ns_prep_at / ns_prep_all: the preparation's alpha test parts and their time (summed over threads)
-static struct { gpl_stat link, link_only, part, opt; uint64_t links, parts[2], parts_at, link_fail, part_fail, queued, qfull, opt_fail; uint64_t ns_part, ns_link, n_old, ns_old;
-                uint64_t prep_at, prep_at_skip, ns_prep_at, ns_prep_all; } g_gst;   // (under g_glib_mu)
+// that were alpha test variants (fragment parts with a function in fd), parts_int integer output variants (fd bits 8-23); prep_at / ns_prep_at / ns_prep_all: the
+// preparation's alpha test parts and their time (summed over threads); prep_int / ns_prep_int: its integer output parts (gpl_part_i), int_writers: the shaders that take one
+static struct { gpl_stat link, link_only, part, opt; uint64_t links, parts[2], parts_at, parts_int, link_fail, part_fail, queued, qfull, opt_fail; uint64_t ns_part, ns_link, n_old, ns_old;
+                uint64_t prep_at, prep_at_skip, ns_prep_at, ns_prep_all, prep_int, ns_prep_int, int_writers; } g_gst;   // (under g_glib_mu)
 
 // DM_VK_GPL_LTO=1 (read once at startup: the parts must all be made the same way): the parts keep their link-time optimization information and a draw links them
 // with link-time optimization, a pipeline as good as the whole one, never the fast link's (diagnosis: the fast-linked pipelines' colour flashes on Turnip)
@@ -168,7 +171,7 @@ static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout) {
     uint32_t xo0 = (gs ? gs->in_locs : fs ? fs->in_locs : 0) & ~vs->out_locs, xo2 = gs ? (fs ? fs->in_locs : 0) & ~gs->out_locs : 0;   // as build_pipeline
     gprkey pk = gpl_pr_key(vs, gs, k->um[0], k->im[0], xo0, k->um[2], k->im[2], xo2, gpl_rast_key(V.gpl_eds3, k->depth_clamp, k->mode, k->clip_neg1, V.has_depth_clip_ctl));
     pk.vi0 = vi_flip_of(k, vs);   // (the preparation's parts have none: a draw that needs a flip makes its part)
-    gfskey fk = gpl_fs_key(fs, k->um[1], k->im[1], (k->fdz ? 1 : 0) | (k->dual ? 2 : 0) | (k->atest & 15) << 4 | int_out_bits(k, fs), k->samples, k->a2c);   // (integer targets: their part is made at the draw)
+    gfskey fk = gpl_fs_key(fs, k->um[1], k->im[1], (k->fdz ? 1 : 0) | (k->dual ? 2 : 0) | (k->atest & 15) << 4 | int_out_bits(k, fs), k->samples, k->a2c);   // (integer targets: the preparation's part when every float output is UINT and the shader writes integers)
     // DM_VK_GPL_FSMS=1 (live, diagnosis of the colour flashes while a linked pipeline draws): every fragment part of a multisampled (or alpha-to-coverage) draw takes
     // the draw's multisample state, as the whole pipeline's fragment shader does, not only the per-sample shaders (gpl_fs_ms). Valid either way (VUID-...-06633/06635:
     // the same state as the output part's); those parts are made at their first draw (one shader each), the preparation's stay for single-sampled draws
@@ -189,7 +192,7 @@ static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout) {
     pthread_mutex_lock(&g_glib_mu);
     if (p) { g_gst.links++; gpl_stat_add(&g_gst.link, t2 - t0); gpl_stat_add(&g_gst.link_only, t2 - t1); } else g_gst.link_fail++;
     g_gst.ns_link += t2 - t1; g_gst.ns_part += t1 - t0;
-    if (mpr) { g_gst.parts[0]++; gpl_stat_add(&g_gst.part, mpr); } if (mfs) { g_gst.parts[1]++; gpl_stat_add(&g_gst.part, mfs); if (fk.fd >> 4 & 15) g_gst.parts_at++; }
+    if (mpr) { g_gst.parts[0]++; gpl_stat_add(&g_gst.part, mpr); } if (mfs) { g_gst.parts[1]++; gpl_stat_add(&g_gst.part, mfs); if (fk.fd >> 4 & 15) g_gst.parts_at++; if (fk.fd >> 8) g_gst.parts_int++; }
     uint64_t nl = g_gst.links; pthread_mutex_unlock(&g_glib_mu);
     if (mpr || mfs) { static int n; if (n++ < 40) VKLOG("GPL: shader part made at a draw: %s%s %.2f ms (vertex %016llx views %#llx/%#llx outputs added %#x geometry %016llx; fragment %016llx views %#llx/%#llx variant %#x ms %#x)",
                                                      mpr ? "pre-rasterization" : "", mfs ? (mpr ? " + fragment" : "fragment") : "", (mpr + mfs) / 1e6, (unsigned long long)pk.vs, (unsigned long long)pk.um0, (unsigned long long)pk.im0, pk.xo0,
@@ -259,21 +262,23 @@ void vk_gpl_report(void) {   // gfx_vk_present.c, every 600 presents
     pthread_mutex_lock(&g_glib_mu); typeof(g_gst) s = g_gst; pthread_mutex_unlock(&g_glib_mu);
     gpl_stat_pct(&s.link, &l50, &l95, &lmx); gpl_stat_pct(&s.link_only, &k50, &k95, &kmx); gpl_stat_pct(&s.part, &p50, &p95, &pmx); gpl_stat_pct(&s.opt, &o50, &o95, &omx);
     VKLOG("GPL: %llu pipelines linked at draws (ms p50 %.2f p95 %.2f max %.2f, parts made there included; the link alone ms p50 %.2f p95 %.2f max %.2f), %llu failed; "
-          "shader parts made at draws: %llu pre-rasterization + %llu fragment, %llu of them alpha test variants (ms p50 %.2f p95 %.2f max %.2f), %llu failed; "
+          "shader parts made at draws: %llu pre-rasterization + %llu fragment, %llu of them alpha test variants and %llu integer output variants (ms p50 %.2f p95 %.2f max %.2f), %llu failed; "
           "whole pipelines in the background: %llu queued (%llu queue full), %llu took over (ms p50 %.1f p95 %.1f max %.1f), %llu failed; whole pipelines built at draws %llu (%.1f ms); draws left out for no pipeline %llu",
-          (unsigned long long)s.links, l50, l95, lmx, k50, k95, kmx, (unsigned long long)s.link_fail, (unsigned long long)s.parts[0], (unsigned long long)s.parts[1], (unsigned long long)s.parts_at, p50, p95, pmx, (unsigned long long)s.part_fail,
+          (unsigned long long)s.links, l50, l95, lmx, k50, k95, kmx, (unsigned long long)s.link_fail, (unsigned long long)s.parts[0], (unsigned long long)s.parts[1], (unsigned long long)s.parts_at, (unsigned long long)s.parts_int, p50, p95, pmx, (unsigned long long)s.part_fail,
           (unsigned long long)s.queued, (unsigned long long)s.qfull, (unsigned long long)atomic_load(&g_gpl_swaps) - s.opt_fail, o50, o95, omx, (unsigned long long)s.opt_fail, (unsigned long long)s.n_old, s.ns_old / 1e6,
           (unsigned long long)g_vkst.skip_pipe);
 }
 
 // ---- the preparation (before the game: datasync_android.c's screen) and the warm-up (a later start, in the background) ----
 // Every vertex shader's pre-rasterization part (a second one with depth clip -1..1 when that state cannot be dynamic) and every fragment shader's part, in their
-// variant without views, outputs added, fragment depth or dual source, without the alpha test and (for those that take it: vk_shader_alpha_ok) with the GREATER one. The pipeline cache keeps the driver's compiles (saved every 15 s, so an app
+// variant without views, outputs added, fragment depth or dual source, without the alpha test and (for those that take it: vk_shader_alpha_ok) with the GREATER one, and
+// (for those that write integers: vkshader_t int_writer) the integer output one without the alpha test. The pipeline cache keeps the driver's compiles (saved every 15 s, so an app
 // stopped midway keeps what it made: the next start makes the rest and the made ones come from the cache); DM_ROOT/vk_gpl.id marks a finished preparation of this
 // bundle on this driver with these keys (vk_gpl.h gpl_id). With the mark, a start makes the parts again from the cache on two threads below the game's (the warm-up),
 // and a draw that comes first makes its part at once (a cache hit). DM_VK_GPL_PREP_THREADS=n (start-up): the preparation's threads (default: the cores but one, 2-8)
 static uint64_t *g_gk[2]; static int g_gkn[2], g_gnr; static _Atomic int g_gi_next, g_gi_done, g_gi_made; static gpl_stat g_gprep;
-static int g_gtotal(void) { return g_gkn[0] * g_gnr + 2 * g_gkn[1]; }   // pre-rasterization parts, fragment parts, their GREATER alpha test variants (the last: a shader without one is skipped)
+static int g_gtotal(void) { return g_gkn[0] * g_gnr + 3 * g_gkn[1]; }   // pre-rasterization parts, fragment parts, their GREATER alpha test variants, their integer output variants (the last two: a shader without one is skipped)
+static int g_gint0(void) { return g_gkn[0] * g_gnr + 2 * g_gkn[1]; }    // the first of the integer output variants (a mark from before them: the preparation of those alone)
 static void gpl_keys_load(void) {
     if (g_gk[0]) return;
     uint32_t n = 0; vk_bundle_hash(&n); g_gnr = gpl_rast_variants(V.gpl_eds3, V.has_depth_clip_ctl);
@@ -283,10 +288,14 @@ static void gpl_part_i(int i) {
     uint64_t made = 0;
     if (i < g_gkn[0] * g_gnr) { vkshader_t *vs = vk_shader(g_gk[0][i / g_gnr], 0); if (!vs) return;
         gprkey pk = gpl_pr_key(vs, NULL, 0, 0, 0, 0, 0, 0, gpl_rast_key(V.gpl_eds3, 0, 2, (uint32_t)(i % g_gnr), V.has_depth_clip_ctl)); gpl_part(0, &pk, vs, NULL, &made); }
-    else { int j = i - g_gkn[0] * g_gnr, at = j >= g_gkn[1]; vkshader_t *fs = vk_shader(g_gk[1][at ? j - g_gkn[1] : j], 1); if (!fs) return;
+    else { int j = i - g_gkn[0] * g_gnr, blk = j / g_gkn[1], at = blk == 1, iv = blk == 2; vkshader_t *fs = vk_shader(g_gk[1][j % g_gkn[1]], 1); if (!fs) return;
         if (at && !vk_shader_alpha_ok(fs)) { pthread_mutex_lock(&g_glib_mu); g_gst.prep_at_skip++; pthread_mutex_unlock(&g_glib_mu); return; }   // (no float colour 0: no variant, as at a draw)
-        gfskey fk = gpl_fs_key(fs, 0, 0, at ? NVN_ALPHA_FUNC_GREATER << 4 : 0, 1, 0); gpl_part(1, &fk, fs, NULL, &made);
-        if (at && made) { pthread_mutex_lock(&g_glib_mu); g_gst.prep_at++; g_gst.ns_prep_at += made; pthread_mutex_unlock(&g_glib_mu); } }
+        uint32_t fl = fs->fout_locs & 0xff;
+        if (iv && !(fs->int_writer && fl && int_out_on())) return;   // (no integer writes: no integer target expected)
+        if (iv) { pthread_mutex_lock(&g_glib_mu); g_gst.int_writers++; pthread_mutex_unlock(&g_glib_mu); }
+        gfskey fk = gpl_fs_key(fs, 0, 0, at ? NVN_ALPHA_FUNC_GREATER << 4 : iv ? fl << 8 : 0, 1, 0); gpl_part(1, &fk, fs, NULL, &made);
+        if (at && made) { pthread_mutex_lock(&g_glib_mu); g_gst.prep_at++; g_gst.ns_prep_at += made; pthread_mutex_unlock(&g_glib_mu); }
+        if (iv && made) { pthread_mutex_lock(&g_glib_mu); g_gst.prep_int++; g_gst.ns_prep_int += made; pthread_mutex_unlock(&g_glib_mu); } }
     if (made) { atomic_fetch_add(&g_gi_made, 1); pthread_mutex_lock(&g_glib_mu); gpl_stat_add(&g_gprep, made); g_gst.ns_prep_all += made; pthread_mutex_unlock(&g_glib_mu); }
 }
 static void *gpl_prep_thread(void *arg) {
@@ -296,12 +305,14 @@ static void *gpl_prep_thread(void *arg) {
 }
 static void gpl_log_done(const char *what, uint64_t ns, int nt) {
     double p50, p95, mx; pthread_mutex_lock(&g_glib_mu); gpl_stat_pct(&g_gprep, &p50, &p95, &mx); pthread_mutex_unlock(&g_glib_mu);
-    pthread_mutex_lock(&g_glib_mu); uint64_t at = g_gst.prep_at, ats = g_gst.prep_at_skip, nat = g_gst.ns_prep_at, nall = g_gst.ns_prep_all; pthread_mutex_unlock(&g_glib_mu);
+    pthread_mutex_lock(&g_glib_mu); uint64_t at = g_gst.prep_at, ats = g_gst.prep_at_skip, nat = g_gst.ns_prep_at, nall = g_gst.ns_prep_all, ni = g_gst.prep_int, iw = g_gst.int_writers, nsi = g_gst.ns_prep_int; pthread_mutex_unlock(&g_glib_mu);
     double share = nall ? (double)nat / (double)nall : 0;
     VKLOG("GPL: %s: %d vertex shaders (x%d) + %d fragment shaders (+ their GREATER alpha test variants) → %d shader parts made in %.1f s on %d threads (per part ms p50 %.2f p95 %.2f max %.2f); pipeline libraries failed %llu",
           what, g_gkn[0], g_gnr, g_gkn[1], atomic_load(&g_gi_made), ns / 1e9, nt, p50, p95, mx, (unsigned long long)g_gst.part_fail);
     VKLOG("GPL: %s: alpha test (GREATER) fragment parts %llu made, %llu shaders without a float colour 0 skipped; their time %.1f s of %.1f s summed over threads (%.0f%%: about %.1f s of the %.1f s)",
           what, (unsigned long long)at, (unsigned long long)ats, nat / 1e9, nall / 1e9, share * 100, share * ns / 1e9, ns / 1e9);
+    if (iw) VKLOG("GPL: %s: %llu fragment shaders write integers: their integer output parts %llu made, %.1f s summed over threads (%.0f%%)", what, (unsigned long long)iw, (unsigned long long)ni,
+                  nsi / 1e9, nall ? 100.0 * (double)nsi / (double)nall : 0);
 }
 static void *gpl_warm_main(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk gpl warm"); uint64_t t0 = tick(); pthread_t t[2]; int nt = 0;
@@ -311,7 +322,7 @@ static void *gpl_warm_main(void *arg) {
     return NULL;
 }
 static void gpl_id_now(gpl_id *id) {
-    memset(id, 0, sizeof *id); id->magic = GPL_ID_MAGIC; id->key_ver = GPL_KEY_VER; id->vendor = V.props.vendorID; id->device = V.props.deviceID; id->driver = V.props.driverVersion;
+    memset(id, 0, sizeof *id); id->magic = GPL_ID_MAGIC; id->key_ver = GPL_KEY_VER; id->int_ver = GPL_INT_VER; id->vendor = V.props.vendorID; id->device = V.props.deviceID; id->driver = V.props.driverVersion;
     id->eds3 = (uint32_t)V.gpl_eds3; id->sg_pin = V.sg_pin_stages ? V.sg_pin.requiredSubgroupSize : 0; memcpy(id->uuid, V.props.pipelineCacheUUID, 16);
     uint32_t n = 0; id->bundle = vk_bundle_hash(&n); id->nshaders = n;
 }
@@ -329,6 +340,27 @@ int vk_gpl_prepare(void (*note)(void *u, int done, int total), void *u) {
     snprintf(path, sizeof path, "%s/vk_gpl.id", root);
     int had = gpl_id_read(path, &have);
     gpl_keys_load();
+    long nc = sysconf(_SC_NPROCESSORS_ONLN); int nt = nc > 1 ? (int)nc - 1 : 1; if (nt < 2) nt = 2; if (nt > 8) nt = 8;
+    if ((e = getenv("DM_VK_GPL_PREP_THREADS")) && atoi(e) > 0) nt = atoi(e) > 16 ? 16 : atoi(e);
+    if (had && gpl_id_up_to_date(&want, &have) && have.int_ver != GPL_INT_VER && g_gkn[1]) {
+        // a mark from before the integer output parts: those alone, on the preparation's threads and screen (a bundle without integer writers: its shaders read, nothing made)
+        uint64_t t1 = tick(); int i0 = g_gint0(), total = g_gtotal() - i0; atomic_store(&g_gi_next, i0); atomic_store(&g_gi_done, i0);
+        pthread_t t[16]; int ntr = 0;
+        for (int i = 0; i < nt; i++) if (!pthread_create(&t[ntr], NULL, gpl_prep_thread, NULL)) ntr++;
+        if (!ntr) gpl_prep_thread(NULL);
+        uint64_t saved = t1;
+        for (;;) { int d = atomic_load(&g_gi_done) - i0; if (note) note(u, d, total); if (d >= total) break;
+            usleep(100000); if (tick() - saved > 15000000000ull) { vk_pipeline_cache_save(); saved = tick(); } }
+        for (int i = 0; i < ntr; i++) pthread_join(t[i], NULL);
+        pthread_mutex_lock(&g_glib_mu); uint64_t iw = g_gst.int_writers, ni = g_gst.prep_int, fail = g_gst.part_fail; pthread_mutex_unlock(&g_glib_mu);
+        if (ni) vk_pipeline_cache_save();
+        have.int_ver = GPL_INT_VER; if (!gpl_id_write(path, &have)) VKLOG("[RED] GPL: the reuse mark %s could not be written: the next start looks for integer writers again", path);
+        VKLOG("GPL: a mark from before the integer output parts: %llu of %d fragment shaders write integers, %llu parts made in %.1f s on %d threads (pipeline libraries failed %llu)",
+              (unsigned long long)iw, g_gkn[1], (unsigned long long)ni, (tick() - t1) / 1e9, ntr ? ntr : 1, (unsigned long long)fail);
+        pthread_mutex_lock(&g_glib_mu); g_gst.int_writers = g_gst.prep_int = g_gst.ns_prep_int = g_gst.ns_prep_all = 0; memset(&g_gprep, 0, sizeof g_gprep); pthread_mutex_unlock(&g_glib_mu);   // (the warm-up's own)
+        atomic_store(&g_gi_next, 0); atomic_store(&g_gi_done, 0); atomic_store(&g_gi_made, 0);
+        if (ni) { pthread_t w; if (!pthread_create(&w, NULL, gpl_warm_main, NULL)) pthread_detach(w); return 1; }
+    }
     if (had && gpl_id_up_to_date(&want, &have)) {
         VKLOG("GPL: shader parts of this bundle (%u shaders, %016llx) made before on this driver: no preparation; made again from the pipeline cache in the background", want.nshaders, (unsigned long long)want.bundle);
         pthread_t t; if (!pthread_create(&t, NULL, gpl_warm_main, NULL)) pthread_detach(t);
@@ -336,8 +368,6 @@ int vk_gpl_prepare(void (*note)(void *u, int done, int total), void *u) {
     VKLOG("GPL: preparing the shader parts: %s", !had ? "first start (no mark)" : have.magic != GPL_ID_MAGIC || have.key_ver != want.key_ver ? "the parts' key changed"
           : have.bundle != want.bundle || have.nshaders != want.nshaders ? "the shader bundle changed" : have.vendor != want.vendor || have.device != want.device || have.driver != want.driver || memcmp(have.uuid, want.uuid, 16) ? "the driver changed"
           : !gpl_id_same(&want, &have) ? "the dynamic states or the subgroup size changed" : "the last one did not finish");
-    long nc = sysconf(_SC_NPROCESSORS_ONLN); int nt = nc > 1 ? (int)nc - 1 : 1; if (nt < 2) nt = 2; if (nt > 8) nt = 8;
-    if ((e = getenv("DM_VK_GPL_PREP_THREADS")) && atoi(e) > 0) nt = atoi(e) > 16 ? 16 : atoi(e);
     pthread_t t[16]; int ntr = 0; uint64_t t1 = tick();
     for (int i = 0; i < nt; i++) if (!pthread_create(&t[ntr], NULL, gpl_prep_thread, NULL)) ntr++;
     if (!ntr) gpl_prep_thread(NULL);

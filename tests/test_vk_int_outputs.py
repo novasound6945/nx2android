@@ -1,4 +1,5 @@
-"""The integer colour target variant (nxnative/dm/android/vk_spv_fragout.h): float outputs into UINT / SINT targets retyped, stores and loads cast, spirv-val clean."""
+"""The integer colour target variant (nxnative/dm/android/vk_spv_fragout.h): float outputs into UINT / SINT targets retyped, stores and loads cast, spirv-val clean;
+and spv_int_writer, which picks the shaders whose integer output part the shader preparation makes (written from integer bits, or nothing but constants)."""
 import re, shutil, subprocess, tempfile, unittest
 from pathlib import Path
 
@@ -34,6 +35,26 @@ void main() {
 }
 '''
 
+WRITER = r'''
+#include <stdio.h>
+#include "vk_spv_fragout.h"
+int main(int argc, char **argv) {   // in.spv: prints spv_int_writer
+    (void)spv_float_out_locs; (void)spv_int_outputs;   // (the header's other functions, unused here)
+    if (argc != 2) return 1;
+    FILE *f = fopen(argv[1], "rb"); if (!f) return 1;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    uint32_t *w = malloc((size_t)n); if (fread(w, 1, (size_t)n, f) != (size_t)n) return 1; fclose(f);
+    printf("%d\n", spv_int_writer(w, (uint32_t)(n / 4))); free(w); return 0;
+}
+'''
+WRITERS = {   # GLSL body → spv_int_writer
+    'o0.x = uintBitsToFloat(floatBitsToUint(v.x) | 1u); o0.yzw = v.yzw;': 1,   # one component from integer bits
+    'o0 = uintBitsToFloat(uvec4(floatBitsToUint(v.x), 2u, 3u, 4u));': 1,        # the whole vector
+    'o0 = vec4(0.0); o1 = vec4(1.0, 0.0, 0.0, 1.0);': 1,                      # nothing but constants (a clear)
+    'o0 = v; o1 = v * 2.0;': 0,                                                # float colour
+    'o0 = vec4(0.0); o1 = v;': 0,                                              # a constant and a float
+}
+
 def need(*tools): return all(shutil.which(t) for t in tools)
 
 @unittest.skipUnless(need('cc', 'glslc', 'spirv-val', 'spirv-dis'), 'a host C compiler, glslc and SPIRV-Tools are required')
@@ -44,6 +65,8 @@ class IntOutputs(unittest.TestCase):
         (p / 'h.c').write_text(HARNESS, encoding='utf-8'); (p / 'f.frag').write_text(FRAG, encoding='utf-8')
         subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-I' + str(ROOT / 'nxnative/dm/android'), str(p / 'h.c'), '-o', str(p / 'h')], check=True)
         subprocess.run(['glslc', '--target-env=vulkan1.1', '-O0', str(p / 'f.frag'), '-o', str(p / 'f.spv')], check=True)
+        (p / 'w.c').write_text(WRITER, encoding='utf-8')
+        subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-I' + str(ROOT / 'nxnative/dm/android'), str(p / 'w.c'), '-o', str(p / 'w')], check=True)
 
     @classmethod
     def tearDownClass(cls): cls.tmp.cleanup()
@@ -85,5 +108,15 @@ class IntOutputs(unittest.TestCase):
         before, _ = self.outputs(self.p / 'f.spv'); after, _ = self.outputs(out)
         self.assertEqual(after[2], 'OpTypeVector (OpTypeInt 32 1) 4')
         self.assertEqual({l: t for l, t in after.items() if l != 2}, {l: t for l, t in before.items() if l != 2})
+
+    def test_int_writer(self):
+        for i, (body, want) in enumerate(WRITERS.items()):
+            src = self.p / f'w{i}.frag'; spv = self.p / f'w{i}.spv'
+            src.write_text('#version 450\nlayout(location = 0) in vec4 v;\nlayout(location = 0) out vec4 o0;\nlayout(location = 1) out vec4 o1;\nvoid main() { ' + body + ' }\n', encoding='utf-8')
+            subprocess.run(['glslc', '--target-env=vulkan1.1', '-O0', str(src), '-o', str(spv)], check=True)
+            r = subprocess.run([str(self.p / 'w'), str(spv)], capture_output=True, text=True, check=True)
+            self.assertEqual(r.stdout.strip(), str(want), body)
+        r = subprocess.run([str(self.p / 'w'), str(self.p / 'f.spv')], capture_output=True, text=True, check=True)
+        self.assertEqual(r.stdout.strip(), '1')   # FRAG: o0 from integer bits
 
 if __name__ == '__main__': unittest.main()

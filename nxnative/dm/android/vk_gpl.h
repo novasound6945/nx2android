@@ -15,8 +15,12 @@ typedef struct {
     uint32_t magic, key_ver, vendor, device, driver, eds3, sg_pin, nshaders;   // eds3: the dynamic states the parts were made with (V.gpl_eds3); sg_pin: DM_VK_SUBGROUP_PIN's size (0 none)
     uint8_t uuid[16];      // pipelineCacheUUID
     uint64_t bundle;       // gpl_hash64 of the shader bundle file
-    uint32_t complete, spare;   // complete: every part of the bundle was made (an interrupted preparation leaves 0: the next start prepares again, the cache keeps what was made)
+    uint32_t complete, int_ver;   // complete: every part of the bundle was made (an interrupted preparation leaves 0: the next start prepares again, the cache keeps what was made)
+                                  // int_ver: GPL_INT_VER when the integer output parts were made too (0: a mark from before them, which then has those made alone)
 } gpl_id;
+// The integer output parts (gfx_vk_gpl.inc, vk_spv_fragout.h spv_int_writer): outside the key, so a mark from before them stays good for a bundle without such shaders
+// (every game but a few: no preparation again); the start finds them and makes them alone, then marks it
+#define GPL_INT_VER 1u
 _Static_assert(sizeof(gpl_id) == 64, "gpl_id layout");
 static inline uint64_t gpl_hash64(const void *p, size_t n) {   // FNV-1a over 8-byte words, then the tail (fast enough for a 25 MB bundle at each start: ~10 ms)
     const uint8_t *b = (const uint8_t *)p; uint64_t h = 1469598103934665603ull ^ (uint64_t)n; size_t i = 0;

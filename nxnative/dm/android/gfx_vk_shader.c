@@ -400,7 +400,7 @@ static vkshader_t *vk_shader_q(uint64_t key, int stage, int quiet) {
             if (w2) { free(w); w = w2; nw = n2; VKLOG("shader %016llx: %u discard%s taken out (DM_VK_FS_NOKILL)", (unsigned long long)key, k2, k2 == 1 ? "" : "s"); }
             else VKLOG("[RED] shader %016llx: DM_VK_FS_NOKILL found no discard it can take out: left as it is", (unsigned long long)key); } }
     spv_io_locs(w, nw, &s->in_locs, &s->out_locs);
-    if (stage == 1) s->fout_locs = spv_float_out_locs(w, nw);   // the float outputs an integer target retypes (vk_spv_fragout.h)
+    if (stage == 1) { s->fout_locs = spv_float_out_locs(w, nw); s->int_writer = spv_int_writer(w, nw); }   // the float outputs an integer target retypes, and whether it writes integers there (vk_spv_fragout.h)
     VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, (size_t)nw * 4, w};
     VkResult vr = vkCreateShaderModule(V.dev, &ci, NULL, &s->mod); s->spv = w; s->nspv = nw;
     if (!vr) { __atomic_fetch_add(&g_spv_n, 1, __ATOMIC_RELAXED); __atomic_fetch_add(&g_spv_bytes, (uint64_t)nw * 4, __ATOMIC_RELAXED); }

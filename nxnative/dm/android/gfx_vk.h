@@ -198,6 +198,7 @@ typedef struct {
     int depth_repl;                     // a fragment shader that writes gl_FragDepth (DepthReplacing / DepthGreater / DepthLess)
     uint32_t in_locs, out_locs;         // the vec4 (or per-vertex vec4) inputs and outputs it declares, by location
     uint32_t fout_locs;                 // a fragment shader's 32-bit float outputs, by location (vk_spv_fragout.h spv_float_out_locs: an integer target takes their integer variant)
+    int int_writer;                     // a fragment shader that writes its float outputs as integers (vk_spv_fragout.h spv_int_writer): the preparation makes its integer output part
     int setmemo;                        // gfx_vk_exec.c stage_set: 1 its set may be memoized per stage, 2 not (it reads handles or addresses from uniform buffer memory), 0 not known yet
     int cpuready;                       // gfx_vk_exec.c shader_cpu_ready: 1 it reads nothing from uniform buffer memory on the CPU, 2 it does, 0 not known yet
     int wmem;                           // gfx_vk_exec.c shader_wmem: 1 it writes memory (stores to storage buffers or images, atomics), 2 not, 0 not known yet

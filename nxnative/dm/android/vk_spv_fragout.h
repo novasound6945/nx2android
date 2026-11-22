@@ -104,3 +104,40 @@ static uint32_t *spv_int_outputs(const uint32_t *w, uint32_t nw, uint32_t umask,
 fail:
     free(ty); free(loc); free(chg); free(dec); free(globals); free(out); return NULL;
 }
+// The float outputs a fragment shader writes as integers, as dmsh_build.py fs_uint finds them for Metal's integer entry point: an output stored from integer bits (the
+// value of an OpBitcast, or a composite / copy made with one), or a shader whose every store into its float outputs is a constant (a clear drawn into an integer target).
+// The preparation (gfx_vk_gpl.inc vk_gpl_prepare) makes such a shader's integer output part before the game, every float output UINT (fout_locs << 8): the variant a
+// draw into all-UINT targets takes (gfx_vk_exec_pipelines.inc int_out_bits). 1 when it is one, 0 otherwise or when the module is not as expected
+static inline int spv_int_writer(const uint32_t *w, uint32_t nw) {
+    if (nw < 5 || !w[3] || w[3] > nw * 4) return 0;
+    uint32_t bound = w[3]; int r = 0, nst = 0, allc = 1;
+    spv_otype *ty = calloc(bound, sizeof *ty); uint32_t *loc = calloc(bound, 4); uint8_t *k = calloc(bound, 1);   // k: 1 a float output (or a pointer into one), 2 integer bits, 3 a constant
+    if (!ty || !loc || !k) goto done;
+    for (uint32_t i = 5; i < nw;) { uint32_t n = w[i] >> 16, op = w[i] & 65535;
+        if (!n || i + n > nw) goto done;
+        if (op == 54) break;
+        if ((op == 21 || op == 23 || op == 32) && n == 4 && w[i + 1] < bound) ty[w[i + 1]] = (spv_otype){op, w[i + 2], w[i + 3]};
+        if (op == 22 && n >= 3 && w[i + 1] < bound) ty[w[i + 1]] = (spv_otype){22, w[i + 2], 0};
+        if (op == 71 && n == 4 && w[i + 2] == 30 && w[i + 1] < bound && w[i + 3] < 8) loc[w[i + 1]] = 1u << w[i + 3];   // Location (a colour output)
+        i += n; }
+    for (uint32_t i = 5; i < nw;) { uint32_t n = w[i] >> 16, op = w[i] & 65535;
+        if (!n || i + n > nw) goto done;
+        if (op == 59 && n >= 4 && w[i + 3] == 3 && w[i + 2] < bound && loc[w[i + 2]] && w[i + 1] < bound && ty[w[i + 1]].op == 32 && ty[w[i + 1]].b < bound) {   // a float Output
+            spv_otype t = ty[ty[w[i + 1]].b]; if (t.op == 23 && t.a < bound) t = ty[t.a];
+            if (t.op == 22 && t.a == 32) k[w[i + 2]] = 1; }
+        else if ((op == 65 || op == 66) && n >= 4 && w[i + 2] < bound && w[i + 3] < bound && k[w[i + 3]] == 1) k[w[i + 2]] = 1;   // an access chain into one
+        else if (op == 124 && n == 4 && w[i + 2] < bound) k[w[i + 2]] = 2;   // OpBitcast
+        else if ((op == 43 || op == 44 || op == 46) && n >= 3 && w[i + 2] < bound) k[w[i + 2]] = 3;   // OpConstant, OpConstantComposite, OpConstantNull
+        else if ((op == 80 || op == 82 || op == 83 || op == 79) && n >= 4 && w[i + 2] < bound) {   // OpCompositeConstruct / Insert, OpCopyObject, OpVectorShuffle: from integer bits when a part is
+            int b = 0; uint32_t e = op == 79 || op == 82 ? 5 : n;   // (the shuffle's and the insert's literals after their two operands)
+            for (uint32_t j = 3; j < e && j < n; j++) if (w[i + j] < bound && k[w[i + j]] == 2) b = 1;
+            if (b) k[w[i + 2]] = 2; }
+        else if (op == 62 && n >= 3 && w[i + 1] < bound && k[w[i + 1]] == 1) {   // OpStore into a float output
+            uint32_t v = w[i + 2] < bound ? k[w[i + 2]] : 0; nst++;
+            if (v == 2) { r = 1; break; }
+            if (v != 3) allc = 0; }
+        i += n; }
+    if (!r && nst && allc) r = 1;
+done:
+    free(ty); free(loc); free(k); return r;
+}
