@@ -10,6 +10,7 @@ program_id	010015100B514000
 # ---- App ----
 # Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
 name	Super Mario Bros. Wonder
+name_ko	슈퍼 마리오브라더스 원더
 ipa	SMBWMobile.ipa
 app_category	public.app-category.action-games
 
