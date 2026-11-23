@@ -306,12 +306,17 @@ int nvn_sparse_pool(const void *pool); uint64_t nvn_sparse_gen(void); uint64_t n
 int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp); void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n);
 static int sparse_tex(const tex_t *t) { return t->pool && nvn_sparse_pool(t->pool); }
 uint64_t g_pkg_n, g_pkg_bytes, g_pkg_ns;   // packaged texture uploads: count, bytes, CPU time (the replay's per-frame line)
+uint64_t g_pkg_part_ns[5];   // of g_pkg_ns: write protection, hash, scratch memory, deswizzle (or linear copy), BC decode (DM_VK_PROF_SLOW's slow replay line)
+static uint64_t pkg_now(void) { struct timespec a; clock_gettime(CLOCK_MONOTONIC, &a); return (uint64_t)a.tv_sec * 1000000000ull + (uint64_t)a.tv_nsec; }
 static void pkg_upload_(vkimg_t *im, const tex_t *t, const vkfmt_t *f);
-static uint64_t pkg_hash(const uint8_t *m, size_t n) {   // FNV-1a over 8-byte words
-    uint64_t h = 1469598103934665603ull; size_t i = 0;
-    for (; i + 8 <= n; i += 8) { uint64_t w; memcpy(&w, m + i, 8); h = (h ^ w) * 1099511628211ull; }
-    for (; i < n; i++) h = (h ^ m[i]) * 1099511628211ull;
-    return h;
+// FNV-1a over 8-byte words in four interleaved lanes (differently seeded), folded at the end: one multiply chain hashed 7 GB/s on the Retroid Pocket Nova's
+// big cores, four 18 GB/s (Super Mario Bros. Wonder's course start hashes ~80 MB of new textures in one frame). Only compared with itself within a run (vk_tex)
+static uint64_t pkg_hash(const uint8_t *m, size_t n) {
+    const uint64_t P = 1099511628211ull; uint64_t a = 1469598103934665603ull, b = a ^ 1, c = a ^ 2, d = a ^ 3; size_t i = 0;
+    for (; i + 32 <= n; i += 32) { uint64_t w[4]; memcpy(w, m + i, 32); a = (a ^ w[0]) * P; b = (b ^ w[1]) * P; c = (c ^ w[2]) * P; d = (d ^ w[3]) * P; }
+    for (; i + 8 <= n; i += 8) { uint64_t w; memcpy(&w, m + i, 8); a = (a ^ w) * P; }
+    for (; i < n; i++) b = (b ^ m[i]) * P;
+    return (((a ^ b) * P ^ c) * P ^ d) * P;
 }
 static void pkg_upload(vkimg_t *im, const tex_t *t, const vkfmt_t *f) {
     struct timespec a, b; clock_gettime(CLOCK_MONOTONIC, &a);
@@ -336,9 +341,12 @@ static void pkg_upload_(vkimg_t *im, const tex_t *t, const vkfmt_t *f) {
             VKLOG("sparse upload: serial %llu %ux%ux%u format %#x levels %u flags %#x size %#llx mem %p pool %p tileH %u: %#llx bytes not mapped%s", (unsigned long long)t->serial, t->d.width, t->d.height,
                   t->d.depth, t->d.format, im->levels, t->d.flags, (unsigned long long)t->L.size, (const void *)t->mem, t->pool, t->L.tileH, (unsigned long long)miss, im->packaged > 1 ? " (again)" : ""); } }
     } else {
+        uint64_t t0 = pkg_now();
         nvn_dirty_protect(t->mem, t->L.size);
         im->pkg_stamp = nvn_dirty_now(); im->pkg_span = nvn_dirty_span(t->mem, t->L.size); im->pkg_seen = im->pkg_stamp;
+        uint64_t t1 = pkg_now(); g_pkg_part_ns[0] += t1 - t0;
         im->pkg_mem = t->mem; im->pkg_len = t->L.size; im->pkg_released = 0; im->pkg_hash = pkg_hash(t->mem, t->L.size);
+        g_pkg_part_ns[1] += pkg_now() - t1;
     }
     int linear = (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) != 0;
     unsigned bw = f->bw ? f->bw : 1, bh = f->bh ? f->bh : 1, bpb = f->bpb;
@@ -347,13 +355,16 @@ static void pkg_upload_(vkimg_t *im, const tex_t *t, const vkfmt_t *f) {
         uint32_t w = im->w >> lv ? im->w >> lv : 1, h = im->h >> lv ? im->h >> lv : 1, z = im->d >> lv ? im->d >> lv : 1;
         uint32_t bx = (w + bw - 1) / bw, by = (h + bh - 1) / bh; size_t pitch = (size_t)bx * bpb, slab = pitch * by * z;
         for (unsigned ly = 0; ly < im->layers; ly++) {
+            uint64_t t0 = pkg_now();
             VkBuffer sb; VkDeviceSize so; uint8_t *blocks = f->dec ? malloc(slab) : NULL, *dst = blocks ? blocks : vk_scratch(slab, 16, &sb, &so);
             if (f->dec && !blocks) { free(copy); return; }
+            uint64_t t1 = pkg_now(); g_pkg_part_ns[2] += t1 - t0;
             if (linear) {   // linear storage: rows of the texture's stride, one level, one layer
                 size_t stride = t->d.stride ? t->d.stride : pitch;
                 for (uint32_t y = 0; y < by * z; y++) memcpy(dst + y * pitch, mem + (size_t)y * stride, pitch);
             } else if (nvn_deswizzle(&t->d, lv, ly, mem, dst, pitch)) { free(blocks); free(copy); VKRED_ONCE(13, "deswizzle refused texture format %#x target %d", t->d.format, t->d.target); return; }
-            if (blocks) { dst = vk_scratch((size_t)w * h * z * f->dbpp, 16, &sb, &so); bc_decode(f, blocks, pitch, w, h, z, dst); free(blocks); }   // (BC the device lacks)
+            uint64_t t2 = pkg_now(); g_pkg_part_ns[3] += t2 - t1;
+            if (blocks) { dst = vk_scratch((size_t)w * h * z * f->dbpp, 16, &sb, &so); bc_decode(f, blocks, pitch, w, h, z, dst); free(blocks); g_pkg_part_ns[4] += pkg_now() - t2; }   // (BC the device lacks)
             VkBufferImageCopy r = {so, 0, 0, {im->aspect & VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_ASPECT_COLOR_BIT : VK_IMAGE_ASPECT_DEPTH_BIT, lv, ly, 1}, {0, 0, 0}, {w, h, z}};
             vkCmdCopyBufferToImage(cb, sb, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
         }

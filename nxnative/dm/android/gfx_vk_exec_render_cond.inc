@@ -155,7 +155,8 @@ static void exec_begin(int continuing) {   // internal segments retain the curre
     { void vk_tex_release_drain(void); vk_tex_release_drain(); }   // Finalized textures' CPU-written marks that no queued job needs any more (gfx_vk_tex.c)
     if (!continuing) vk_mem_tick();   // under memory pressure, idle uploaded images and a trim (gfx_vk_core.c), here where no image of this submission is held yet (not a segment continued)
     S.pass_open = 0; S.bound_pipe = VK_NULL_HANDLE; g_cb_draws = 0; g_ord_parts = 0; g_psplit_now = 0; g_set_epoch++; x_read(); occ_live();
-    if (g_prof_on) { extern uint64_t g_pkg_ns, g_pkg_n; memset(g_prof_ns, 0, sizeof g_prof_ns); g_prof_t0 = tick(); g_prof_pkg0 = g_pkg_ns; g_prof_npkg0 = g_pkg_n; g_prof_pipes0 = g_vkst.pipes_built; }
+    if (g_prof_on) { extern uint64_t g_pkg_ns, g_pkg_n, g_pkg_bytes, g_pkg_part_ns[5]; memset(g_prof_ns, 0, sizeof g_prof_ns); g_prof_t0 = tick(); g_prof_pkg0 = g_pkg_ns; g_prof_npkg0 = g_pkg_n; g_prof_pipes0 = g_vkst.pipes_built;
+        memcpy(g_prof_part0, g_pkg_part_ns, sizeof g_prof_part0); g_prof_bytes0 = g_pkg_bytes; }
     { extern volatile int g_vk_samp_log; if (g_vk_samp_log > 0) VKLOG("submission begins (present %llu, thread %d)", (unsigned long long)g_tex_frame, (int)gettid()); }
 }
 

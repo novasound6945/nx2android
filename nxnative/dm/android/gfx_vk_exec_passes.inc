@@ -430,12 +430,15 @@ void vk_hang_report(uint64_t late, uint64_t done) {
 }
 void vk_prof_end(void) {
     if (!g_prof_on || !g_prof_t0) return;
-    extern uint64_t g_pkg_ns, g_pkg_n; uint64_t tot = tick() - g_prof_t0; g_prof_t0 = 0;
+    extern uint64_t g_pkg_ns, g_pkg_n, g_pkg_bytes, g_pkg_part_ns[5]; uint64_t tot = tick() - g_prof_t0; g_prof_t0 = 0;
+    uint64_t part[5], bytes = g_pkg_bytes - g_prof_bytes0; for (int i = 0; i < 5; i++) part[i] = g_pkg_part_ns[i] - g_prof_part0[i];
     if (tot < 40000000ull) return;
     double ms = 1e-6; uint64_t known = g_prof_ns[0] + g_prof_ns[1] + g_prof_ns[2] + g_prof_ns[3] + g_prof_ns[4] + g_prof_ns[5] + g_prof_ns[6] + g_prof_ns[7];
     VKLOG("slow replay (present %llu): %.1f ms; pipelines built here %llu in %.1f ms, textures %.1f ms (%llu packaged uploads, %.1f ms of it), pools sync %.1f ms, shader modules %.1f ms, pipeline binds %.1f ms, descriptor sets %.1f ms, cuts %.1f ms, compute pipelines %.1f ms, other %.1f ms",
           (unsigned long long)g_tex_frame, tot * ms, (unsigned long long)(g_vkst.pipes_built - g_prof_pipes0), g_prof_ns[0] * ms, g_prof_ns[1] * ms, (unsigned long long)(g_pkg_n - g_prof_npkg0),
           (g_pkg_ns - g_prof_pkg0) * ms, g_prof_ns[2] * ms, g_prof_ns[3] * ms, g_prof_ns[4] * ms, g_prof_ns[5] * ms, g_prof_ns[6] * ms, g_prof_ns[7] * ms, (tot > known ? tot - known : 0) * ms);
+    if (g_pkg_n != g_prof_npkg0) VKLOG("slow replay (present %llu): the packaged uploads, %.1f MB: write protection %.1f ms, hash %.1f, scratch memory %.1f, deswizzle %.1f, BC decode %.1f",
+          (unsigned long long)g_tex_frame, bytes / 1048576.0, part[0] * ms, part[1] * ms, part[2] * ms, part[3] * ms, part[4] * ms);
 }
 // Linear render targets (NVN LINEAR_RENDER_TARGET) are their storage on the Switch: the CPU can read what the GPU drew straight from the pool. Here a Vulkan image holds
 // the drawing and the pool memory kept what it held before. Super Mario Odyssey's fluid surface (al::FluidSimulateWave: the Cap Kingdom ground fog's wave solver ends in a
