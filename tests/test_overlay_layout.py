@@ -24,8 +24,6 @@ class OverlayLayout(unittest.TestCase):
 static int custom_faces, custom_a, custom_x, hidden_ctl = -1, audio_available, ui_zh;
 int dm_ui_zh(void) { return ui_zh; }
 int dm_menu_audio_available(void) { return audio_available; }
-static float row_need;   // gfx_vk_present.c dm_menu_row_need: the width the menu's rows need at its letters' size (0: the panel's own)
-float dm_menu_row_need(float rh) { (void)rh; return row_need; }
 float dm_overlay_scale(void) { return 1; }
 int dm_overlay_off(int l, int c) { return l == 1 && c == hidden_ctl; }
 int dm_overlay_custom(int layout, int ctl, float *x, float *y, float *s) {
@@ -116,15 +114,6 @@ int main(void) {
         ov_exit_release(&h, 1000 + OV_EXIT_HOLD_NS / 2); assert(ov_exit_tick(&h, 1000 + OV_EXIT_HOLD_NS, &f) == OV_EXIT_IDLE);   // let go early: nothing ends
         ov_exit_press(&h, 5000); ov_exit_release(&h, 5000 + OV_EXIT_TAP_NS / 2); assert(ov_exit_tick(&h, 5000 + OV_EXIT_TAP_NS, &f) == OV_EXIT_HINT);   // a tap: the hint
         ov_exit_press(&h, 9000); assert(ov_exit_tick(&h, 9000 + OV_EXIT_HOLD_NS, &f) == OV_EXIT_GOING && h.going);   // held to the end
-    }
-    {   // the panel widens for rows that need it (larger letters), as far as 0.96 of the window, and the rows' touches follow it
-        float W = 1920, H = 1080, p[4], q[4], u = ov_menu_scale() * H; ov_menu_rect(W, H, p);
-        assert(fabsf(p[2] - OV_MENU_W * u) < 0.01f);
-        row_need = 1000; ov_menu_rect(W, H, q);
-        assert(fabsf(q[2] - (1000 * 1.01f + 2 * OV_MENU_PAD * u)) < 0.01f && fabsf(q[0] - (W - q[2]) / 2) < 0.01f && q[3] == p[3]);
-        float r[4]; ov_menu_rowrect(q, 2, r); assert(r[2] >= 1000 && ov_menu_row_at(q[0] + 2, r[1] + r[3] / 2, W, H) == 2 && ov_menu_row_at(q[0] + q[2] - 2, r[1] + r[3] / 2, W, H) == 2);
-        row_need = 5000; ov_menu_rect(W, H, q); assert(fabsf(q[2] - W * 0.96f) < 0.01f);
-        row_need = 0;
     }
     const float screens[][2] = {{915, 412}, {1216, 760}, {2400, 1080}, {1080, 2400}};
     for (unsigned s = 0; s < sizeof screens / sizeof screens[0]; s++) {

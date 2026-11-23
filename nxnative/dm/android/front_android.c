@@ -185,7 +185,6 @@ void dm_lan_android_start(ANativeActivity *act);   // lan_android.c: the Wi-Fi m
 void dm_haptics_android_start(ANativeActivity *act, int on); void dm_haptics_android_tap(void); void dm_haptics_android_device(int id); void dm_haptics_android_set(int on);
 void dm_haptics_suspend(unsigned reason, int suspended);
 __attribute__((weak)) void dm_overlay_redraw(void) {}   // the backend presents the last frame again (the pause menu changed while the game is held)
-__attribute__((weak)) float dm_menu_row_need(float rh) { (void)rh; return 0; }   // gfx_vk_present.c: the menu's rows' width (without that backend: the panel's own)
 
 // ---- holding the game: in the background and while the pause menu is open. Its clock reads wait (reason 1) and its audio goes to the silent sink ----
 static _Atomic int g_running, g_bg, g_menu;

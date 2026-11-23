@@ -1,5 +1,5 @@
 """The game's settings.txt keys (limit=, rate=, res=: the launcher's App settings, launcher_gopts.inc, then the game's start), the pause menu's panel
-(upstream's four tabs at this fork's letters, with Exit game) and Exit game's hold, through the production code on the computer.
+(upstream's four tabs, with Exit game) and Exit game's hold, through the production code on the computer.
 
 settings_load, settings_save and limit_apply (game_opts_android.inc) are cut out of front_android.c, fps_pin (which holds the
 limit, with game_mode_sync which reads it) out of perf_android.c, and the menu panel's drawing (ov_menu_panel) out of gfx_vk_present.c, with the font pack the APK ships. No phone or game is needed.
@@ -91,20 +91,19 @@ static const drawn *find(const char *s) { for (int i = 0; i < g_ndrawn; i++) if 
 int main(int argc, char **argv) {
     assert(argc == 2); FILE *f = fopen(argv[1], "rb"); assert(f); fseek(f, 0, SEEK_END); long n = ftell(f); rewind(f);
     g_font = malloc((size_t)n); assert(fread(g_font, 1, (size_t)n, f) == (size_t)n); fclose(f);
-    // upstream's four tabs (Gamepad, Game, Counter, Style) and their rows, at this fork's letters (menu_letters.inc), with Exit game beside Resume
+    // upstream's four tabs (Gamepad, Game, Counter, Style) and their rows, with Exit game beside Resume
     static const char *const rows[OVM_TABS][OVM_PER_TAB] = {{"Show gamepad", "Opacity", "Edit layout", "Rumble", "Face buttons"}, {"Show FPS", "Mode", "Export save", "Import save", NULL},
                                                             {"FPS row", "SOC row", "BAT row", "Driver row", "Graph row"}, {"Position", "Colour", "Outline", "Size", NULL}};
     const float screens[][2] = {{1920, 1080}, {2400, 1080}, {1280, 960}, {1216, 760}};   // the Retroid Pocket 6, a 20:9 phone, the Retroid Pocket Nova, a 16:10 tablet
     for (unsigned q = 0; q < sizeof screens / sizeof screens[0]; q++) {
         float W = screens[q][0], H = screens[q][1], m[4]; ov_menu_rect(W, H, m);
-        uint32_t pw = (uint32_t)m[2] + 1, ph = (uint32_t)m[3] + 1;   // the panel's raster: a texel a window pixel (gfx_vk_present.c g_ov.pw, ph)
+        uint32_t pw = (uint32_t)(m[2] / 2) + 1, ph = (uint32_t)(m[3] / 2) + 1;   // the panel's raster: half the window's resolution (gfx_vk_present.c g_ov.pw, ph)
         uint8_t *px = calloc((size_t)pw * ph, 4); assert(px); ov_canvas cv = {px, pw, 0, 0, pw, ph};
         float p[4] = {0, 0, (float)pw, (float)ph}, r[4]; ov_menu_rowrect(p, 0, r);
-        int full = 3 * ovm_ref_scale(r[3]);   // half as large again as the half-resolution raster's letters (each of its texels was two pixels)
-        assert(ovm_letters(r[3], r[2]) == full && full >= 3);   // the panel (ov_menu_rect) is wide enough for them: no row made them smaller
+        int full = -1;   // upstream's letters: one size for every row (that of Resume)
         for (int tab = 0; tab < OVM_TABS; tab++) {
             g_ndrawn = 0; ov_menu_panel(&cv, (tab & 1) << 8 | (tab >> 1) << 19 | 60 << 9);
-            const drawn *res = find("Resume"), *ex = find("Exit game"); assert(res && ex && res->scale == full && ex->x < res->x);   // Exit game left of Resume
+            const drawn *res = find("Resume"), *ex = find("Exit game"); assert(res && ex && ex->x < res->x); if (full < 0) full = res->scale; assert(res->scale == full && full >= 1);   // Exit game left of Resume
             for (int k = 0; k < OVM_TABS; k++) assert(find(OVM_TAB_NAMES[k]) && find(OVM_TAB_NAMES[k])->scale == full);
             for (int k = 0; k < OVM_PER_TAB; k++) if (rows[tab][k]) {
                 const drawn *l = find(rows[tab][k]); ov_menu_rowrect(p, k + 1, r);
@@ -274,7 +273,6 @@ static void rec_text(const ov_canvas *cv, float x, float cy, const char *s, int 
 #include "overlay_layout.h"
 #include "menu_exit.h"
 float dm_overlay_scale(void) { return 1; }
-float dm_menu_row_need(float rh) { (void)rh; return 0; }
 int dm_menu_audio_available(void) { return 0; }
 int dm_ui_zh(void) { return 0; }
 ''' + HOLD_MAIN

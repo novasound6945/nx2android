@@ -223,9 +223,7 @@ static void barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImage
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
 }
 // ---- the on-screen gamepad: rasterized on the CPU once per window size (half resolution), blended over each frame ----
-// The texture is the static layer (w x h), a strip of sprites under it (sh rows) and the pause menu's panel under that (prow rows): the panel is rasterized at the
-// window's resolution (pw x ph, a texel a pixel: its letters' scales are whole window pixels) into pbuf, and its two halves go one under the other (ov_panel_copy),
-// as the texture is only half the window's width. The sprites: each stick's
+// The texture is the static layer (w x h), a strip of sprites under it (sh rows) and the pause menu's panel under that (pw x ph). The sprites: each stick's
 // knob, drawn every frame where the finger holds it; the menu button, drawn on its own at OV_MENU_ALPHA whether the gamepad is shown or not; a white disc, the
 // glow over a pressed round button (a wider one glows in its own shape); a black block, the dimming behind the menu. sp: each sprite in the strip (centre x, y,
 // half width and height, texels; 0 = none). The panel is rasterized again whenever the menu's state (dm_menu_state) changes. Under the panel, the frame rate
@@ -236,7 +234,7 @@ static void barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImage
 enum { SP_DISC = OV_N, SP_BLACK, SP_WHITE, SP_ACCENT, SP_GREEN, SP_AMBER, SP_RED, SP_GREY, SP_N };   // (black, white, accent: solid blocks, the dimming and the layout editor's frames; green, amber, red, grey: the frame-time graph's bars and target line)
 #define OV_FPS_CHARS "0123456789 FPS-CBATOURNIQM.DELGV"   // (the temperature rows: "SOC 52C", "BAT 38C"; the driver row: "TURNIP 27.0.0", "QCOM 512.676.53", "NVIDIA ...", "ID 1AB2 ...")
 static struct { VkImage img; VkDeviceMemory mem; VkImageView view; VkSampler samp; VkDescriptorSetLayout dsl; VkPipelineLayout layout; VkDescriptorPool pool; VkDescriptorSet set;
-                VkPipeline pipe; VkFormat pfmt; uint32_t w, h, sh, pw, ph, prow, gh, gs, gl, cpr, pad, mg, mcols, mrows; int fk; uint8_t *pbuf; VkBuffer up; VkDeviceMemory upm; uint8_t *px; void *map; int uploaded, panel, lay, cver; float sp[SP_N][4];
+                VkPipeline pipe; VkFormat pfmt; uint32_t w, h, sh, pw, ph, gh, gs, gl, cpr, pad, mg, mcols, mrows; int fk; VkBuffer up; VkDeviceMemory upm; uint8_t *px; void *map; int uploaded, panel, lay, cver; float sp[SP_N][4];
                 unsigned exv;   // Exit game's hold's version the panel was drawn at
                 VkRenderPass rp; VkFramebuffer fb[8]; VkImageView fbview[8]; VkExtent2D fbext[8]; } g_ov;
 static struct { const ov_theme *t; VkImage img; VkDeviceMemory mem; VkImageView view; VkDescriptorSet set; VkBuffer up; VkDeviceMemory upm; uint32_t upk; int ready; } g_tt[2];   // per layout
@@ -354,8 +352,6 @@ static void cv_ring(const ov_canvas *cv, float cx, float cy, float r, float t, c
     }
 }
 static float cv_text_w(const char *s, int scale) { return (float)(pf_width(dm_overlay_font(), s) * scale); }
-// a font scale for letters px window pixels high (their capitals), as the half-resolution raster had it: an even scale, so the sizes the panels always had stay
-static int ov_fscale(float px) { return 2 * (int)fmaxf(1, roundf(px / 2 / PF_CAP)); }
 typedef struct { const ov_canvas *cv; const uint8_t *c; } cv_ink;
 static void cv_text_plot(void *u, int x, int y) { const cv_ink *k = u; cv_blend(k->cv, x, y, k->c, 1); }
 static void cv_text(const ov_canvas *cv, float x, float cy, const char *s, int scale, const uint8_t c[4]) {   // x: the left edge
@@ -379,7 +375,7 @@ static void ov_text_panel(const ov_canvas *cv) {
     float W = (float)cv->w, H = (float)cv->h, p[4] = {0, 0, W, H}, pad = W * 0.03f;
     static const uint8_t bg[4] = {14, 14, 20, 236}, field[4] = {255, 255, 255, 30}, key[4] = {255, 255, 255, 26}, dim[4] = {200, 200, 210, 255};
     cv_rrect(cv, 0, 0, W, H, H * 0.03f, bg);
-    int ts = ov_fscale(H * 0.045f), xs = ov_fscale(H * 0.06f), ks = ov_fscale(H * 0.05f), hs = ov_fscale(H * 0.036f);   // (the panel's raster: a texel a window pixel)
+    int ts = (int)fmaxf(1, roundf(H * 0.045f / PF_CAP)), xs = (int)fmaxf(1, roundf(H * 0.06f / PF_CAP)), ks = (int)fmaxf(1, roundf(H * 0.05f / PF_CAP)), hs = (int)fmaxf(1, roundf(H * 0.036f / PF_CAP));
     float room = W - 4 * pad;
     while (title[0] && cv_text_w(title, ts) > room) pf_chop(title, strlen(title));   // a long title is cut
     cv_text(cv, (W - cv_text_w(title, ts)) / 2, H * 0.07f, title, ts, C_WHITE);
@@ -402,14 +398,13 @@ static void ov_text_panel(const ov_canvas *cv) {
 }
 static const uint8_t C_BG[4] = {14, 14, 20, 236}, C_LINE[4] = {255, 255, 255, 40}, C_HI[4] = {255, 255, 255, 34}, C_DIM[4] = {200, 200, 210, 255}, C_OFF[4] = {80, 80, 92, 255},
                      C_KNOB_OFF[4] = {215, 215, 222, 255};
-static void cv_button_s(const ov_canvas *cv, const float b[4], const char *l, int fill, int held, int s) {   // a rounded button with its word at scale s, smaller if it does not fit
+static void cv_button(const ov_canvas *cv, const float b[4], const char *l, int fill, int held) {   // a rounded button with its word, as large as fits
     static const uint8_t face[4] = {255, 255, 255, 30}, rim[4] = {255, 255, 255, 90};
     float rad = b[3] * 0.28f; cv_rrect(cv, b[0], b[1], b[0] + b[2], b[1] + b[3], rad, held ? C_WHITE : rim);
     cv_rrect(cv, b[0] + 2, b[1] + 2, b[0] + b[2] - 2, b[1] + b[3] - 2, rad - 2, held ? C_ACCENT : fill ? C_ACCENT : face);
-    while (s > 1 && cv_text_w(l, s) > b[2] * 0.82f) s--;
+    int s = (int)fmaxf(1, roundf(b[3] * 0.40f / PF_CAP)); while (s > 1 && cv_text_w(l, s) > b[2] * 0.82f) s--;
     cv_text(cv, b[0] + (b[2] - cv_text_w(l, s)) / 2, b[1] + b[3] / 2, l, s, C_WHITE);
 }
-static void cv_button(const ov_canvas *cv, const float b[4], const char *l, int fill, int held) { cv_button_s(cv, b, l, fill, held, (int)fmaxf(1, roundf(b[3] * 0.40f / PF_CAP))); }   // as large as fits
 // The pause menu (overlay_layout.h: the rows, the tabs, the slider's track), in the raster's panel rectangle. Its letters are as large as a row allows (0.30 of
 // its height, about 2.7 mm on a 6.7" phone and 3.6 mm on the 8.8" tablet) and smaller only when the widest row would not fit beside its control
 static const char *ovm_label(int it) {
@@ -456,19 +451,33 @@ static int ov_val_cur(int it, int o) { return it == OVM_POS ? fpso_pos(o) : it =
 static float ov_val_w(int it, int is) {   // the widest value's width
     float w = 0; for (int v = 0; v < ov_val_n(it); v++) w = fmaxf(w, cv_text_w(ov_val_name(it, v), is)); return w;
 }
-#include "menu_letters.inc"   // this fork: the menu's letters 1.5x (ovm_letters, ovm_geo; ov_menu_rect's dm_menu_row_need)
 #include "menu_exit_draw.inc"   // this fork: Exit game beside Resume (menu_exit.h)
 static void ov_menu_panel(const ov_canvas *cv, int st) {
     float p[4] = {0, 0, (float)cv->w, (float)cv->h}, r[4]; ov_menu_rowrect(p, 0, r);
-    float rh = r[3], rw = r[2]; int is = ovm_letters(rh, rw); ovm_geo g = ovm_geo_of(rh, is); float gap = g.gap, sh = g.sh, sw = g.sw;
+    float rh = r[3], rw = r[2], gap = rh * 0.35f, sh = rh * 0.40f, sw = sh * 1.85f;
     int tab = (st >> 8 & 1) | (st >> 19 & 1) << 1, sel = (st >> 4 & 15) - 1, op = st >> 9 & 127, fo = dm_fps_opts();
+    int is = (int)fmaxf(1, roundf(rh * 0.30f / PF_CAP));
+    for (; is > 1; is--) {   // the widest row: its label, a gap and its control
+        float need = 0;
+        for (int i = 0; i < OVM_RESUME; i++) {
+            float lw = cv_text_w(ovm_label(i), is); const char *btn = ovm_button(i);
+            float cw = ov_val_n(i) ? ov_val_w(i, is) + 2 * sh
+                     : i == OVM_MODE ? 2 * (fmaxf(cv_text_w(ovm_mode(0), is), cv_text_w(ovm_mode(1), is)) + sh)
+                     : i == OVM_PAD  ? 2 * (fmaxf(cv_text_w(ovm_pad(0), is),  cv_text_w(ovm_pad(1), is))  + sh)
+                     : btn ? cv_text_w(btn, is) + 2 * sh
+                     : sw + gap + fmaxf(cv_text_w(TR("ON", "开"), is), cv_text_w(TR("OFF", "关"), is));
+            need = fmaxf(need, i == OVM_OPACITY ? fmaxf(lw / 0.38f, cv_text_w("80%", is) / 0.14f) : lw + gap + cw + rh * 0.3f);
+        }
+        float tabw = 0; for (int k = 0; k < OVM_TABS; k++) tabw = fmaxf(tabw, cv_text_w(OVM_TAB_NAMES[k], is));
+        if (need <= rw && tabw < rw / OVM_TABS - sh) break;
+    }
     cv_rrect(cv, 0, 0, p[2], p[3], rh * 0.18f, C_BG);
     for (int row = 0; row < OVM_ROWS; row++) {
         int it = ov_menu_item(tab, row); ov_menu_rowrect(p, row, r); float cy = r[1] + rh / 2, x1 = r[0] + rw - rh * 0.15f;
         if (it < 0) continue;
         if (row == sel && it != OVM_RESUME) cv_rrect(cv, r[0], r[1] + rh * 0.08f, r[0] + rw, r[1] + rh * 0.92f, rh * 0.14f, C_HI);   // (the button row: menu_exit_row)
         if (it == OVM_TAB) {   // the tabs: a segmented bar, the open one filled
-            float th = g.th, tw = rw / OVM_TABS;
+            float th = rh * 0.62f, tw = rw / OVM_TABS;
             cv_rrect(cv, r[0], cy - th / 2, r[0] + rw, cy + th / 2, th / 2, C_OFF);
             cv_rrect(cv, r[0] + tab * tw, cy - th / 2, r[0] + (tab + 1) * tw, cy + th / 2, th / 2, C_ACCENT);
             for (int k = 0; k < OVM_TABS; k++) cv_text(cv, r[0] + k * tw + (tw - cv_text_w(OVM_TAB_NAMES[k], is)) / 2, cy, OVM_TAB_NAMES[k], is, k == tab ? C_WHITE : C_DIM);
@@ -491,16 +500,16 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             while (vs > 1 && cv_text_w(v, vs) > rw - cv_text_w(lbl, is) - gap - rh * 0.3f) vs--;
             cv_text(cv, x1 - cv_text_w(v, vs), cy, v, vs, x == OVX_FAILED ? C_ACCENT : C_WHITE);
         } else if (ov_val_n(it)) {   // the counter's corner, colour, outline and size: the value in a pill
-            int cur = ov_val_cur(it, fo); const char *nm = ov_val_name(it, cur); float pw = ov_val_w(it, is) + 2 * sh, hh = g.hh;
+            int cur = ov_val_cur(it, fo); const char *nm = ov_val_name(it, cur); float pw = ov_val_w(it, is) + 2 * sh, hh = rh * 0.46f;
             cv_rrect(cv, x1 - pw, cy - hh / 2, x1, cy + hh / 2, hh / 2, C_OFF);
             const uint8_t *tc = C_WHITE, rgb[4] = {FPSO_RGB[fpso_colour(fo)][0], FPSO_RGB[fpso_colour(fo)][1], FPSO_RGB[fpso_colour(fo)][2], 255};
             cv_text(cv, x1 - pw + (pw - cv_text_w(nm, is)) / 2, cy, nm, is, it == OVM_COLOUR ? rgb : tc);
         } else if (btn) {   // a button
-            float bw = cv_text_w(btn, is) + 2 * sh, b[4] = {x1 - bw, cy - g.bh / 2, bw, g.bh}; cv_button_s(cv, b, btn, 0, 0, is);
+            float bw = cv_text_w(btn, is) + 2 * sh, b[4] = {x1 - bw, cy - rh * 0.30f, bw, rh * 0.60f}; cv_button(cv, b, btn, 0, 0);
         } else if (it == OVM_MODE || it == OVM_PAD) {   // two segments, the current one filled: handheld (performance) | docked (resolution); by position | by label
             const char *seg[2] = {it == OVM_MODE ? ovm_mode(0) : ovm_pad(0), it == OVM_MODE ? ovm_mode(1) : ovm_pad(1)};
             int cur = it == OVM_MODE ? st >> 2 & 1 : st >> 28 & 1;
-            float hh = g.hh, segw = fmaxf(cv_text_w(seg[0], is), cv_text_w(seg[1], is)) + sh, x0 = x1 - 2 * segw;
+            float hh = rh * 0.46f, segw = fmaxf(cv_text_w(seg[0], is), cv_text_w(seg[1], is)) + sh, x0 = x1 - 2 * segw;
             cv_rrect(cv, x0, cy - hh / 2, x1, cy + hh / 2, hh / 2, C_OFF);
             cv_rrect(cv, x0 + cur * segw, cy - hh / 2, x0 + (cur + 1) * segw, cy + hh / 2, hh / 2, C_ACCENT);
             for (int k = 0; k < 2; k++) cv_text(cv, x0 + k * segw + (segw - cv_text_w(seg[k], is)) / 2, cy, seg[k], is, k == cur ? C_WHITE : C_DIM);
@@ -564,7 +573,7 @@ static void ov_edit_panel(const ov_canvas *cv, int st, float W, float H) {
 static void ov_save_panel(const ov_canvas *cv, int st) {
     ov_srow rows[OVM_ROWS]; if (!dm_save_rows(rows)) return;
     float p[4] = {0, 0, (float)cv->w, (float)cv->h}, r[4]; ov_menu_rowrect(p, 0, r);
-    float rh = r[3], rw = r[2], gap = rh * 0.35f, room = rw - rh * 0.3f; int sel = (st >> 4 & 15) - 1, is0 = ov_fscale(rh * 0.30f), size[OVS_BACK + 1];
+    float rh = r[3], rw = r[2], gap = rh * 0.35f, room = rw - rh * 0.3f; int sel = (st >> 4 & 15) - 1, is0 = (int)fmaxf(1, roundf(rh * 0.30f / PF_CAP)), size[OVS_BACK + 1];
     for (int k = 0; k <= OVS_BACK; k++) size[k] = k == OVS_NOTE ? (int)fmaxf(1, roundf(is0 * 0.8f)) : is0;
     for (int row = 0; row < OVM_ROWS; row++) { const ov_srow *q = &rows[row]; int *s = &size[q->style];
         while (*s > 1 && cv_text_w(q->left, *s) + (q->right[0] ? gap + cv_text_w(q->right, *s) : 0) > room) --*s; }
@@ -575,33 +584,19 @@ static void ov_save_panel(const ov_canvas *cv, int st) {
         int is = size[q->style];
         if (row == sel) cv_rrect(cv, r[0], r[1] + rh * 0.08f, r[0] + rw, r[1] + rh * 0.92f, rh * 0.14f, C_HI);
         if (q->style == OVS_BACK) { cv_rrect(cv, r[0], r[1], r[0] + rw, r[1] + 1, 0.5f, C_LINE); cv_text(cv, r[0] + (rw - cv_text_w(q->left, is)) / 2, cy, q->left, is, C_ACCENT); continue; }
-        if (q->style == OVS_BUTTON) { float bw = fminf(rw, cv_text_w(q->left, is) + 4 * gap), b[4] = {r[0] + (rw - bw) / 2, cy - rh * 0.34f, bw, rh * 0.68f}; cv_button_s(cv, b, q->left, 1, row == sel, ov_fscale(b[3] * 0.40f)); continue; }
+        if (q->style == OVS_BUTTON) { float bw = fminf(rw, cv_text_w(q->left, is) + 4 * gap), b[4] = {r[0] + (rw - bw) / 2, cy - rh * 0.34f, bw, rh * 0.68f}; cv_button(cv, b, q->left, 1, row == sel); continue; }
         cv_text(cv, x0, cy, q->left, is, q->style == OVS_TITLE || row == sel ? C_WHITE : C_DIM);
         if (q->right[0]) cv_text(cv, x1 - cv_text_w(q->right, is), cy, q->right, is, C_DIM);
         if (q->style == OVS_TITLE) cv_rrect(cv, r[0], r[1] + rh - 1, r[0] + rw, r[1] + rh, 0.5f, C_LINE);
     }
 }
-// The panel's halves in the texture: columns 0..ph_half() of the panel in rows y0.. (the left), columns ph_half() - 1 .. pw - 1 in the ph rows under them and a clear
-// one (the right): a texel more on each side of the seam, so the filtering at it reads the panel's own texels
-static uint32_t ov_panel_half(void) { return g_ov.pw / 2; }
-static void ov_panel_copy(void) {
-    uint32_t y0 = g_ov.h + g_ov.sh, hw = ov_panel_half(), lw = hw + 1 < g_ov.pw ? hw + 1 : g_ov.pw, r0 = hw ? hw - 1 : 0, rw = g_ov.pw - r0;
-    for (uint32_t y = 0; y < g_ov.prow; y++) memset(g_ov.px + 4 * (size_t)(y0 + y) * g_ov.w, 0, (size_t)g_ov.w * 4);
-    for (uint32_t y = 0; y < g_ov.ph; y++) {
-        const uint8_t *src = g_ov.pbuf + 4 * (size_t)y * g_ov.pw;
-        memcpy(g_ov.px + 4 * (size_t)(y0 + y) * g_ov.w, src, (size_t)lw * 4);
-        memcpy(g_ov.px + 4 * (size_t)(y0 + g_ov.ph + 1 + y) * g_ov.w, src + 4 * (size_t)r0, (size_t)rw * 4);
-    }
-}
 static void ov_panel(int st) {   // the pause menu, the text entry or the layout editor, for menu state st (dm_menu_state), into the panel's rows of the upload buffer
-    if (!g_ov.pbuf) return;
-    ov_canvas cv = {g_ov.pbuf, g_ov.pw, 0, 0, g_ov.pw, g_ov.ph};
-    memset(g_ov.pbuf, 0, (size_t)g_ov.pw * g_ov.ph * 4);
+    ov_canvas cv = {g_ov.px, g_ov.w, 0, g_ov.h + g_ov.sh, g_ov.pw, g_ov.ph};
+    for (uint32_t y = 0; y < g_ov.ph; y++) memset(g_ov.px + 4 * ((size_t)(cv.y0 + y) * g_ov.w), 0, (size_t)g_ov.pw * 4);
     if (st & OVT_ST) ov_text_panel(&cv);   // a text entry is open (dm_menu_state)
     else if (st & OVE_ST) ov_edit_panel(&cv, st, (float)g_sext.width, (float)g_sext.height);
     else if (st & OVS_ST) ov_save_panel(&cv, st);
     else ov_menu_panel(&cv, st);
-    ov_panel_copy();
 }
 // The phone window uses the same menu raster as Vulkan, independently of the external swapchain.
 JNIEXPORT jint JNICALL Java_org_nx2a_ExternalActivity_externalMenuState(JNIEnv *env, jclass cls) { (void)env; (void)cls; return dm_menu_state(); }
@@ -609,7 +604,7 @@ JNIEXPORT jintArray JNICALL Java_org_nx2a_ExternalActivity_externalMenuPixels(JN
     (void)cls;
     if (W <= 0 || H <= 0 || W > 8192 || H > 8192 || st < 0) return NULL;
     float r[4]; ov_menu_rect((float)W, (float)H, r);
-    uint32_t w = (uint32_t)r[2] + 1, h = (uint32_t)r[3] + 1, maxw = (uint32_t)W;   // (a texel a window pixel, as the Vulkan panel's)
+    uint32_t w = (uint32_t)(r[2] / 2) + 1, h = (uint32_t)(r[3] / 2) + 1, maxw = (uint32_t)W / 2;
     if (w > maxw) w = maxw;
     if (!w || !h || (size_t)w * h > 16 * 1024 * 1024) return NULL;
     uint8_t *pixels = calloc((size_t)w * h, 4); if (!pixels) return NULL;
@@ -652,7 +647,7 @@ static void ov_raster(uint8_t *px, uint32_t w, uint32_t h, uint32_t sh) {
         else ov_circle(px, w, h + sh, x, y, r, 2.5f);
     }
 }
-static uint32_t ov_tex_rows(void) { return g_ov.h + g_ov.sh + g_ov.prow + g_ov.gh + g_ov.mrows * g_ov.mg; }   // the texture's height
+static uint32_t ov_tex_rows(void) { return g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh + g_ov.mrows * g_ov.mg; }   // the texture's height
 typedef struct { float pos[4], uv[4], alpha; } ov_quad;
 static void ov_draw(VkCommandBuffer cb, const ov_quad *q) { vkCmdPushConstants(cb, g_ov.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof *q, q); vkCmdDraw(cb, 6, 1, 0, 0); }
 static void ov_rect(VkCommandBuffer cb, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, float alpha) {   // screen pixels, texels
@@ -701,7 +696,7 @@ static void ov_fps_dims(uint32_t w, uint32_t h, int o) {   // the letters' scale
     g_ov.gl = PF_CAP * g_ov.gs + 4 + 2 * g_ov.pad; g_ov.gh = g_ov.gl * ((3 * n + g_ov.cpr - 1) / g_ov.cpr);
 }
 static void ov_fps_glyphs(int o) {   // the characters into the rows under the panel
-    ov_canvas cv = {g_ov.px, g_ov.w, 0, g_ov.h + g_ov.sh + g_ov.prow, g_ov.w, g_ov.gh};
+    ov_canvas cv = {g_ov.px, g_ov.w, 0, g_ov.h + g_ov.sh + g_ov.ph, g_ov.w, g_ov.gh};
     int n = (int)strlen(OV_FPS_CHARS), c = fpso_colour(o), pad = (int)g_ov.pad, gs = (int)g_ov.gs;
     const uint8_t ink[4] = {FPSO_RGB[c][0], FPSO_RGB[c][1], FPSO_RGB[c][2], 255}, black[4] = {0, 0, 0, 255};
     for (int id = 0; id < 3 * n; id++) {   // the colour, then the same characters in red (a temperature too hot: ov_fps), then in black
@@ -714,7 +709,7 @@ static void ov_fps_glyphs(int o) {   // the characters into the rows under the p
 __attribute__((weak)) void dm_android_temps(int *soc, int *bat) { (void)soc; (void)bat; }   // (front_android.c; absent in other builds)
 static float ov_fps_len(const char *s, float k) { float w = 0; for (; *s; s++) w += ov_fps_adv(*s) * k; return w; }
 static void ov_fps_text(VkCommandBuffer cb, int set, const char *s, float x, float y, float k) {   // a row's characters from the atlas' set (0 colour, 1 red, 2 black); (x, y): its top left
-    int n = (int)strlen(OV_FPS_CHARS); float gy = (float)(g_ov.h + g_ov.sh + g_ov.prow), pd = (float)g_ov.pad * k;
+    int n = (int)strlen(OV_FPS_CHARS); float gy = (float)(g_ov.h + g_ov.sh + g_ov.ph), pd = (float)g_ov.pad * k;
     for (int i = 0; s[i]; x += ov_fps_adv(s[i]) * k, i++) {
         const char *c = strchr(OV_FPS_CHARS, s[i]); if (!c || s[i] == ' ') continue;
         int id = set * n + (int)(c - OV_FPS_CHARS); float u = (float)(id % (int)g_ov.cpr) * ov_fps_cell(), v = gy + (float)(id / (int)g_ov.cpr) * (float)g_ov.gl;
@@ -838,7 +833,7 @@ static void cv_poly(const ov_canvas *cv, const float *p, int n, float ox, float 
         cv_blend(cv, x, y, c, 0.5f - (sqrtf(best) - r));
     }
 }
-static void ov_mark_cell(int i, float *u, float *v) { *u = (float)(i % g_ov.mcols * g_ov.mg); *v = (float)(g_ov.h + g_ov.sh + g_ov.prow + g_ov.gh + i / g_ov.mcols * g_ov.mg); }
+static void ov_mark_cell(int i, float *u, float *v) { *u = (float)(i % g_ov.mcols * g_ov.mg); *v = (float)(g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh + i / g_ov.mcols * g_ov.mg); }
 static void ov_mark_glyphs(void) {
     if (!g_ov.mcols) return;   // (a texture too narrow: no marks)
     float g = (float)g_ov.mg; ov_canvas cv = {g_ov.px, g_ov.w, 0, 0, g_ov.w, ov_tex_rows()};
@@ -885,9 +880,7 @@ static void ov_render(VkCommandBuffer cb, int mode, int menu, int fps) {   // mo
         ov_rect(cb, 0, 0, W, H, bx - 2, by - 2, bx + 2, by + 2, 0.55f);
         if (fps && !(menu & OVT_ST)) ov_fps(cb, now);   // (the counter's preview on the Counter and Style tabs: under the panel, which stays readable; not over a game's text entry, OVT_ST)
         float r[4]; ov_menu_rect(W, H, r);
-        float y0 = (float)(g_ov.h + g_ov.sh), hw = (float)ov_panel_half(), kx = r[2] / g_ov.pw, xm = r[0] + hw * kx;   // its two halves (ov_panel_copy)
-        ov_rect(cb, r[0], r[1], xm, r[1] + r[3], 0, y0, hw, y0 + g_ov.ph, 1);
-        ov_rect(cb, xm, r[1], r[0] + r[2], r[1] + r[3], 1, y0 + g_ov.ph + 1, (float)g_ov.pw - hw + 1, y0 + 2 * g_ov.ph + 1, 1);
+        ov_rect(cb, r[0], r[1], r[0] + r[2], r[1] + r[3], 0, (float)(g_ov.h + g_ov.sh), (float)g_ov.pw, (float)(g_ov.h + g_ov.sh + g_ov.ph), 1);
     } else if (edit) {
         ov_rect(cb, 0, 0, W, H, bx - 2, by - 2, bx + 2, by + 2, 0.30f);
         if (menu & OVE_GRID_ON) {
@@ -1024,12 +1017,11 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
         if (g_ov.px && g_ov.px != (uint8_t *)g_ov.map) free(g_ov.px);
         g_ov.px = NULL; g_ov.map = NULL;
         g_ov.lay = lay; uint32_t sh = ov_layout_sprites(w, h); float mr[4]; ov_menu_rect((float)g_sext.width, (float)g_sext.height, mr);
-        g_ov.pw = (uint32_t)mr[2] + 1; g_ov.ph = (uint32_t)mr[3] + 1; if (g_ov.pw > 2 * w - 2) g_ov.pw = 2 * w - 2;   // (each half and a texel in the texture's width)
-        g_ov.prow = 2 * g_ov.ph + 1; free(g_ov.pbuf); g_ov.pbuf = malloc((size_t)g_ov.pw * g_ov.ph * 4);
+        g_ov.pw = (uint32_t)(mr[2] / 2) + 1; g_ov.ph = (uint32_t)(mr[3] / 2) + 1; if (g_ov.pw > w) g_ov.pw = w;
         ov_fps_dims(w, h, fo); g_ov.fk = ov_fps_key(fo);   // the counter's characters: 2.2% of the window's height, at the size chosen
         g_ov.mg = (uint32_t)ceilf((float)g_sext.height * OV_MARK_H); g_ov.mcols = g_ov.mg ? w / g_ov.mg : 0; if (g_ov.mcols > MK_N) g_ov.mcols = MK_N;   // the corner marks' cells
         g_ov.mrows = g_ov.mcols ? (MK_N + g_ov.mcols - 1) / g_ov.mcols : 0;
-        uint32_t th = h + sh + g_ov.prow + g_ov.gh + g_ov.mrows * g_ov.mg;
+        uint32_t th = h + sh + g_ov.ph + g_ov.gh + g_ov.mrows * g_ov.mg;
         VkImageCreateInfo ic = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0, VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {w, th, 1}, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
         VKCHK(vkCreateImage(V.dev, &ic, NULL, &g_ov.img)); VkMemoryRequirements rq; vkGetImageMemoryRequirements(V.dev, g_ov.img, &rq);
@@ -1060,7 +1052,7 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
     if (g_ov.uploaded && want_panel) {   // only the panel, after the last copy out of the buffer has run
         VkFence f[8]; uint32_t n = 0; for (uint32_t i = 0; i < 8; i++) if (i != k) f[n++] = g_pfence[i];
         if (vkWaitForFences(V.dev, n, f, 1, 20000000ull) == VK_TIMEOUT) panel_ok = 0;
-        else { y0 = g_ov.h + g_ov.sh; rows = g_ov.prow; g_ov.uploaded = 0; }
+        else { y0 = g_ov.h + g_ov.sh; rows = g_ov.ph; g_ov.uploaded = 0; }
     }
     if (panel_ok && want_panel) { ov_panel(menu); g_ov.panel = menu; g_ov.exv = exv; }
     // the rows the copy reads go back into the mapped buffer here, in one linear pass (write-combined: the raster above ran in cacheable memory)
