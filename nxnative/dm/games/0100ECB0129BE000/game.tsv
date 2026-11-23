@@ -8,6 +8,7 @@ program_id	0100ECB0129BE000
 
 # ---- App ----
 name	슈퍼로봇대전 30
+name_ko	슈퍼로봇대전 30
 ipa	SuperRobotWars30.ipa
 app_category	public.app-category.games
 
