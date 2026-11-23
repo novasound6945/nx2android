@@ -96,7 +96,7 @@ static int pipe_serial(void) { static int v = -1; if (v < 0) { const char *e = g
 static int g_vbound = 1;   // DM_VK_VBOUND (see vbuf_bound)
 // DM_VK_PROF_SLOW=1 (live): a submission whose replay took over 40 ms logs where it went: pipelines built on the replay thread, textures (vk_tex: images made and
 // packaged uploads, the latter also apart), the copied pools' sync before it, shader modules, and the rest
-int g_prof_on; uint64_t g_prof_ns[8]; static uint64_t g_prof_t0, g_prof_pkg0, g_prof_npkg0, g_prof_pipes0;
+int g_prof_on; uint64_t g_prof_ns[8]; static uint64_t g_prof_t0, g_prof_pkg0, g_prof_npkg0, g_prof_pipes0, g_prof_part0[5], g_prof_bytes0;
 static int g_async_pipe = 1;   // DM_VK_ASYNC_PIPE (see async_pipe)
 static int g_async_parts = 1;   // DM_VK_ASYNC_PARTS (see gpl_parts_async; nothing without DM_VK_ASYNC_PIPE)
 int g_vk_early;   // vk_init runs for the shader preparation (vk_gpl_prepare), before the host started

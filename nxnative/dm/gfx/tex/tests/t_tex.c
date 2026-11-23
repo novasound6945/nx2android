@@ -1,4 +1,4 @@
-// Block-linear deswizzle unit tests (seconds). A round trip; B hand-calculated addresses; E hand-built 3D.
+// Block-linear deswizzle unit tests (seconds). A round trip; B hand-calculated addresses; E hand-built 3D; F the copy loops against nvn_bl_offset.
 // Usage: t_tex
 #include "../nvn_deswizzle.h"
 #include <math.h>
@@ -126,6 +126,40 @@ int main(void) {
         d.flags = 0; nvn_tex_layout(&d, &L);   // the same texture not sparse keeps the packed layout
         CHECK(nvn_tex_level_offset(&d, 1) == 0x81000 && L.size == 0xBC400 && nvn_tex_level_gobs(&d, 0) == 43, "S not sparse: level 1 %#llx storage %#llx, expected 0x81000 / 0xbc400",
               (unsigned long long)nvn_tex_level_offset(&d, 1), (unsigned long long)L.size);
+    }
+
+    // ---------- F the GOB-column loops of nvn_deswizzle / nvn_swizzle against nvn_bl_offset, byte by byte: widths that end inside a GOB (and inside 16 bytes), packaged
+    // block heights, arrays, 3D and a sparse texture's padded rows ----------
+    printf("F deswizzle and swizzle against nvn_bl_offset (every byte)\n");
+    {
+        static const struct { int target, fmt, flags; uint32_t w, h, depth, levels; int pkg; } F[] = {
+            {1, 0x25, 0, 2048, 512, 1, 3, 0}, {1, 0x25, 0, 1000, 333, 1, 5, 0}, {1, 0x01, 0, 37, 300, 1, 4, 0}, {1, 0x0D, 0, 70, 70, 1, 3, 3},
+            {1, 0x42, 0, 1000, 600, 1, 6, 0}, {1, 0x44, 0, 260, 132, 1, 4, 5}, {1, 0x2E, 0, 33, 9, 1, 2, 0}, {4, 0x25, 0, 100, 60, 3, 3, 0},
+            {2, 0x29, 0, 40, 30, 9, 2, 0}, {2, 0x01, 0, 64, 64, 20, 3, 0}, {1, 0x8B, 0x20, 1024, 1024, 1, 3, 4},
+        };
+        for (unsigned i = 0; i < sizeof F / sizeof *F; i++) {
+            nvn_texdesc d = {F[i].target, F[i].fmt, F[i].flags, 0, F[i].w, F[i].h, F[i].depth, F[i].levels, 0, F[i].pkg}; nvn_texlayout L; nvn_tex_layout(&d, &L);
+            uint8_t *st = malloc(L.size), *st2 = calloc(L.size, 1), *st3 = calloc(L.size, 1); for (uint64_t j = 0; j < L.size; j++) st[j] = rnd();
+            int ok = 1;
+            for (unsigned y = 0; y < L.layers; y++) for (unsigned l = 0; l < F[i].levels; l++) {
+                uint32_t rb, rows, sl, bpb; uint64_t base; unsigned th, td;
+                if (nvn_deswizzle_geom(&d, l, y, &rb, &rows, &sl, &base, &th, &td, &bpb)) { ok = 0; continue; }
+                uint32_t lb = nvn_tex_level_gobs(&d, l) * 64; if (lb < rb) lb = rb;
+                size_t pitch = rb + 7, n = pitch * rows * sl; uint8_t *got = malloc(n), *want = malloc(n);
+                memset(got, 0x5A, n); memset(want, 0x5A, n);
+                for (uint32_t z = 0; z < sl; z++) for (uint32_t r = 0; r < rows; r++) for (uint32_t x = 0; x < rb; x++)
+                    want[((size_t)z * rows + r) * pitch + x] = st[base + nvn_bl_offset(x & ~15u, r, z, lb, rows, th, td) + (x & 15)];
+                if (nvn_deswizzle(&d, l, y, st, got, pitch) || memcmp(got, want, n)) { ok = 0; printf("  ✗ F%u layer %u level %u deswizzle differs\n", i, y, l); }
+                nvn_swizzle(&d, l, y, want, pitch, st2);   // and back, against the same addresses written one by one
+                for (uint32_t z = 0; z < sl; z++) for (uint32_t r = 0; r < rows; r++) for (uint32_t x = 0; x < rb; x++)
+                    st3[base + nvn_bl_offset(x & ~15u, r, z, lb, rows, th, td) + (x & 15)] = want[((size_t)z * rows + r) * pitch + x];
+                free(got); free(want);
+            }
+            if (memcmp(st2, st3, L.size)) { ok = 0; printf("  ✗ F%u swizzle differs\n", i); }
+            CHECK(ok, "F%u target %d format %#x %ux%ux%u levels %u: the GOB-column loops differ from nvn_bl_offset", i, F[i].target, F[i].fmt, F[i].w, F[i].h, F[i].depth, F[i].levels);
+            printf("  F%-2u target %d format %#04x %4ux%-4u x%-2u levels %u: %s\n", i, F[i].target, F[i].fmt, F[i].w, F[i].h, F[i].depth, F[i].levels, ok ? "identical" : "differ");
+            free(st); free(st2); free(st3);
+        }
     }
 
     printf("%s: %d/%d checks passed\n", fails ? "RED" : "all passed", checks - fails, checks);
