@@ -73,7 +73,9 @@ for f in files:
     m = re.match(r'nxnative/dm/games/([^/]+)/(.+)', f)
     if not m: continue
     if not re.fullmatch(r'0100[0-9A-F]{12}', m.group(1)): bad.append(f'{f} (folder is not a title ID)')
-    elif m.group(2) not in GAME_FILES: bad.append(f + (' (rename to README.md)' if m.group(2) == 'ANDROID.md' else ''))
+    # android_spv.<shader key>.spv and its .glsl source: a hand-written SPIR-V in place of a shader's translation (dm/android/tools/shader_vk.py; Fire Emblem Engage)
+    elif m.group(2) not in GAME_FILES and not re.fullmatch(r'android_spv\.[0-9a-f]{16}\.(spv|glsl)', m.group(2)):
+        bad.append(f + (' (rename to README.md)' if m.group(2) == 'ANDROID.md' else ''))
 check('game folders hold only known profile files', not bad, ', '.join(bad))
 atsv = [f for f in files if f.endswith('/android.tsv') and f.startswith('nxnative/dm/games/')]
 bad = []

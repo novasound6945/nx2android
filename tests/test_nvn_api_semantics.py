@@ -12,7 +12,7 @@ NAMES = ('SamplerBuilderSetDefaults', 'SamplerBuilderSetDevice', 'SamplerBuilder
 def production():
     source = (NVN / 'hle_nvn.c').read_text(encoding='utf-8')
     obj = (NVN / 'nvn_obj.h').read_text(encoding='utf-8')
-    types = '\n'.join(line for line in obj.splitlines() if any('} ' + name + ';' in line for name in ('samp_par', 'samp_builder_t', 'samp_t', 'queue_t', 'queue_builder_t')))
+    types = '\n'.join(line for line in obj.splitlines() if any('} ' + name + ';' in line for name in ('dev_t_', 'samp_par', 'samp_builder_t', 'samp_t', 'queue_t', 'queue_builder_t')))
     functions = []
     for name in NAMES:
         start = source.index('NVN(nvn' + name + ','); end = source.index('{', start); depth = 1; end += 1
