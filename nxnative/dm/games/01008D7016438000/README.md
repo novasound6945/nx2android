@@ -17,7 +17,7 @@ The profile sets these for you (`android.tsv`); a player changes the pause menu 
 | Row | What it does |
 |---|---|
 | `DM_NVN_ASYNC=1` | asynchronous replay: submissions and presents run on a replay thread, syncs wait for the job's replay and then its GPU fence |
-| `DM_PIN_REPLAY=prime` | pin the replay thread to fast cores: 0 = no, "prime" = the fastest core, other values = the big cores |
+| `DM_PIN_REPLAY=prime` | pin the replay thread to fast cores: 0 = no, "prime" = the fastest core, "need" = the fastest core only while the replay is slow, other values = the big cores |
 | `DM_VK_SETSPLIT=1` | 1 = a descriptor set change may split the command buffer |
 | `DM_VK_PASS_SPLIT=256` | split a pass into command buffers every N draws; 0 = never |
 | `DM_VK_PASS_SPLIT_DEPTH=1` | - |

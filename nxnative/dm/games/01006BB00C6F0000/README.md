@@ -17,7 +17,7 @@ The profile sets these for you (`android.tsv`); a player changes the pause menu 
 |---|---|
 | `DM_VK_BIND_ALIAS=52fcbb4ca2a78907:2=3:4=3` | <shader key>:<binding>=<binding>[:...]: a shader's texture binding reads another binding's texture |
 | `DM_FPS_PIN=60` | pin the governor at 60, 40 or 30 fps; 0 = no pin |
-| `DM_GPU_TURBO=1` | "auto" or 1: ask the GPU for its high clocks while the game is GPU-bound; unset or 0 = no |
+| `DM_GPU_TURBO=1` | "auto" or 1: ask the GPU for its high clocks while the game is GPU-bound; "need": only while the game is held below its target; unset or 0 = no |
 | `DM_VK_FS_NOKILL=b27d97baf39e51b6` | pixel shader keys whose discards are left out (comma-separated) |
 
 Read the profile's porting log in the comment header of [`android.tsv`](android.tsv). Back to the [games list](../../../../README.md#games).
