@@ -23,6 +23,18 @@ int main(void) {
         printf("%-52s expected wait %8.3f ms → got %8.3f ms %s\n", c[i].why, c[i].want / 1e6, got / 1e6, ok ? "✓" : "✗");
         fail += !ok;
     }
+    // the game's interval as followed in game mode: a lone interval-2 frame (Wonder's dynamic interval) is not held, a run is from its second present
+    struct { int itv[6], lone_hold, want[6]; const char *why; } r[] = {
+        {{1, 2, 1, 1, 2, 1}, 0, {1, 1, 1, 1, 1, 1}, "lone interval-2 frames: shown at the next vsync"},
+        {{1, 2, 2, 2, 1, 1}, 0, {1, 1, 2, 2, 1, 1}, "a run of interval 2: held from its second present"},
+        {{2, 2, 3, 3, 1, 3}, 0, {1, 2, 3, 3, 1, 1}, "interval 3 within a run, a lone 3 after it"},
+        {{1, 2, 1, 2, 2, 1}, 1, {1, 2, 1, 2, 2, 1}, "DM_PRESENT_LONE_HOLD=1: every one held, as before"},
+    };
+    for (int i = 0; i < (int)(sizeof r / sizeof *r); i++) {
+        int run = 0, ok = 1;
+        for (int j = 0; j < 6; j++) { run = nvn_pace_itv_run(r[i].itv[j], run); ok &= nvn_pace_game_itv(r[i].itv[j], run, r[i].lone_hold) == r[i].want[j]; }
+        printf("%-52s %s\n", r[i].why, ok ? "✓" : "✗"); fail += !ok; n++;
+    }
     printf("== %d checks, %d failed ==\n", n, fail);
     return fail != 0;
 }

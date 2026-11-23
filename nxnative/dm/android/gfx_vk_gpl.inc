@@ -11,7 +11,8 @@
 // its pipeline. The alpha test's reference is a push constant (gfx_vk_shader.c spv_alpha_test), so its variant's part does not depend on it: the preparation makes the
 // GREATER one of every fragment shader that takes it (vk_shader_alpha_ok; the function Dark Souls Remastered uses), others are made at their first draw. A fragment
 // shader that writes its float outputs as integers (vk_spv_fragout.h spv_int_writer: Luigi's Mansion 3's ~1,400 G-buffer shaders) also gets its integer output part,
-// every float output UINT (the variant int_out_bits gives a draw into all-UINT targets), so its first G-buffer draw compiles nothing.
+// every float output UINT (the variant int_out_bits gives a draw into all-UINT targets), so its first G-buffer draw compiles nothing. The parts made at draws are
+// recorded (DM_ROOT/vk_gpl_seen.bin, gpl_seen_*) and made first at the next start's preparation or warm-up.
 // Not for rasterizer-discard and transform-feedback draws (rare; as before), nor DM_VK_SPV_ALT / DM_VK_X_FLAT_VS pipelines (debugging).
 #include <sys/stat.h>
 VkPipelineLayout vk_pipeline_layout_lib(VkDescriptorSetLayout sets[5], int nsets);
@@ -29,7 +30,7 @@ static pthread_mutex_t g_glib_mu = PTHREAD_MUTEX_INITIALIZER;   // the parts' ta
 // that were alpha test variants (fragment parts with a function in fd), parts_int integer output variants (fd bits 8-23); prep_at / ns_prep_at / ns_prep_all: the
 // preparation's alpha test parts and their time (summed over threads); prep_int / ns_prep_int: its integer output parts (gpl_part_i), int_writers: the shaders that take one
 static struct { gpl_stat link, link_only, part, opt; uint64_t links, parts[2], parts_at, parts_int, link_fail, part_fail, queued, qfull, opt_fail; uint64_t ns_part, ns_link, n_old, ns_old;
-                uint64_t prep_at, prep_at_skip, ns_prep_at, ns_prep_all, prep_int, ns_prep_int, int_writers; } g_gst;   // (under g_glib_mu)
+                uint64_t prep_at, prep_at_skip, ns_prep_at, ns_prep_all, prep_int, ns_prep_int, int_writers, prep_seen; } g_gst;   // (under g_glib_mu)
 
 // DM_VK_GPL_LTO=1 (read once at startup: the parts must all be made the same way): the parts keep their link-time optimization information and a draw links them
 // with link-time optimization, a pipeline as good as the whole one, never the fast link's (diagnosis: the fast-linked pipelines' colour flashes on Turnip)
@@ -164,6 +165,65 @@ static VkPipeline gpl_part(int fs_part, const void *key, vkshader_t *a, vkshader
     if (!p) { pthread_mutex_lock(&g_glib_mu); g_gst.part_fail++; if (!nvn_hm_get(bad, key)) nvn_hm_put(bad, key, (void *)1); pthread_mutex_unlock(&g_glib_mu); return VK_NULL_HANDLE; }
     return gpl_put(m, key, p);
 }
+// ---- the parts the draws made, kept for the next start (DM_ROOT/vk_gpl_seen.bin, beside the pipeline cache) ----
+// What a part depends on beyond its shader is the draw's: the bound textures' formats (integer-texel views), the vertex buffers' formats (vi0: inputs read with the
+// other signedness), the fragment shader's inputs (outputs added), the fragment depth, dual-source and alpha test variants. The preparation cannot know them, so
+// such a part is made at its first draw: Super Mario Bros. Wonder on a Retroid Pocket Nova made 54 pre-rasterization parts (most with a vertex-input flip, 5
+// with uint-texel views 0x80) and 4 fragment parts at draws in its first 7 minutes, 7-35 ms each and up to ten in one frame, and each set the game's interval
+// to 2. Each one's key is recorded here; the next start makes them first: on the preparation's screen, or at the head of the warm-up (from the pipeline cache,
+// before the game meets them). A key the preparation makes anyway (gpl_pr_std / gpl_fs_std: a draw that came before the warm-up) is not recorded. The header
+// holds the keys' version and sizes, the extended dynamic state 3 states and the bundle's hash: another bundle, device or key layout starts the list again
+#define GSEEN_MAGIC 0x31534747u   // "GGS1"
+typedef struct { uint32_t magic, key_ver, pr_size, fs_size, eds3, pad; uint64_t bundle; } gseen_hdr;
+typedef struct { uint32_t fs, pad; union { gprkey pr; gfskey f; } k; } gseen_rec;   // fs: a fragment part (k.f), else a pre-rasterization one (k.pr)
+static gseen_rec *g_gs; static int g_gsn;   // read at the start (vk_gpl_prepare): the preparation's and the warm-up's first g_gsn parts
+static FILE *g_gsf; static nvn_hmap g_gs_have = {.klen = sizeof(gseen_rec)};
+enum { GSEEN_Q = 32 };
+static gseen_rec g_gsq[GSEEN_Q]; static int g_gsq_n, g_gsw_on; static pthread_mutex_t g_gsq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_gsq_cv = PTHREAD_COND_INITIALIZER;
+static void *gpl_seen_writer(void *arg) {   // (a thread of its own: a flush to the files folder can take tens of ms, as the prewarm record's)
+    (void)arg; pthread_setname_np(pthread_self(), "vk gpl seen"); static gseen_rec b[GSEEN_Q];
+    for (;;) {
+        pthread_mutex_lock(&g_gsq_mu); while (!g_gsq_n) pthread_cond_wait(&g_gsq_cv, &g_gsq_mu);
+        int n = g_gsq_n; memcpy(b, g_gsq, sizeof *b * (size_t)n); g_gsq_n = 0; pthread_mutex_unlock(&g_gsq_mu);
+        fwrite(b, sizeof *b, (size_t)n, g_gsf); fflush(g_gsf);
+    }
+    return NULL;
+}
+static int gpl_pr_std(const gprkey *k) { return !k->um0 && !k->im0 && !k->xo0 && !k->gs && !k->vi0 && !k->r.clamp && !k->r.mode; }   // (r.clip: both made where it is not dynamic)
+static int gpl_fs_std(const gfskey *k, const vkshader_t *fs) {
+    if (k->um || k->im || k->ms) return 0;
+    return !k->fd || (fs && k->fd == (uint32_t)NVN_ALPHA_FUNC_GREATER << 4) || (fs && fs->int_writer && k->fd == (fs->fout_locs & 0xff) << 8);
+}
+static void gpl_seen_note(int fs_part, const void *key) {   // a part made at a draw (gpl_link)
+    if (!g_gsf) return;
+    gseen_rec r; memset(&r, 0, sizeof r); r.fs = (uint32_t)fs_part; if (fs_part) r.k.f = *(const gfskey *)key; else r.k.pr = *(const gprkey *)key;
+    pthread_mutex_lock(&g_gsq_mu);
+    if (!nvn_hm_get(&g_gs_have, &r)) { nvn_hm_put(&g_gs_have, &r, (void *)1);
+        if (!g_gsw_on) { g_gsw_on = 1; pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED); pthread_create(&t, &a, gpl_seen_writer, NULL); pthread_attr_destroy(&a); }
+        if (g_gsq_n < GSEEN_Q) g_gsq[g_gsq_n++] = r;   // (a full queue drops the record: that part is only made at its draw again next time)
+        pthread_cond_signal(&g_gsq_cv); }
+    pthread_mutex_unlock(&g_gsq_mu);
+}
+// read the list (dropping a torn last record), write it again and keep the file open to add to it. DM_VK_GPL_SEEN=0 (start-up): neither read nor written
+static void gpl_seen_open(const char *root, uint64_t bundle) {
+    const char *e = getenv("DM_VK_GPL_SEEN"); if ((e && !atoi(e)) || !root || g_gsf) return;
+    char path[1100]; snprintf(path, sizeof path, "%s/vk_gpl_seen.bin", root);
+    gseen_hdr want = {GSEEN_MAGIC, GPL_KEY_VER, (uint32_t)sizeof(gprkey), (uint32_t)sizeof(gfskey), (uint32_t)V.gpl_eds3, 0, bundle}, have;
+    FILE *f = fopen(path, "rb");
+    if (f && fread(&have, sizeof have, 1, f) == 1 && !memcmp(&have, &want, sizeof have)) {
+        fseek(f, 0, SEEK_END); long n = (ftell(f) - (long)sizeof have) / (long)sizeof(gseen_rec); fseek(f, sizeof have, SEEK_SET);
+        if (n > 0 && (g_gs = malloc((size_t)n * sizeof *g_gs))) g_gsn = (int)fread(g_gs, sizeof *g_gs, (size_t)n, f);
+    }
+    if (f) fclose(f);
+    for (int i = 0; i < g_gsn; i++) nvn_hm_put(&g_gs_have, &g_gs[i], (void *)1);
+    g_gsf = fopen(path, "wb"); if (g_gsf) { fwrite(&want, sizeof want, 1, g_gsf); if (g_gsn) fwrite(g_gs, sizeof *g_gs, (size_t)g_gsn, g_gsf); fflush(g_gsf); }
+    else VKLOG("[RED] GPL: %s could not be written: the parts made at draws are not kept for the next start", path);
+}
+static void gpl_seen_make(const gseen_rec *r, uint64_t *made) {   // one listed part, at the preparation or the warm-up
+    *made = 0;
+    if (r->fs) { vkshader_t *fs = r->k.f.fs ? vk_shader(r->k.f.fs, 1) : NULL; if (r->k.f.fs && !fs) return; gpl_part(1, &r->k.f, fs, NULL, made); }
+    else { vkshader_t *vs = r->k.pr.gs ? NULL : vk_shader(r->k.pr.vs, 0); if (!vs) return; gpl_part(0, &r->k.pr, vs, NULL, made); }   // (with a geometry shader: not recorded)
+}
 static int gpl_eligible(const pkey *k) {
     return V.gpl && !k->raster_discard && !k->alt && !k->debug_mode && !k->gs_split &&   // (gs_split: two geometry passes, gfx_vk_exec_xfb.inc, whole pipelines only)
            !(S.sh[0] && S.sh[0]->xfb) && !(S.sh[2] && S.sh[2]->xfb);
@@ -198,6 +258,8 @@ static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout) {
     g_gst.ns_link += t2 - t1; g_gst.ns_part += t1 - t0;
     if (mpr) { g_gst.parts[0]++; gpl_stat_add(&g_gst.part, mpr); } if (mfs) { g_gst.parts[1]++; gpl_stat_add(&g_gst.part, mfs); if (fk.fd >> 4 & 15) g_gst.parts_at++; if (fk.fd >> 8) g_gst.parts_int++; }
     uint64_t nl = g_gst.links; pthread_mutex_unlock(&g_glib_mu);
+    if (mpr && lib[1] && !gpl_pr_std(&pk)) gpl_seen_note(0, &pk);
+    if (mfs && lib[2] && !gpl_fs_std(&fk, fs)) gpl_seen_note(1, &fk);
     if (mpr || mfs) { static int n; if (n++ < 40) VKLOG("GPL: shader part made at a draw: %s%s %.2f ms (vertex %016llx views %#llx/%#llx outputs added %#x geometry %016llx; fragment %016llx views %#llx/%#llx variant %#x ms %#x)",
                                                      mpr ? "pre-rasterization" : "", mfs ? (mpr ? " + fragment" : "fragment") : "", (mpr + mfs) / 1e6, (unsigned long long)pk.vs, (unsigned long long)pk.um0, (unsigned long long)pk.im0, pk.xo0,
                                                      (unsigned long long)pk.gs, (unsigned long long)fk.fs, (unsigned long long)fk.um, (unsigned long long)fk.im, fk.fd, fk.ms); }
@@ -281,8 +343,8 @@ void vk_gpl_report(void) {   // gfx_vk_present.c, every 600 presents
 // bundle on this driver with these keys (vk_gpl.h gpl_id). With the mark, a start makes the parts again from the cache on two threads below the game's (the warm-up),
 // and a draw that comes first makes its part at once (a cache hit). DM_VK_GPL_PREP_THREADS=n (start-up): the preparation's threads (default: the cores but one, 2-8)
 static uint64_t *g_gk[2]; static int g_gkn[2], g_gnr; static _Atomic int g_gi_next, g_gi_done, g_gi_made; static gpl_stat g_gprep;
-static int g_gtotal(void) { return g_gkn[0] * g_gnr + 3 * g_gkn[1]; }   // pre-rasterization parts, fragment parts, their GREATER alpha test variants, their integer output variants (the last two: a shader without one is skipped)
-static int g_gint0(void) { return g_gkn[0] * g_gnr + 2 * g_gkn[1]; }    // the first of the integer output variants (a mark from before them: the preparation of those alone)
+static int g_gtotal(void) { return g_gsn + g_gkn[0] * g_gnr + 3 * g_gkn[1]; }   // the listed parts (gpl_seen_open), pre-rasterization parts, fragment parts, their GREATER alpha test variants, their integer output variants (the last two: a shader without one is skipped)
+static int g_gint0(void) { return g_gsn + g_gkn[0] * g_gnr + 2 * g_gkn[1]; }    // the first of the integer output variants (a mark from before them: the preparation of those alone)
 static void gpl_keys_load(void) {
     if (g_gk[0]) return;
     uint32_t n = 0; vk_bundle_hash(&n); g_gnr = gpl_rast_variants(V.gpl_eds3, V.has_depth_clip_ctl);
@@ -290,6 +352,10 @@ static void gpl_keys_load(void) {
 }
 static void gpl_part_i(int i) {
     uint64_t made = 0;
+    if (i < g_gsn) { gpl_seen_make(&g_gs[i], &made);
+        if (made) { atomic_fetch_add(&g_gi_made, 1); pthread_mutex_lock(&g_glib_mu); g_gst.prep_seen++; gpl_stat_add(&g_gprep, made); g_gst.ns_prep_all += made; pthread_mutex_unlock(&g_glib_mu); }
+        return; }
+    i -= g_gsn;
     if (i < g_gkn[0] * g_gnr) { vkshader_t *vs = vk_shader(g_gk[0][i / g_gnr], 0); if (!vs) return;
         gprkey pk = gpl_pr_key(vs, NULL, 0, 0, 0, 0, 0, 0, gpl_rast_key(V.gpl_eds3, 0, 2, (uint32_t)(i % g_gnr), V.has_depth_clip_ctl)); gpl_part(0, &pk, vs, NULL, &made); }
     else { int j = i - g_gkn[0] * g_gnr, blk = j / g_gkn[1], at = blk == 1, iv = blk == 2; vkshader_t *fs = vk_shader(g_gk[1][j % g_gkn[1]], 1); if (!fs) return;
@@ -315,6 +381,8 @@ static void gpl_log_done(const char *what, uint64_t ns, int nt) {
           what, g_gkn[0], g_gnr, g_gkn[1], atomic_load(&g_gi_made), ns / 1e9, nt, p50, p95, mx, (unsigned long long)g_gst.part_fail);
     VKLOG("GPL: %s: alpha test (GREATER) fragment parts %llu made, %llu shaders without a float colour 0 skipped; their time %.1f s of %.1f s summed over threads (%.0f%%: about %.1f s of the %.1f s)",
           what, (unsigned long long)at, (unsigned long long)ats, nat / 1e9, nall / 1e9, share * 100, share * ns / 1e9, ns / 1e9);
+    if (g_gsn) { pthread_mutex_lock(&g_glib_mu); uint64_t ps = g_gst.prep_seen; pthread_mutex_unlock(&g_glib_mu);
+                 VKLOG("GPL: %s: %d parts the last runs made at draws (vk_gpl_seen.bin): %llu made now (the others from this run's tables or failed)", what, g_gsn, (unsigned long long)ps); }
     if (iw) VKLOG("GPL: %s: %llu fragment shaders write integers: their integer output parts %llu made, %.1f s summed over threads (%.0f%%)", what, (unsigned long long)iw, (unsigned long long)ni,
                   nsi / 1e9, nall ? 100.0 * (double)nsi / (double)nall : 0);
 }
@@ -343,6 +411,7 @@ int vk_gpl_prepare(void (*note)(void *u, int done, int total), void *u) {
     gpl_id want, have; gpl_id_now(&want); if (!want.nshaders) return 0;
     snprintf(path, sizeof path, "%s/vk_gpl.id", root);
     int had = gpl_id_read(path, &have);
+    gpl_seen_open(root, want.bundle);
     gpl_keys_load();
     long nc = sysconf(_SC_NPROCESSORS_ONLN); int nt = nc > 1 ? (int)nc - 1 : 1; if (nt < 2) nt = 2; if (nt > 8) nt = 8;
     if ((e = getenv("DM_VK_GPL_PREP_THREADS")) && atoi(e) > 0) nt = atoi(e) > 16 ? 16 : atoi(e);
@@ -361,12 +430,12 @@ int vk_gpl_prepare(void (*note)(void *u, int done, int total), void *u) {
         have.int_ver = GPL_INT_VER; if (!gpl_id_write(path, &have)) VKLOG("[RED] GPL: the reuse mark %s could not be written: the next start looks for integer writers again", path);
         VKLOG("GPL: a mark from before the integer output parts: %llu of %d fragment shaders write integers, %llu parts made in %.1f s on %d threads (pipeline libraries failed %llu)",
               (unsigned long long)iw, g_gkn[1], (unsigned long long)ni, (tick() - t1) / 1e9, ntr ? ntr : 1, (unsigned long long)fail);
-        pthread_mutex_lock(&g_glib_mu); g_gst.int_writers = g_gst.prep_int = g_gst.ns_prep_int = g_gst.ns_prep_all = 0; memset(&g_gprep, 0, sizeof g_gprep); pthread_mutex_unlock(&g_glib_mu);   // (the warm-up's own)
+        pthread_mutex_lock(&g_glib_mu); g_gst.int_writers = g_gst.prep_int = g_gst.ns_prep_int = g_gst.ns_prep_all = g_gst.prep_seen = 0; memset(&g_gprep, 0, sizeof g_gprep); pthread_mutex_unlock(&g_glib_mu);   // (the warm-up's own)
         atomic_store(&g_gi_next, 0); atomic_store(&g_gi_done, 0); atomic_store(&g_gi_made, 0);
         if (ni) { pthread_t w; if (!pthread_create(&w, NULL, gpl_warm_main, NULL)) pthread_detach(w); return 1; }
     }
     if (had && gpl_id_up_to_date(&want, &have)) {
-        VKLOG("GPL: shader parts of this bundle (%u shaders, %016llx) made before on this driver: no preparation; made again from the pipeline cache in the background", want.nshaders, (unsigned long long)want.bundle);
+        VKLOG("GPL: shader parts of this bundle (%u shaders, %016llx) made before on this driver: no preparation; made again from the pipeline cache in the background, first the %d the last runs made at draws", want.nshaders, (unsigned long long)want.bundle, g_gsn);
         pthread_t t; if (!pthread_create(&t, NULL, gpl_warm_main, NULL)) pthread_detach(t);
         return 0; }
     VKLOG("GPL: preparing the shader parts: %s", !had ? "first start (no mark)" : have.magic != GPL_ID_MAGIC || have.key_ver != want.key_ver ? "the parts' key changed"

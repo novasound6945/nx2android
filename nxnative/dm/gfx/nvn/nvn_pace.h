@@ -14,3 +14,9 @@ static inline uint64_t nvn_pace(nvn_pacer *p, uint64_t now, uint64_t period) {
     p->target = now - next < period ? next : now;
     return 0;
 }
+
+// The game's present interval as presentation follows it in game mode (hle_nvn.c present_itv): run counts the presents in a row that asked for 2 or more
+// (nvn_pace_itv_run, this one included). The first of a run is not held: a dynamic interval controller (Super Mario Bros. Wonder's sead framework) asks for 2
+// on the one frame after a long one and 1 again before the next. A run of two or more is followed from its second present; lone_hold: every one, as the Switch does
+static inline int nvn_pace_itv_run(int interval, int run) { return interval > 1 ? run + 1 : 0; }
+static inline int nvn_pace_game_itv(int interval, int run, int lone_hold) { return interval > 1 && (run > 1 || lone_hold) ? interval : 1; }

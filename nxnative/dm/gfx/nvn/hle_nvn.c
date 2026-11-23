@@ -1537,7 +1537,7 @@ static double g_rt_period_ms;
 static void sleep_until_ns(uint64_t dl);
 static uint64_t present_period(const win_t *o);
 static uint64_t rt_period_ns(const win_t *o, uint64_t period);
-static int present_itv(const win_t *o);
+static int present_itv(const win_t *o); static int lone_hold(void);
 __attribute__((weak)) void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n = 0; *ns = 0; }   // The host's hle_thread.c provides the ground truth; 0 in graphics unit tests
 __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *count = 0; return QOS_CLASS_UNSPECIFIED; }
 __attribute__((weak)) void dm_perf_frame_start(uint64_t pace_ns, uint64_t pq_ns) { (void)pace_ns; (void)pq_ns; }   // Android (perf_android.c): a frame's work starts, for the CPU performance hint
@@ -1862,10 +1862,17 @@ static void present_cfg(const win_t *o) {
     // with the same save and the same input, the UI message streams of the two modes match message by message. Proof (before character select): r9 game / display 60 ×3 / display 120 ×2, 6 groups in total, uicmp consistent
     // (the save indicator is exempted as a timing race), and the timing differences of key messages are within game mode's own noise band; proof after entering a run is still missing, pending action script coverage
     const char *msrc; g_display_mode = dm_pacing_display(&msrc);   // dm_pacing.c
-    LOG("[nvn] present tick %d Hz, interval mode %s (%s; present interval set by the game %d; %s)", g_hz, g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
-        msrc, o->interval, scr > 0 ? "window, fixed 60 Hz" : "no window, fixed 60 Hz");
+    LOG("[nvn] present tick %d Hz, interval mode %s (%s; present interval set by the game %d; %s)%s", g_hz, g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
+        msrc, o->interval, scr > 0 ? "window, fixed 60 Hz" : "no window, fixed 60 Hz", g_display_mode ? "" : lone_hold() ? "; every interval-2 frame held (DM_PRESENT_LONE_HOLD)" : "; a lone interval-2 frame not held");
 }
-static int present_itv(const win_t *o) { int c = fps_step_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : 60 / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
+// A lone interval-2 frame is not held (intentional deviation, game mode only): Super Mario Bros. Wonder's sead dynamic interval (v0 main+0xe16ac, 1.2.1
+// main+0xcfd24) sets interval 2 for the one frame after a frame it measured as long and 1 again before the next present. Held, that frame stayed on screen
+// for 33.3 ms: on a Retroid Pocket Nova 118 of 163 [longframe]s in 12 minutes were those holds (one each 5-10 s in a course, the stutter the player sees),
+// while the slow frame before it had already been absorbed by the swapchain (0 frames late on screen). The game's logic does not step by the interval
+// as far as seen (its float copy at main+0x3543b90 is read only by two controller hold counters), so that frame shown at the next vsync runs no game time ahead.
+// A run of two presents or more is followed from its second (a game that asks for 30 fps keeps it). DM_PRESENT_LONE_HOLD=1 (start-up): hold every one, as before
+static int lone_hold(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_PRESENT_LONE_HOLD"); v = e && atoi(e) ? 1 : 0; } return v; }
+static int present_itv(const win_t *o) { int c = fps_step_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : 60 / c) : g_display_mode ? 1 : nvn_pace_game_itv(o->interval, o->itv_run, lone_hold()); }   // vsyncs per frame that presentation follows
 static uint64_t present_period(const win_t *o) {
     present_cfg(o);
     int was = atomic_load(&g_game_itv), want = o->interval > 0 ? o->interval : 1;
@@ -1996,7 +2003,7 @@ static void dyn_scale_tick(uint64_t presents) {
         sc = nsc; memcpy(dm_fps_state + 0x10, &sc, sizeof sc); }
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
-    (void)q; win_t *o = (win_t *)w; o->presents++; SEQ("present %d", idx);
+    (void)q; win_t *o = (win_t *)w; o->presents++; o->itv_run = nvn_pace_itv_run(o->interval, o->itv_run); SEQ("present %d", idx);   // (itv_run before present_itv: this present counts)
     dm_fps_lock_tick();
     if (dm_fps_state) { static int was; int c = fps_step_cap(); if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? " (prerendered movie)" : ""); was = c; } }
     if (dm_fps_state) dyn_scale_tick(o->presents);

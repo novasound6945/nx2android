@@ -187,6 +187,7 @@ DM_PRESENT_HZ	int		debug	?	hle_nvn.c
 DM_PRESENT_INTERVAL	str		porter	?	hle_nvn.c	"display" = presents follow the display's rate; else the game's interval. Default: the profile (present_interval)
 DM_PRESENT_LATENCY	bool		debug,ios	?	nvn_mtl.m	
 DM_PRESENT_LINK	int		debug,ios	?	nvn_mtl.m	
+DM_PRESENT_LONE_HOLD	bool	0	profile	start	hle_nvn.c	1: a lone frame the game asks to hold for interval 2 is held (as the Switch does); 0: only a run of two or more is, from its second (nvn_pace_game_itv)
 DM_PROBE	str		debug	?	probe.c	
 DM_PROBE_ALL	str		debug	?	probe.c	also print x9–x18
 DM_PROBE_DUMP	str		debug	?	probe.c	
@@ -287,6 +288,7 @@ DM_VK_GPL_LINK	int		debug	?	gfx_vk_exec.c
 DM_VK_GPL_LINK_MS	int		debug	?	gfx_vk_exec.c	
 DM_VK_GPL_LTO	int		debug	?	gfx_vk_gpl.inc	
 DM_VK_GPL_PREP_THREADS	int		debug	?	gfx_vk_gpl.inc	
+DM_VK_GPL_SEEN	bool	1	debug	start	gfx_vk_gpl.inc	0: the shader parts made at draws are not recorded (DM_ROOT/vk_gpl_seen.bin) nor made first at the next start
 DM_VK_GPL_TRACE	int		debug	?	gfx_vk_gpl.inc	
 DM_VK_GS_SPLIT	bool	0	profile	live	gfx_vk_exec.c	1 = split geometry-shader draws (gfx_vk_gs_split.c)
 DM_VK_HANG_S	float	1.5	debug	start	gfx_vk_core.c	seconds a submission may stay unfinished before it is taken for a GPU hang: one `[RED] [hang]` line, the pipelines first used since the last finished submission (vs / fs / gs keys, topology, integer views) and, with `DM_VK_CRUMBS=1`, the last pass the GPU finished, then the log is flushed to storage (fsync) before a device freeze can lose it; `0` waits without the watch
