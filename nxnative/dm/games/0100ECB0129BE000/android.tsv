@@ -26,3 +26,7 @@ readme_tag	v0.5.0
 # (0x5f3fb000 into the pool) lay across the end of the 6th, so it had no buffer ("ranges across two chunks": 8,192 in about 150 s on the Retroid Pocket Nova,
 # Adreno 740 with Turnip, v1048576, 2026-11-23). With DM_VK_ZC_CHUNK_MB=2048 the pool is one piece and 0 ranges are across; the Adreno 740 takes it.
 env	DM_VK_ZC_CHUNK_MB=2048
+# Invalidate-only barriers keep the render pass open (DM_VK_INVAL_KEEP=1, as SUPER ROBOT WARS T and V): the battle scenes ended a pass at every draw (2.32 M draws,
+# 2.32 M passes), frame work p50 26-34 / p90 48 ms and 24 fps at times on the Retroid Pocket Nova (Turnip, v1048576, 2026-11-23). With it, 3 passes a frame,
+# frame work p50 17-21 / p90 23-27 ms within the battle's 30 fps, long frames 405 in 128 s -> 29 in 93 s; the GPU was 3-8 ms a frame either way.
+env	DM_VK_INVAL_KEEP=1
