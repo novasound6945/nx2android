@@ -79,8 +79,6 @@ __attribute__((weak)) int dm_menu_state(void) { return -1; }
 __attribute__((weak)) int dm_menu_audio_available(void) { return 0; }
 __attribute__((weak)) int dm_menu_rate_available(void) { return 0; }
 __attribute__((weak)) int dm_menu_res_available(void) { return 0; }
-__attribute__((weak)) int dm_menu_detail_available(void) { return 0; }
-__attribute__((weak)) int dm_menu_detail_step(void) { return 0; }
 __attribute__((weak)) int dm_fps_opts(void) { return FPSO_DEFAULT; }   // front_android.c: the counter's options, packed (overlay_layout.h fpso_*)
 __attribute__((weak)) int dm_overlay_fps(void) { return 0; }   // front_android.c: the pause menu's Show FPS
 __attribute__((weak)) int dm_menu_exit(float *f, int *chosen) { *f = 0; *chosen = 0; return OV_EXIT_IDLE; }   // front_android.c: Exit game's hold
@@ -417,9 +415,9 @@ static void cv_button(const ov_canvas *cv, const float b[4], const char *l, int 
 // them: the controls grow to hold their words (ovm_geo), and the panel grows wider where the screen has room (overlay_layout.h ov_menu_rect, dm_menu_row_need);
 // only where that is not enough do the letters get smaller
 static const char *const OVM_LABELS_EN[OVM_N] = {"Show gamepad", "Opacity", "Edit layout", "Rumble", "Show FPS", "Mode", "Export save", "Import save", "Face buttons", "Audio output", "Frame rate", "Resolution",
-                                                  "Detail distance", "Frame rate limit", "Touch input", "Resume", "Exit game", ""};
+                                                  "Frame rate limit", "Touch input", "Resume", "Exit game", ""};
 static const char *const OVM_LABELS_ZH[OVM_N] = {"显示手柄", "透明度", "编辑布局", "震动", "显示帧率", "模式", "导出存档", "导入存档", "按键布局", "音频输出", "帧率", "分辨率",
-                                                  "细节距离", "帧率上限", "触屏操作", "继续游戏", "退出游戏", ""};
+                                                  "帧率上限", "触屏操作", "继续游戏", "退出游戏", ""};
 #define OVM_LABELS (dm_ui_zh() ? OVM_LABELS_ZH : OVM_LABELS_EN)
 static const char *const OVM_BUTTONS_EN[OVM_N] = {[OVM_EDIT] = "Edit", [OVM_EXPORT] = "Export", [OVM_IMPORT] = "Import", [OVM_AUDIO] = "Select"};   // the rows that are a button: its word
 static const char *const OVM_BUTTONS_ZH[OVM_N] = {[OVM_EDIT] = "编辑", [OVM_EXPORT] = "导出", [OVM_IMPORT] = "导入", [OVM_AUDIO] = "选择"};
@@ -430,7 +428,6 @@ static const char *const OVM_MODES_ZH[2] = {"掌机", "底座"};
 static const char *const OVM_PADS_EN[2] = {"Position", "Label"};
 static const char *const OVM_PADS_ZH[2] = {"位置", "标签"};
 #define OVM_PADS (dm_ui_zh() ? OVM_PADS_ZH : OVM_PADS_EN)   // a controller's face buttons (front_android.c pad_labels)
-static const char *const OVM_DETS[3] = {"1x", "1.5x", "2x"};   // the detail distance factor (front_android.c OVM_DETAIL)
 static const char *const OVM_RESS[3] = {"Low", "Auto", "High"};   // the render scale's steps (front_android.c OVM_RES)
 static const char *const OVM_RATES[2] = {"30 fps", "60 fps"};   // the frame step's target (front_android.c OVM_RATE)
 // the frame rate limit (front_android.c limit_apply): only its value, in a pill as wide as the widest (its row steps through them, so the other values are not shown
@@ -446,7 +443,7 @@ static int ovm_ref_scale(float rh) {
         float need = 0;
         for (int i = 0; i < OVM_RESUME; i++) {
             if (i == OVM_TOUCH) continue;   // (no row)
-            float lw = cv_text_w(OVM_LABELS[i], is), cw = i == OVM_MODE ? 2 * (cv_text_w(OVM_MODES[0], is) + sh) : i == OVM_PAD ? 2 * (cv_text_w(OVM_PADS[0], is) + sh) : i == OVM_RATE ? 2 * (cv_text_w(OVM_RATES[0], is) + sh) : i == OVM_RES ? 3 * (cv_text_w(OVM_RESS[1], is) + sh) : i == OVM_DETAIL ? 3 * (cv_text_w(OVM_DETS[1], is) + sh) : i == OVM_LIMIT ? ovm_limit_w(is, sh) : OVM_BUTTONS[i] ? cv_text_w(OVM_BUTTONS[i], is) + 2 * sh : sw + gap + cv_text_w("OFF", is);
+            float lw = cv_text_w(OVM_LABELS[i], is), cw = i == OVM_MODE ? 2 * (cv_text_w(OVM_MODES[0], is) + sh) : i == OVM_PAD ? 2 * (cv_text_w(OVM_PADS[0], is) + sh) : i == OVM_RATE ? 2 * (cv_text_w(OVM_RATES[0], is) + sh) : i == OVM_RES ? 3 * (cv_text_w(OVM_RESS[1], is) + sh) : i == OVM_LIMIT ? ovm_limit_w(is, sh) : OVM_BUTTONS[i] ? cv_text_w(OVM_BUTTONS[i], is) + 2 * sh : sw + gap + cv_text_w("OFF", is);
             need = fmaxf(need, i == OVM_OPACITY ? fmaxf(lw / 0.38f, cv_text_w("80%", is) / 0.14f) : lw + gap + cw + h * 0.3f);
         }
         float tabw = 0; for (int k = 0; k < OVM_TABS; k++) tabw = fmaxf(tabw, cv_text_w(OVM_TAB_NAMES[k], is));
@@ -476,7 +473,6 @@ static float ovm_need(float rh, int is) {
         else if (i == OVM_PAD) cw = 2 * (ovm_w3(OVM_PADS, 2, is) + g.sh);
         else if (i == OVM_RATE) cw = 2 * (ovm_w3(OVM_RATES, 2, is) + g.sh);
         else if (i == OVM_RES) cw = 3 * (ovm_w3(OVM_RESS, 3, is) + g.sh);
-        else if (i == OVM_DETAIL) cw = 3 * (ovm_w3(OVM_DETS, 3, is) + g.sh);
         else if (i == OVM_LIMIT) cw = ovm_limit_w(is, g.sh);
         else if (OVM_BUTTONS[i]) cw = cv_text_w(OVM_BUTTONS[i], is) + 2 * g.sh;
         else cw = g.sw + g.gap + fmaxf(cv_text_w(TR("ON", "开"), is), cv_text_w(TR("OFF", "关"), is));
@@ -542,9 +538,9 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             cv_text(cv, x1 - cv_text_w(v, vs), cy, v, vs, x == OVX_FAILED ? C_ACCENT : C_WHITE);
         } else if (OVM_BUTTONS[it]) {   // a button
             float bw = cv_text_w(OVM_BUTTONS[it], is) + 2 * sh, b[4] = {x1 - bw, cy - g.bh / 2, bw, g.bh}; cv_button_s(cv, b, OVM_BUTTONS[it], 0, 0, is);
-        } else if (it == OVM_MODE || it == OVM_PAD || it == OVM_RATE || it == OVM_RES || it == OVM_DETAIL) {   // two segments, the current one filled: handheld (performance) | docked (resolution); by position | by label
-            const char *const *seg = it == OVM_MODE ? OVM_MODES : it == OVM_RATE ? OVM_RATES : it == OVM_RES ? OVM_RESS : it == OVM_DETAIL ? OVM_DETS : OVM_PADS; int nseg = it == OVM_RES || it == OVM_DETAIL ? 3 : 2;
-            int cur = it == OVM_MODE ? st >> 2 & 1 : it == OVM_RATE ? st >> 29 & 1 : it == OVM_RES ? (st >> 19 & 1) | (st >> 30 & 1) << 1 : it == OVM_DETAIL ? dm_menu_detail_step() : st >> 28 & 1;
+        } else if (it == OVM_MODE || it == OVM_PAD || it == OVM_RATE || it == OVM_RES) {   // two segments, the current one filled: handheld (performance) | docked (resolution); by position | by label
+            const char *const *seg = it == OVM_MODE ? OVM_MODES : it == OVM_RATE ? OVM_RATES : it == OVM_RES ? OVM_RESS : OVM_PADS; int nseg = it == OVM_RES ? 3 : 2;
+            int cur = it == OVM_MODE ? st >> 2 & 1 : it == OVM_RATE ? st >> 29 & 1 : it == OVM_RES ? (st >> 19 & 1) | (st >> 30 & 1) << 1 : st >> 28 & 1;
             float hh = g.hh, segw = fmaxf(cv_text_w(seg[0], is), cv_text_w(seg[1], is)); if (nseg == 3) segw = fmaxf(segw, cv_text_w(seg[2], is));
             segw += sh; float x0 = x1 - nseg * segw;
             cv_rrect(cv, x0, cy - hh / 2, x1, cy + hh / 2, hh / 2, C_OFF);

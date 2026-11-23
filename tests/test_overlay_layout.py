@@ -19,8 +19,7 @@ class OverlayLayout(unittest.TestCase):
         harness = r'''
 #include <assert.h>
 #include "overlay_layout.h"
-static int custom_faces, custom_a, custom_x, hidden_ctl = -1, audio_available, rate_available, res_available, detail_available;
-int dm_menu_detail_available(void) { return detail_available; }
+static int custom_faces, custom_a, custom_x, hidden_ctl = -1, audio_available, rate_available, res_available;
 int dm_menu_audio_available(void) { return audio_available; }
 int dm_menu_rate_available(void) { return rate_available; }
 int dm_menu_res_available(void) { return res_available; }
@@ -107,11 +106,9 @@ int main(void) {
     assert(ov_menu_scale() <= fit && ov_menu_item(0, OVM_ROWS - 1) == OVM_RESUME);
     rate_available = 0;
     assert(OVM_ROWS == 9 && ov_menu_item(1, 2) == OVM_RES && ov_menu_item(1, 3) == OVM_MODE);
-    detail_available = 1;   // the detail distance row follows the resolution's
-    assert(OVM_ROWS == 10 && ov_menu_item(1, 2) == OVM_RES && ov_menu_item(1, 3) == OVM_DETAIL && ov_menu_item(1, 4) == OVM_MODE && ov_menu_item(1, OVM_ROWS - 2) == OVM_AUDIO);
     rate_available = 1;
-    assert(OVM_ROWS == 11 && ov_menu_item(1, 2) == OVM_RATE && ov_menu_item(1, 4) == OVM_DETAIL && ov_menu_item(1, 6) == OVM_LIMIT && ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
-    assert(OVM_ROWS == OVM_ROWS_MAX && ov_menu_item(1, 7) == OVM_EXPORT && ov_menu_item(1, 8) == OVM_IMPORT && ov_menu_item(1, 9) == OVM_AUDIO);   // every row a game can have: no cloud rows (the launcher's Cloud save page has them)
+    assert(OVM_ROWS == 10 && ov_menu_item(1, 2) == OVM_RATE && ov_menu_item(1, 4) == OVM_MODE && ov_menu_item(1, 5) == OVM_LIMIT && ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
+    assert(OVM_ROWS == OVM_ROWS_MAX && ov_menu_item(1, 6) == OVM_EXPORT && ov_menu_item(1, 7) == OVM_IMPORT && ov_menu_item(1, 8) == OVM_AUDIO);   // every row a game can have: no cloud rows (the launcher's Cloud save page has them)
     {   // every item has one row in one tab, before Resume (gfx_vk_present.c ov_menu_panel sizes the letters by the items before OVM_RESUME)
         int seen[OVM_N] = {0};
         for (int t = 0; t < OVM_TABS; t++) for (int row = 1; row < OVM_ROWS - 1; row++) { int it = ov_menu_item(t, row); if (it >= 0) { assert(it < OVM_RESUME); seen[it]++; } }

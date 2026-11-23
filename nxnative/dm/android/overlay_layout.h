@@ -202,7 +202,7 @@ static inline int fpso_pack(int rows, int pos, int colour, int outline, int size
 static inline int fpso_scale(int base, int size) { return size == FPSO_SMALL ? (base > 1 ? base - 1 : 1) : size == FPSO_LARGE ? base + 1 : size == FPSO_XL ? 2 * base : base; }
 // ---- the pause menu: a panel in the middle of the window: a row of tabs, the open tab's rows, and Resume. Everything is placed in a panel rectangle p
 // (x, y, width, height: the window's for touches, the raster's for drawing), so the touches and the drawing agree ----
-enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_PAD, OVM_AUDIO, OVM_RATE, OVM_RES, OVM_DETAIL, OVM_LIMIT, OVM_TOUCH, OVM_RESUME, OVM_EXIT, OVM_TAB, OVM_N };   // OVM_TAB: the tabs' row;
+enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_PAD, OVM_AUDIO, OVM_RATE, OVM_RES, OVM_LIMIT, OVM_TOUCH, OVM_RESUME, OVM_EXIT, OVM_TAB, OVM_N };   // OVM_TAB: the tabs' row;
             // OVM_EDIT: the layout editor; OVM_MODE: handheld (performance) or docked (resolution); OVM_EXPORT, OVM_IMPORT: the save manager (saves_android.c);
             // OVM_PAD: a controller's face buttons by their position or by their label (front_android.c pad_labels); OVM_RATE: the frame step's target, 30 or 60 fps,
             // for a game whose rewriter stubs step by the host's target; OVM_RES: the render scale of a game with a render-scale stub, in three steps. Both only
@@ -212,16 +212,15 @@ enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EX
             // OVM_TOUCH: no row any more (players did not need it): touch passthrough stays (front_android.c g_set_touch: env.txt DM_TOUCH, settings.txt touch=); OVM_EXIT: the button
             // row's Exit game beside Resume (front_android.c menu_do: the app ends as Android ends it - Activity.finish(), never a hard exit)
 #define OVM_TABS 2
-#define OVM_PER_TAB 9
-static const int OVM_TAB_ITEMS[OVM_TABS][OVM_PER_TAB] = {{OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_PAD, -1, -1, -1, -1},
-                                                        {OVM_FPS, OVM_RATE, OVM_RES, OVM_DETAIL, OVM_MODE, OVM_LIMIT, OVM_EXPORT, OVM_IMPORT, OVM_AUDIO}};
-// OVM_DETAIL: the detail distance of a game whose culling shader takes the host's factor (front_android.c dm_menu_detail_available): 1x the game's own, 1.5x, 2x
+#define OVM_PER_TAB 8
+static const int OVM_TAB_ITEMS[OVM_TABS][OVM_PER_TAB] = {{OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_PAD, -1, -1, -1},
+                                                        {OVM_FPS, OVM_RATE, OVM_RES, OVM_MODE, OVM_LIMIT, OVM_EXPORT, OVM_IMPORT, OVM_AUDIO}};
 #define OVM_LIMITS 4   // the frame rate limit's values, as the menu steps through them (front_android.c LIMIT_STEPS): Auto, 60, 40, 30 fps
 static const char *const OVM_TAB_NAMES_EN[OVM_TABS] = {"Gamepad", "Game"};
 static const char *const OVM_TAB_NAMES_ZH[OVM_TABS] = {"手柄", "游戏"};
 #define OVM_TAB_NAMES (dm_ui_zh() ? OVM_TAB_NAMES_ZH : OVM_TAB_NAMES_EN)
-int dm_menu_audio_available(void); int dm_menu_rate_available(void); int dm_menu_res_available(void); int dm_menu_detail_available(void); int dm_menu_detail_step(void);
-static inline int ov_menu_shown(int it) { return it >= 0 && !(it == OVM_AUDIO && !dm_menu_audio_available()) && !(it == OVM_RATE && !dm_menu_rate_available()) && !(it == OVM_RES && !dm_menu_res_available()) && !(it == OVM_DETAIL && !dm_menu_detail_available()); }
+int dm_menu_audio_available(void); int dm_menu_rate_available(void); int dm_menu_res_available(void);
+static inline int ov_menu_shown(int it) { return it >= 0 && !(it == OVM_AUDIO && !dm_menu_audio_available()) && !(it == OVM_RATE && !dm_menu_rate_available()) && !(it == OVM_RES && !dm_menu_res_available()); }
 // The panel's rows: the tabs, a tab's rows (as many for every tab: the panel keeps its size from tab to tab), Resume. Five rows a tab, and more only when a tab shows
 // more (a game with the Frame rate, Resolution or Detail distance row): every other game's panel and rows keep their size
 #define OVM_ROWS_MAX (OVM_PER_TAB + 2)   // for arrays

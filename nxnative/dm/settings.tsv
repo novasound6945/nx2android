@@ -24,7 +24,7 @@ DM_CRASH_TOMBSTONE	str		debug	?	crash.c
 DM_CTL	str		app	?	hle_hid.c	the control file of a development build (ctl.txt: key presses, env lines, shots); release builds ignore it
 DM_DBG	str		debug	?	main.c	
 DM_DBG_AU_FRAMES	int		debug	?	hle_audio.c	diagnostic: on the Mac, make the sound card callback ask N frames each time (1024 = the iOS default, reproduces the crackling)
-DM_DETAIL_DIST	bool		profile	start	front_android.c	the pause menu's detail distance row, for a build whose culling shader is patched to read the factor (gfx_vk_shader.c DETAIL_SLOT)
+DM_DETAIL_DIST	bool		profile	start	gfx_vk_shader.c	the build's culling shader reads a factor from DETAIL_SLOT; the host keeps it at 1x (the pause menu row was removed)
 DM_DETCLOCK	str		debug	?	hle_nvn.c hle_os.c	
 DM_DETCLOCK_PACE	bool		debug	?	hle_nvn.c	
 DM_DYN_SCALE	float		debug	live	hle_nvn.c	the host's dynamic resolution through the render-scale stub: every 30 frames held at the cap, GPU p90 over 85% of the frame time lowers the scale 0.05, under 70% raises it; 0 = off (scale 1.0). Tears of the Kingdom's pond: 1.0 -> 0.6 saved only 2.6 ms of GPU p90

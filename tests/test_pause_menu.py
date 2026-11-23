@@ -190,9 +190,8 @@ int dm_opmode(void) { return opmode; }
 void dm_set_opmode(int m) { opmode = m; }
 static int pad_labels(void) { return 0; }
 static _Atomic int g_tx_on, g_menu;
-// the Resolution, Detail distance and Frame rate rows' neighbours (front_android.c, before the settings): a game with none of them
+// the Resolution and Frame rate rows' neighbours (front_android.c, before the settings): a game with none of them
 static char g_res_scales[3][16]; static int res_steps(void) { return 0; } static void res_apply(int step) { (void)step; }
-static _Atomic int g_set_detail; static void detail_apply(int step) { (void)step; }
 int dm_fps_target_get(void) { return 0; }
 // dm/host/dm_pacing.c's two switches the governor's policy reads (game_mode_sync), as there
 static int dm_pacing_adaptive(int *explicit_set) { const char *e = getenv("DM_ADAPTIVE_FPS"); if (explicit_set) *explicit_set = e && *e; return !(e && !atoi(e)); }
@@ -222,7 +221,7 @@ const uint8_t *dm_overlay_font(void) { return g_font; }
 float dm_overlay_scale(void) { return 1; }
 int dm_save_note(char *out, int cap) { snprintf(out, (size_t)cap, "-"); return OVX_IDLE; }
 int dm_menu_audio_available(void) { return 0; }   // no outputs to choose: the Game tab has no audio row (overlay_layout.h ov_menu_item)
-int dm_menu_rate_available(void) { return 0; } int dm_menu_res_available(void) { return 0; } int dm_menu_detail_available(void) { return 0; } int dm_menu_detail_step(void) { return 0; }   // a game without the profile's rows
+int dm_menu_rate_available(void) { return 0; } int dm_menu_res_available(void) { return 0; } // a game without the profile's rows
 static int exit_state; static float exit_f;   // front_android.c: Exit game's hold (overlay_layout.h OV_EXIT_*)
 int dm_menu_exit(float *f, int *chosen) { *f = exit_f; *chosen = 0; return exit_state; }
 ''' + canvas + colours + r'''
@@ -248,7 +247,7 @@ static void rec_text(const ov_canvas *cv, float x, float cy, const char *s, int 
 #include "overlay_layout.h"
 float dm_overlay_scale(void) { return 1; }
 float dm_menu_row_need(float rh) { (void)rh; return 0; }
-int dm_menu_audio_available(void) { return 0; } int dm_menu_rate_available(void) { return 0; } int dm_menu_res_available(void) { return 0; } int dm_menu_detail_available(void) { return 0; }
+int dm_menu_audio_available(void) { return 0; } int dm_menu_rate_available(void) { return 0; } int dm_menu_res_available(void) { return 0; }
 ''' + HOLD_MAIN
         self._run(source, None)
 

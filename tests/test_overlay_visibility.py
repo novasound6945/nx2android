@@ -39,7 +39,7 @@ class OverlayVisibility(unittest.TestCase):
 #include "stick_axis.h"
 static _Atomic int g_set_overlay, g_overlay, g_pads, g_edit, g_menu, g_set_touch, g_menu_btn = 1;
 static _Atomic int g_cust[2][2][OV_N][4];
-static _Atomic int g_set_rumble, g_set_fps, g_set_labels, g_set_res, g_set_rate, g_set_detail, g_menu_tab, g_sv_st;
+static _Atomic int g_set_rumble, g_set_fps, g_set_labels, g_set_res, g_set_rate, g_menu_tab, g_sv_st;
 static int layout, saves;
 int dm_overlay_layout(void) { return layout; }
 float dm_overlay_scale(void) { return 1; }
@@ -55,7 +55,6 @@ static int pad_labels(void) { return 0; }
 static void menu_tab(int tab) { (void)tab; }
 static void res_apply(int step) { (void)step; }
 static int res_step(void) { return 1; }
-static void detail_apply(int step) { (void)step; }
 static int dm_fps_target_get(void) { return 30; }
 static void dm_fps_target_set(int t) { (void)t; }
 static void ed_open(void) {}
@@ -65,7 +64,7 @@ static void menu_audio(void) {}
 #define LOG(...) ((void)0)   // (until the harness's own, below)
 static void menu_close(void) {}
 static void dm_overlay_redraw(void) {}
-int dm_menu_audio_available(void) { return 0; } int dm_menu_rate_available(void) { return 0; } int dm_menu_res_available(void) { return 0; } int dm_menu_detail_available(void) { return 0; }   // the menu's rows (a controller opens it on its button row: OVM_ROWS)
+int dm_menu_audio_available(void) { return 0; } int dm_menu_rate_available(void) { return 0; } int dm_menu_res_available(void) { return 0; } // the menu's rows (a controller opens it on its button row: OVM_ROWS)
 // the frame rate limit row (OVM_LIMIT), as in front_android.c; limit_apply only counts
 static _Atomic int g_set_limit;
 static const int LIMIT_STEPS[OVM_LIMITS] = {0, 60, 40, 30};
