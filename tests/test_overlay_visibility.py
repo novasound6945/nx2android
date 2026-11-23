@@ -129,7 +129,7 @@ static int64_t mono_ns(void) { return 1; }
 static void dm_haptics_android_device(int id) { vibration = id; }
 static void menu_open(int tab) { (void)tab; menu_opens++; }
 static void menu_key(uint64_t bit) { (void)bit; }
-static void menu_key_up(uint64_t bit) { (void)bit; }
+static void fork_menu_key_up(uint64_t bit) { (void)bit; }
 static uint64_t key_bit(int code) { return code == TEST_PAD_KEY ? DM_BTN_A : 0; }
 static int tx_key(AInputEvent *e) { (void)e; return 1; }
 static void tx_changed(void) {}

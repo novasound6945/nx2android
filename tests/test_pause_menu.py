@@ -5,6 +5,7 @@ settings_load, settings_save and limit_apply (game_opts_android.inc) are cut out
 limit, with game_mode_sync which reads it) out of perf_android.c, and the menu panel's drawing (ov_menu_panel) out of gfx_vk_present.c, with the font pack the APK ships. No phone or game is needed.
 """
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -187,6 +188,9 @@ class PauseMenu(unittest.TestCase):
 
     def test_settings_and_launcher(self):
         settings = cut(self.front, "// ---- settings (the pause menu's)", 'void dm_lan_android_start(')
+        # the fork's settings.txt keys (fork_hooks_android.inc: game_opts_android.inc's limit=, rate=, res= and aspect=), before settings_load, which calls them
+        hooks = (DM / 'android/fork_hooks_android.inc').read_text(encoding='utf-8')
+        settings = '#include "game_opts_android.inc"\n' + cut(hooks, "// ---- settings.txt's keys of the fork's", '// ---- which rewrite') + settings
         gopts = (DM / 'android/launcher_gopts.inc').read_text(encoding='utf-8')
         # fps_pin gives what game_mode_sync (the presenting thread, every 30th frame) read from DM_FPS_PIN; both come with the adaptive rate's state they touch
         pin = cut(self.perf, 'static int g_step = 0;', 'static int64_t work_pct(') + cut(self.perf, 'static int fps_pin(void) {', "// The frame's replay and GPU time")
@@ -231,6 +235,8 @@ typedef struct { int loaded, n, id[3], limit, rate, res, rate_on, res_on, env_ra
         canvas = cut(self.present, 'typedef struct { uint8_t *px; uint32_t stride, x0, y0, w, h; } ov_canvas;', 'static const uint8_t C_WHITE[4]')
         colours = cut(self.present, 'static const uint8_t C_WHITE[4]', 'static void ov_menu_icon(')
         panel = cut(self.present, 'static const uint8_t C_BG[4]', "// The layout editor's toolbar and prompt")
+        # fork_draw_android.inc's Exit game part only (its cloud marks need the Vulkan texture this check has not)
+        panel = re.sub(r'#include "fork_draw_android.inc"[^\n]*', '#include "menu_exit_draw.inc"', panel)
         source = r'''
 #include <assert.h>
 #include <math.h>

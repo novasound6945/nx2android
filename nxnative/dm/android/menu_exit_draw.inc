@@ -1,4 +1,4 @@
-// The pause menu's Exit game (menu_exit.h), gfx_vk_present.c's part: included there once, before ov_menu_panel. The button row r (its line drawn already): Exit game
+// The pause menu's Exit game (menu_exit.h), gfx_vk_present.c's part (fork_draw_android.inc includes it, before ov_menu_panel). The button row r (its line drawn already): Exit game
 // (left) beside Resume (right), each centred in its half (front_android.c menu_touch splits the row at the same midline). Exit game is grey, a quieter word than
 // Resume; held, its half fills red from the left and reads Hold to exit (a tap shows that for a moment), then Exiting... while the cloud save goes up. The highlight
 // (selected: the row is the controller's): the half a controller has chosen (Resume when the menu opens)

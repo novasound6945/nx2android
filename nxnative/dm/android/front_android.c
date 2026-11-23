@@ -11,15 +11,10 @@
 #include "dm_input.h"
 #include "pad_slots.h"
 #include "overlay_layout.h"
-#include "menu_exit.h"
 #include "stick_axis.h"
-#include "env_path.h"
-#include "storage_android.h"
 #include "pixel_font.h"
 #include "saves_android.h"
-#include "savecloud.h"
-#include "rewrite_abi.h"
-#include <dirent.h>
+#include "fork_hooks_android.h"   // this fork's parts and the hooks below call (bodies: fork_hooks_android.inc)
 #include <math.h>
 #include <time.h>
 #include <android/asset_manager.h>
@@ -69,19 +64,10 @@ ANativeWindow *dm_front_window(void) { pthread_mutex_lock(&g_win_mu); ANativeWin
 static ANativeWindow *phone_window(void) { pthread_mutex_lock(&g_win_mu); ANativeWindow *w = g_win; pthread_mutex_unlock(&g_win_mu); return w; }
 int dm_external_active(void) { return atomic_load(&g_external_active); }
 __attribute__((weak)) void vk_window_lost(void) {}   // the backend lets go of the window's swapchain before the window goes
-void dm_sync_window(ANativeWindow *w); int dm_sync_begin(ANativeActivity *act, const char *root, void (*done)(void));   // datasync_android.c: the data from a server (porter --data-url)
-int dm_prep_begin(ANativeActivity *act, ANativeWindow *w, void (*done)(void));   // datasync_android.c: the shader preparation (gfx_vk_gpl.inc vk_gpl_prepare), on the same screen
-int dm_notice_begin(ANativeActivity *act, ANativeWindow *w, const char *const ko[3], const char *const en[3], const char *detail);   // datasync_android.c: a notice the start stops at
-int dm_launcher_gate(void (*go)(void));   // datasync_android.c: 1 when the launcher holds the game until its Start (go() then, on this thread), 0 to start it now
-// A window made again (back from Home or the lock screen) while the pause menu (or the editor, a text entry, the save picker) holds the game: the game sends no frame,
-// so the new surface stayed black (a few frames a second at most, the menu not drawn) until the menu's state changed (B closed it). The last frame and the menu are
-// presented again at once (and every vsync after while the menu stays: gfx_vk_present.c present_thread)
-void dm_overlay_redraw(void);   // gfx_vk_present.c (weak default below)
-static void on_window_created(ANativeActivity *a, ANativeWindow *w) { (void)a; pthread_mutex_lock(&g_win_mu); g_win = w; pthread_mutex_unlock(&g_win_mu); dm_sync_window(w);
-    if (dm_menu_state() >= 0) dm_overlay_redraw(); }   // (-1 while nothing holds the game, and before it runs)
+static void on_window_created(ANativeActivity *a, ANativeWindow *w) { (void)a; pthread_mutex_lock(&g_win_mu); g_win = w; pthread_mutex_unlock(&g_win_mu); fork_window_created(w); }
 __attribute__((weak)) void vk_mem_low(void) {}   // the backend gives back what it can at its next submission (gfx_vk_core.c vk_mem_tick)
 static void on_low_memory(ANativeActivity *a) { (void)a; LOG("[mem] Android says it is low on memory (onLowMemory)"); vk_mem_low(); }
-static void on_window_destroyed(ANativeActivity *a, ANativeWindow *w) { (void)a; (void)w; pthread_mutex_lock(&g_win_mu); g_win = NULL; pthread_mutex_unlock(&g_win_mu); dm_sync_window(NULL); vk_window_lost(); }
+static void on_window_destroyed(ANativeActivity *a, ANativeWindow *w) { (void)a; (void)w; pthread_mutex_lock(&g_win_mu); g_win = NULL; pthread_mutex_unlock(&g_win_mu); fork_window_destroyed(); vk_window_lost(); }
 JNIEXPORT void JNICALL Java_org_nx2a_ExternalActivity_externalSurface(JNIEnv *env, jclass cls, jobject surface) {
     (void)cls;
     ANativeWindow *next = surface ? ANativeWindow_fromSurface(env, surface) : NULL;
@@ -93,7 +79,7 @@ JNIEXPORT void JNICALL Java_org_nx2a_ExternalActivity_externalSurface(JNIEnv *en
 
 void dm_focus_set(int st); void dm_audio_suspend(int on); void guest_clock_freeze_for(int reason, int on); void dm_gfx_suspend(int on);
 // ---- settings (the pause menu's), kept in the files folder as KEY=VALUE lines ----
-static char g_root[512], g_mods[600];   // the files folder; the modules folder the host runs (aspect_variant)
+static char g_root[512];
 static _Atomic int g_set_overlay = 1, g_set_rumble = 1, g_set_fps;   // the gamepad shown; rumble and tap vibration; the frame rate counter (top left)
 static _Atomic int g_set_touch;   // touch passthrough: every touch is the game's own touch screen and the gamepad is not drawn (env.txt DM_TOUCH, settings.txt touch=; the menu has no row for it)
 static _Atomic int g_set_opacity = 60;   // the gamepad's opacity, percent (OV_OPACITY_MIN..MAX: the menu's Opacity slider)
@@ -110,8 +96,6 @@ static _Atomic int g_cust[2][2][DM_AOV_N][CUST_K], g_cust_ver, g_edit;
 static const char *const LAYOUT_NAMES[2] = {"tablet", "phone"};
 static int ctl_named(const char *n) { for (int i = 0; i < OV_N; i++) if (!strcmp(OV_LAYOUTS[0][i].name, n)) return i; return -1; }
 int dm_opmode(void); void dm_set_opmode(int m);   // hle_oe.c: 0 handheld, 1 docked; a change reaches the game as the Switch's operation mode notification
-static char g_set_aspect[16];   // settings.txt's aspect= (auto, 4:3, 16:9): which rewrite of the game runs (aspect_variant); kept as it is when the menu saves
-#include "game_opts_android.inc"   // this fork's limit=, rate=, res= (the launcher's App settings)
 // ---- the frame rate counter's options (overlay_layout.h fpso_*): settings.txt fps_rows (a bit a row: 1 FPS, 2 SOC, 4 BAT, 8 driver, 16 graph), fps_pos (0 top left, 1 top right,
 // 2 bottom left, 3 bottom right), fps_colour (0 white, 1 yellow, 2 green, 3 cyan, 4 magenta), fps_outline (0 box, 1 none, 2 thin, 3 medium, 4 thick), fps_size (0 small,
 // 1 normal, 2 large, 3 extra large). A value out of range is the default. g_fps_ver counts the changes (dm_menu_state: the panel is drawn again)
@@ -145,10 +129,9 @@ static void settings_load(void) {
     while (fgets(line, sizeof line, f)) { int v; if (sscanf(line, "overlay=%d", &v) == 1) atomic_store(&g_set_overlay, v != 0); else if (sscanf(line, "rumble=%d", &v) == 1) atomic_store(&g_set_rumble, v != 0);
         else if (sscanf(line, "touch=%d", &v) == 1) atomic_store(&g_set_touch, v != 0);
         else if (sscanf(line, "fps=%d", &v) == 1) atomic_store(&g_set_fps, v != 0);
-        else if (game_opt_parse(line)) {}   // limit=, rate=, res= (game_opts_android.inc)
+        else if (fork_settings_parse(line)) {}   // limit=, rate=, res=, aspect= (fork_hooks_android.inc)
         else if (fps_opt_parse(line)) {}
         else if (sscanf(line, "docked=%d", &v) == 1) setenv("DM_OPMODE", v ? "1" : "0", 1);   // over env.txt's: the host reads it once, at its first query
-        else if (sscanf(line, "aspect=%15s", g_set_aspect) == 1) { if (strcmp(g_set_aspect, "auto")) setenv("DM_ASPECT", g_set_aspect, 1); else unsetenv("DM_ASPECT"); }   // aspect_variant
         else if (sscanf(line, "opacity=%d", &v) == 1) atomic_store(&g_set_opacity, v < OV_OPACITY_MIN ? OV_OPACITY_MIN : v > OV_OPACITY_MAX ? OV_OPACITY_MAX : v);
         else if (sscanf(line, "grid=%d", &v) == 1) atomic_store(&g_set_grid, v != 0);
         else if (sscanf(line, "labels=%d", &v) == 1) atomic_store(&g_set_labels, v != 0);
@@ -170,10 +153,9 @@ static void settings_save(void) {
     FILE *f = fopen(tmp, "w"); if (!f) { LOG("[RED] cannot write %s", tmp); return; }
     fprintf(f, "overlay=%d\nrumble=%d\ndocked=%d\nfps=%d\nopacity=%d\ngrid=%d\n", atomic_load(&g_set_overlay), atomic_load(&g_set_rumble), dm_opmode() != 0, atomic_load(&g_set_fps),
             atomic_load(&g_set_opacity), atomic_load(&g_set_grid));
-    game_opt_write(f);   // limit=, rate=, res= (game_opts_android.inc)
+    fork_settings_write(f);   // limit=, rate=, res=, aspect= (fork_hooks_android.inc)
     fps_opt_write(f);
     if (atomic_load(&g_set_labels) >= 0) fprintf(f, "labels=%d\n", atomic_load(&g_set_labels));   // (only once the player chose: until then env.txt decides)
-    if (g_set_aspect[0]) fprintf(f, "aspect=%s\n", g_set_aspect);
     fprintf(f, "touch=%d\n", atomic_load(&g_set_touch));
     for (int l = 0; l < 2; l++) for (int i = 0; i < OV_N; i++) {
         _Atomic int *c = g_cust[0][l][i]; int x = atomic_load(&c[0]), y = atomic_load(&c[1]), z = atomic_load(&c[2]), hid = atomic_load(&c[3]);
@@ -203,7 +185,7 @@ static void go_background(void) { if (!atomic_load(&g_running) || atomic_exchang
 static void go_foreground(void) { if (!atomic_load(&g_running) || !atomic_exchange(&g_bg, 0)) return; dm_gfx_suspend(0); hold_sync(); dm_focus_set(2); shake_sensor(1); }
 void dm_perf_gpu_release(void);   // perf_android.c: the GPU's clock control back to its governor (DM_GPU_TURBO)
 // The clock control goes back after go_background: its dm_gfx_suspend waits for the presents in progress, and one of them could otherwise set the GPU's power control again
-static void on_pause(ANativeActivity *a) { (void)a; go_background(); dm_perf_gpu_release(); dm_cloud_pause(); }   // (savecloud_android.c: the owed upload on a thread of its own)
+static void on_pause(ANativeActivity *a) { (void)a; go_background(); dm_perf_gpu_release(); fork_on_pause(); }
 // Back in front, the game is out of focus until the window has the input focus again (Android sends it after onResume): without this it stayed OutOfFocus for good,
 // and Blasphemous 2's Unity, which asks for focus notifications, kept its title paused and ignored every press after a trip to another app. A window losing focus while in
 // front (a system dialog, the notification shade) is OutOfFocus as on the Switch's HOME overlay
@@ -224,11 +206,6 @@ static void act_finish(ANativeActivity *a) {
     }
     if (attached) (*a->vm)->DetachCurrentThread(a->vm);
     if (!ok) { LOG("[RED] Activity.finish() failed: the app ends itself"); _exit(0); }
-}
-// datasync_android.c, once the game data moved to another volume (storage_android.c): the app ends (the next start is a new process, which reads the new root); any thread
-void dm_front_quit(void) {
-    static _Atomic int once; if (atomic_exchange(&once, 1)) return;
-    LOG("storage: the data moved: the app ends"); g_quit = 1; act_finish(g_act);
 }
 // #294: Game Mode can change while the app is paused. Query on every resume, including NativeActivity without Java helpers.
 extern void dm_perf_game_mode(int mode);
@@ -253,14 +230,8 @@ static void activity_game_mode(ANativeActivity *a) {
     }
     dm_perf_game_mode(mode);   // absent service / older Android keeps the standard policy
 }
-static void on_resume(ANativeActivity *a) { if (g_quit) { act_finish(a); return; } activity_game_mode(a); go_foreground(); dm_cloud_resume(); }
-int dm_sync_detach(ANativeActivity *act); int dm_sync_reattach(ANativeActivity *act); void dm_sync_visible(int on);   // datasync_android.c: the background download
-static void on_destroy(ANativeActivity *a) {   // one game per process; while the data downloads in its service (datasync_android.c), the process stays for it
-    if (dm_sync_detach(a)) return;
-    dm_perf_gpu_release(); _exit(0);
-}
-static void on_start(ANativeActivity *a) { (void)a; dm_sync_visible(1); }   // (the background download: the start goes on once the app is back)
-static void on_stop(ANativeActivity *a) { (void)a; dm_sync_visible(0); }
+static void on_resume(ANativeActivity *a) { if (g_quit) { act_finish(a); return; } activity_game_mode(a); go_foreground(); fork_on_resume(); }
+static void on_destroy(ANativeActivity *a) { (void)a; if (fork_on_destroy(a)) return; dm_perf_gpu_release(); _exit(0); }   // one game per process
 
 // ---- input ----
 static AInputQueue *g_queue; static ALooper *g_ilooper;
@@ -696,11 +667,10 @@ int dm_ui_zh(void) {
 }
 // gfx_vk_present.c draws the counter: not while the menu holds the game, except under the pause menu's Counter and Style tabs, where it shows what they change
 int dm_overlay_fps(void) { return atomic_load(&g_menu) ? atomic_load(&g_menu_tab) >= 2 && !atomic_load(&g_edit) && !atomic_load(&g_sp_on) && !atomic_load(&g_tx_on) : atomic_load(&g_set_fps); }
-#include "menu_exit_android.inc"   // this fork's Exit game (menu_exit.h)
 static void menu_open(int hi) {
     if (!atomic_load(&g_running) || atomic_exchange(&g_menu, 1)) return;
     atomic_store(&g_menu_hi, hi); g_menu_ptr = -1;
-    exit_menu_open();
+    fork_menu_open();
     if (atomic_load(&g_sv_st) != OVX_BUSY) atomic_store(&g_sv_st, OVX_IDLE);   // the last export's note goes (one still copying stays)
     dm_input_set(0, 0, 0, 0, 0); dm_touch_set(NULL, 0); atomic_store(&g_touch_btn, 0);   // nothing stays pressed in the game
     for (int i = 0; i < 16; i++) atomic_store(&g_press_t[i], 0);
@@ -715,10 +685,10 @@ static void ed_cancel(void); static void sp_back(void);
 static void menu_close(void) {
     if (atomic_load(&g_edit)) { ed_cancel(); return; }   // the editor first: its changes are kept or thrown away before the game goes on
     if (atomic_load(&g_sp_on)) { sp_back(); return; }    // the save picker: back a step
-    if (exit_menu_going()) return;   // (Exit game held to its end: the game is ending, the menu stays)
+    if (fork_menu_stays()) return;   // (Exit game held to its end: the game is ending, the menu stays)
     if (!atomic_exchange(&g_menu, 0)) return;
     g_menu_ptr = -1; atomic_store(&g_menu_t, 0);
-    exit_leave();
+    fork_menu_closed();
     hold_sync(); dm_haptics_suspend(4, 0); dm_overlay_redraw();
     LOG("[menu] closed: the game goes on (gamepad %s, opacity %d%%, rumble %s, face buttons by %s, frame rate %s %#x, %s)", atomic_load(&g_set_overlay) ? "on" : "off", atomic_load(&g_set_opacity),
         atomic_load(&g_set_rumble) ? "on" : "off", pad_labels() ? "label" : "position", atomic_load(&g_set_fps) ? "shown" : "hidden", atomic_load(&g_fps_opts), dm_opmode() ? "docked" : "handheld");
@@ -766,7 +736,7 @@ static void menu_touch(AInputEvent *e, float W, float H) {   // a press on a row
     if (act == AMOTION_EVENT_ACTION_DOWN || act == AMOTION_EVENT_ACTION_POINTER_DOWN) {
         if (g_menu_ptr >= 0) return;
         g_menu_ptr = id; g_menu_row = row;
-        exit_touch_down(item, x, y, W, H);
+        fork_menu_touch_down(item, x, y, W, H);
         if (item == OVM_TAB) menu_tab(ov_menu_tab_at(x, p));   // a tab opens as the finger touches it
         else if (item == OVM_OPACITY) menu_opacity(ov_menu_track_value(x, p, row));
         if (row >= 0) { atomic_store(&g_menu_hi, item >= 0 ? row : -1); dm_overlay_redraw(); }
@@ -774,26 +744,26 @@ static void menu_touch(AInputEvent *e, float W, float H) {   // a press on a row
         for (size_t k = 0; k < AMotionEvent_getPointerCount(e); k++) if ((AMotionEvent_getPointerId(e, k) & 31) == g_menu_ptr) {
             float kx = AMotionEvent_getX(e, k), ky = AMotionEvent_getY(e, k);
             if (ov_menu_item(tab, g_menu_row) == OVM_OPACITY) { menu_opacity(ov_menu_track_value(kx, p, g_menu_row)); continue; }
-            exit_touch_move(ov_menu_item(tab, g_menu_row), kx, ky, W, H);
+            fork_menu_touch_move(ov_menu_item(tab, g_menu_row), kx, ky, W, H);
             int r = ov_menu_row_at(kx, ky, W, H), hi = r == g_menu_row && ov_menu_item(tab, r) >= 0 ? r : -1;
             if (atomic_exchange(&g_menu_hi, hi) != hi) dm_overlay_redraw();
         }
     } else if ((act == AMOTION_EVENT_ACTION_UP || act == AMOTION_EVENT_ACTION_POINTER_UP) && id == g_menu_ptr) {
         int down = g_menu_row; g_menu_ptr = -1; atomic_store(&g_menu_hi, -1);
         if (down >= 0 && ov_menu_item(tab, down) == OVM_OPACITY) { settings_save(); dm_overlay_redraw(); }
-        else if (exit_touch_up()) {}
+        else if (fork_menu_touch_up()) {}
         else if (row == down && item >= 0 && item != OVM_TAB) menu_do(item);
         else if (row == down && (row == -2 || row == -3)) { dm_haptics_android_tap(); menu_close(); }
         else dm_overlay_redraw();
     } else if (act == AMOTION_EVENT_ACTION_CANCEL) { g_menu_ptr = -1; atomic_store(&g_menu_hi, -1); dm_overlay_redraw(); }
-    if (act == AMOTION_EVENT_ACTION_CANCEL) exit_leave();
+    if (act == AMOTION_EVENT_ACTION_CANCEL) fork_menu_touch_cancel();
 }
 static void ed_key(uint64_t bit); static void sp_key(uint64_t bit);
 static void menu_key(uint64_t bit) {   // a controller key pressed while the menu is open: up and down go through the rows, left and right change the tab or the
     if (atomic_load(&g_edit)) { ed_key(bit); return; }   // opacity on their rows, L and R change the tab anywhere, A does the row, B and + close
     if (atomic_load(&g_sp_on)) { sp_key(bit); return; }
     int hi = atomic_load(&g_menu_hi), tab = atomic_load(&g_menu_tab), item = hi >= 0 ? ov_menu_item(tab, hi) : -1;
-    if (exit_key(bit, item)) return;
+    if (fork_menu_key(bit, item)) return;
     if (bit == DM_BTN_UP || bit == DM_BTN_DOWN) {
         for (int k = 0; k < OVM_ROWS; k++) { hi = hi < 0 ? (bit == DM_BTN_UP ? OVM_ROWS - 1 : 1) : (hi + (bit == DM_BTN_UP ? OVM_ROWS - 1 : 1)) % OVM_ROWS; if (ov_menu_item(tab, hi) >= 0) break; }
         atomic_store(&g_menu_hi, hi); dm_overlay_redraw();
@@ -1254,7 +1224,7 @@ static int handle_event(AInputEvent *e) {
         int id = AInputEvent_getDeviceId(e);
         pthread_mutex_lock(&g_slot_mu); int p = pad_player(id, src, down); pthread_mutex_unlock(&g_slot_mu);   // (a release takes no player either)
         if (down) pad_mark_used(id, p);   // a release after a touch must not hide the controls again
-        if (atomic_load(&g_menu)) { if (down && AKeyEvent_getRepeatCount(e) == 0) menu_key(bit); else if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_UP) menu_key_up(bit); return 1; }
+        if (atomic_load(&g_menu)) { if (down && AKeyEvent_getRepeatCount(e) == 0) menu_key(bit); else if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_UP) fork_menu_key_up(bit); return 1; }
         if (p < 0) return 1;
         pthread_mutex_lock(&g_slot_mu);
         if (down) g_btn[p] |= bit; else if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_UP) g_btn[p] &= ~bit;
@@ -1439,7 +1409,7 @@ static void *input_thread(void *a) {
         int toggle = atomic_exchange(&g_ext_menu, 0);
         if (toggle & 1) { if (atomic_load(&g_menu)) menu_close(); else menu_open(0); }
         uint64_t b = atomic_load(&g_ext_buttons), presses = atomic_exchange(&g_ext_presses, 0);
-        if (atomic_load(&g_menu)) { uint64_t down = (b & ~prev) | presses, up = prev & ~b; latched = 0; for (int i = 0; i < 16; i++) { if (down & (1ull << i)) menu_key(1ull << i); if (up & (1ull << i)) menu_key_up(1ull << i); } dm_input_set(0, 0, 0, 0, 0); }
+        if (atomic_load(&g_menu)) { uint64_t down = (b & ~prev) | presses, up = prev & ~b; latched = 0; for (int i = 0; i < 16; i++) { if (down & (1ull << i)) menu_key(1ull << i); if (up & (1ull << i)) fork_menu_key_up(1ull << i); } dm_input_set(0, 0, 0, 0, 0); }
         else {
             int64_t elapsed = mono_ns() - since;
             if (latched && ((elapsed >= 20000000 && dm_input_samples() != sample) || elapsed >= 100000000)) latched = 0;
@@ -1450,25 +1420,16 @@ static void *input_thread(void *a) {
     }
     return NULL;
 }
-static _Atomic int g_syncing;   // the data download runs (dm_sync_begin): the game, its input thread with it, starts when it ends (game_start)
-static int on_input_early(int fd, int events, void *data) {   // the main thread's looper: events before the game, none of them handled but the start screen's (the cloud's questions, Retry)
-    (void)fd; (void)events; (void)data; AInputEvent *e;
-    while (g_queue && AInputQueue_getEvent(g_queue, &e) >= 0) { if (AInputQueue_preDispatchEvent(g_queue, e)) continue; AInputQueue_finishEvent(g_queue, e, dm_start_input(e) || dm_cloud_input(e)); }   // (the launcher's first: it hands a question's input to the cloud)
-    return 1;
-}
-static void on_queue_created(ANativeActivity *a, AInputQueue *q) {
-    (void)a; g_queue = q;
-    if (atomic_load(&g_syncing)) { AInputQueue_attachLooper(q, ALooper_forThread(), 2, on_input_early, NULL); return; }
-    while (!g_ilooper) usleep(1000);
-    AInputQueue_attachLooper(q, g_ilooper, 1, on_input, NULL);
-}
+static void on_queue_created(ANativeActivity *a, AInputQueue *q) { (void)a; g_queue = q; if (fork_queue_created(q)) return; while (!g_ilooper) usleep(1000); AInputQueue_attachLooper(q, g_ilooper, 1, on_input, NULL); }
 static void on_queue_destroyed(ANativeActivity *a, AInputQueue *q) { (void)a; AInputQueue_detachLooper(q); g_queue = NULL; }
 
 // ---- the host ----
 int main(int argc, char **argv);   // dm/host/main.c
 static void *host_thread(void *a) {
     (void)a;
-    char *argv[] = {"dmhost", g_mods, NULL};
+    char mods[600]; snprintf(mods, sizeof mods, "%s/mods", g_root);
+    fork_mods(mods, sizeof mods);   // (this fork: mods/ or the 4:3 variant's mods-4x3/)
+    char *argv[] = {"dmhost", mods, NULL};
     atomic_store(&g_running, 1);
     int rc = main(2, argv);
     LOG("host returned %d", rc);
@@ -1477,48 +1438,15 @@ static void *host_thread(void *a) {
     _exit(rc);
 }
 static void env_file(const char *path) {   // KEY=VALUE per line (# comments): switches without rebuilding, as the iOS app's Documents/env.txt
-    FILE *f = fopen(path, "r"); char line[1024], own[1200];
+    FILE *f = fopen(path, "r"); char line[1024];
     if (!f) return;
-    static int said;   // (env.txt is read at the shader preparation and again at the game's start: the rewrites are logged once)
-    int moved = 0;
     while (fgets(line, sizeof line, f)) {
         char *e = line + strlen(line); while (e > line && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' ')) *--e = 0;
         if (!line[0] || line[0] == '#') continue;
-        char *eq = strchr(line, '='); if (!eq) continue; *eq = 0;
-        if (strcmp(line, "DM_CTL") && (dm_env_own_path(eq + 1, g_root, own, sizeof own) || dm_env_moved_path(eq + 1, g_root, own, sizeof own))) {   // (DM_CTL: devtools' file, in the internal files folder)   // env_path.h: a pack ported under another package (an APK
-            // renamed by porter apk-update --package), or its internal files folder's path while the data is on an SD card (storage_android.c), or the reverse
-            if (!said) LOG("env: %s=%s is not the data's folder: read as %s", line, eq + 1, own);
-            setenv(line, own, 1); moved = 1;
-        } else setenv(line, eq + 1, 1);
+        char *eq = strchr(line, '='); if (!eq) continue; *eq = 0; setenv(line, fork_env_value(line, eq + 1), 1);
     }
-    if (moved) said = 1;
+    fork_env_file_done();
     fclose(f);
-}
-// ---- which rewrite of the game's code: mods/, or mods-4x3/ (a data pack with the variant, android.tsv variant 4x3: the game rendering 4:3) on a screen narrower than
-// 3:2 (Retroid Pocket Nova, 1280x960). DM_ASPECT (env.txt, or settings.txt's aspect=) = 4:3 or 16:9 chooses by hand; auto or none goes by the screen. The screen's size is the
-// display's real size (the app is landscape, so the long side is its width whatever the rotation at launch); env-4x3.txt, the variant's own env rows, comes after env.txt ----
-static float screen_aspect(ANativeActivity *act, int *w, int *h) {   // long side / short side of the display, 0 when not known
-    JNIEnv *E = act->env; *w = *h = 0;
-    jclass cA = (*E)->GetObjectClass(E, act->clazz); jmethodID mWm = cA ? (*E)->GetMethodID(E, cA, "getWindowManager", "()Landroid/view/WindowManager;") : NULL;
-    jobject wm = mWm ? (*E)->CallObjectMethod(E, act->clazz, mWm) : NULL; if (jx(E) || !wm) return 0;
-    jclass cWm = (*E)->FindClass(E, "android/view/WindowManager"), cD = (*E)->FindClass(E, "android/view/Display"), cM = (*E)->FindClass(E, "android/util/DisplayMetrics"); if (jx(E) || !cWm || !cD || !cM) return 0;
-    jmethodID mDisp = (*E)->GetMethodID(E, cWm, "getDefaultDisplay", "()Landroid/view/Display;"), mReal = (*E)->GetMethodID(E, cD, "getRealMetrics", "(Landroid/util/DisplayMetrics;)V"),
-              mNew = (*E)->GetMethodID(E, cM, "<init>", "()V"); if (jx(E) || !mDisp || !mReal || !mNew) return 0;
-    jobject d = (*E)->CallObjectMethod(E, wm, mDisp), m = (*E)->NewObject(E, cM, mNew); if (jx(E) || !d || !m) return 0;
-    (*E)->CallVoidMethod(E, d, mReal, m); if (jx(E)) return 0;
-    jfieldID fw = (*E)->GetFieldID(E, cM, "widthPixels", "I"), fh = (*E)->GetFieldID(E, cM, "heightPixels", "I"); if (jx(E) || !fw || !fh) return 0;
-    *w = (*E)->GetIntField(E, m, fw); *h = (*E)->GetIntField(E, m, fh);
-    int lo = *w < *h ? *w : *h, hi = *w < *h ? *h : *w;
-    return lo > 0 ? (float)hi / (float)lo : 0;
-}
-static void aspect_variant(ANativeActivity *act) {
-    char v[600]; struct stat st; snprintf(g_mods, sizeof g_mods, "%s/mods", g_root); snprintf(v, sizeof v, "%s/mods-4x3", g_root);
-    if (stat(v, &st) || !S_ISDIR(st.st_mode)) return;   // a pack without variants: as before
-    const char *want = getenv("DM_ASPECT"); int w, h; float r = screen_aspect(act, &w, &h);
-    int four = want && !strcmp(want, "4:3") ? 1 : want && !strcmp(want, "16:9") ? 0 : r > 0 && r < 1.5f;
-    if (four) { snprintf(g_mods, sizeof g_mods, "%s", v); snprintf(v, sizeof v, "%s/env-4x3.txt", g_root); env_file(v); }
-    LOG("modules: %s (screen %dx%d, %.3f:1; DM_ASPECT=%s: %s)", four ? "mods-4x3, the 4:3 variant" : "mods, the game's own 16:9", w, h, r, want ? want : "auto",
-        want && (!strcmp(want, "4:3") || !strcmp(want, "16:9")) ? "chosen by hand" : "by the screen, 4:3 below 1.5:1");
 }
 // ---- a RomFS outside the app's files folder (env.txt's DM_ROMFS, written by porter install --romfs-at: a game dump another app also reads, a folder on the SD card). The app
 // reads it only with All files access (the appop MANAGE_EXTERNAL_STORAGE, Android 11 on) or, on Android 10, READ_EXTERNAL_STORAGE in the legacy storage view: mkapk.py asks
@@ -1566,50 +1494,7 @@ static int romfs_readable(ANativeActivity *act, int sdk) {   // 0: the game cann
     LOG("RomFS: %s, outside the app's files folder (%s granted)", r, what);
     return 1;
 }
-// ---- the rewritten modules' contract with this host (dm/host/rewrite_abi.h): every <module>.fixups.tsv of mods/ and mods-<variant>/ says the REWRITE_ABI it was written
-// for. A pack of another number would crash somewhere in the game's code (an APK whose host was updated alone, porter apk-update, over data that needs a port again): the app
-// says so on the screen and in the log, and the game is not started. A table without the number (a pack from before it) is run as before; loader.c logs it ----
-static int rewrite_abi_fits(char *why, size_t cap) {   // 0: a module of another contract (why: which, for the screen)
-    DIR *top = opendir(g_root); struct dirent *e; int ok = 1;
-    if (!top) return 1;
-    while (ok && (e = readdir(top))) {
-        if (strcmp(e->d_name, "mods") && strncmp(e->d_name, "mods-", 5)) continue;
-        char d[900]; snprintf(d, sizeof d, "%s/%s", g_root, e->d_name);
-        DIR *m = opendir(d); struct dirent *f; if (!m) continue;
-        while (ok && (f = readdir(m))) {
-            size_t n = strlen(f->d_name); if (n < 11 || strcmp(f->d_name + n - 11, ".fixups.tsv")) continue;
-            char p[1200], line[256]; snprintf(p, sizeof p, "%s/%s", d, f->d_name); FILE *t = fopen(p, "r"); if (!t) continue;
-            while (fgets(line, sizeof line, t) && line[0] == '#')
-                if (!strncmp(line, "# REWRITE_ABI", 13) && atoi(line + 13) != DM_REWRITE_ABI) {
-                    snprintf(why, cap, "%s/%s: REWRITE_ABI %d, this app's host %d", e->d_name, f->d_name, atoi(line + 13), DM_REWRITE_ABI); ok = 0; break;
-                }
-            fclose(t);
-        }
-        closedir(m);
-    }
-    closedir(top);
-    return ok;
-}
-static int g_sdk;
-static void game_start(ANativeActivity *act, int late); static void game_start_late(void); static int prep_start(void); static void prep_late(void);
-static void game_run(ANativeActivity *act); static void cloud_done(int quit); static void launch_go(void);
-int dm_storage_ask(ANativeActivity *act, void (*done)(const char *root));   // datasync_android.c: the card that holds the data is not in: insert it, or internal storage
-// the data root (storage_android.c's choice) for everything of the start: the paths under it, as the environment names them
-static void root_apply(const char *root) {
-    char p[700]; snprintf(g_root, sizeof g_root, "%s", root);
-    setenv("DM_ROOT", g_root, 1);
-    snprintf(p, sizeof p, "%s/RomFS", g_root); setenv("DM_ROMFS", p, 0);
-    snprintf(p, sizeof p, "%s/shaders.dmsv", g_root); setenv("DM_VK_SHADERS", p, 0);
-    snprintf(g_mods, sizeof g_mods, "%s/mods", g_root);
-}
-static void start_flow(ANativeActivity *act, int late);
-static void storage_found(const char *root) {   // the main thread, the start's question answered (the card is in again, or internal storage chosen): the start as from onCreate
-    root_apply(root); LOG("storage: the start goes on with %s", g_root);
-    if (g_queue) AInputQueue_detachLooper(g_queue);   // (start_flow attaches it again as onCreate's input would be)
-    start_flow(g_act, 1);
-    if (atomic_load(&g_syncing)) { if (g_queue) AInputQueue_attachLooper(g_queue, ALooper_forThread(), 2, on_input_early, NULL); return; }
-    if (g_queue && !g_quit) { while (!g_ilooper) usleep(1000); AInputQueue_attachLooper(g_queue, g_ilooper, 1, on_input, NULL); }
-}
+#include "fork_hooks_android.inc"   // this fork's hooks and start (fork_hooks_android.h)
 __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActivity *act, void *saved, size_t saved_size) {
     (void)saved; (void)saved_size;
     g_act = act;
@@ -1617,59 +1502,22 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
     act->callbacks->onNativeWindowCreated = on_window_created; act->callbacks->onNativeWindowDestroyed = on_window_destroyed;
     act->callbacks->onInputQueueCreated = on_queue_created; act->callbacks->onInputQueueDestroyed = on_queue_destroyed;
     act->callbacks->onPause = on_pause; act->callbacks->onResume = on_resume; act->callbacks->onWindowFocusChanged = on_window_focus; act->callbacks->onDestroy = on_destroy; act->callbacks->onLowMemory = on_low_memory;
-    act->callbacks->onStart = on_start; act->callbacks->onStop = on_stop;
+    fork_callbacks(act);
     ANativeActivity_setWindowFlags(act, AWINDOW_FLAG_KEEP_SCREEN_ON | AWINDOW_FLAG_FULLSCREEN, 0);
-    static int started;
-    if (started++) { dm_sync_reattach(act); return; }   // a second onCreate (configuration change) keeps the running game; after the activity was destroyed while the data downloaded
-                                                       // (the process kept by its service), the new one takes the download's screen (g_act above)
+    static int started; if (started++) { fork_on_create_again(act); return; }   // a second onCreate (configuration change) keeps the running game
     JNIEnv *env = act->env;
     jclass activity_class = (*env)->GetObjectClass(env, act->clazz);
     if (activity_class) g_audio_menu_method = (*env)->GetMethodID(env, activity_class, "openAudioMenu", "()V");
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
     if (activity_class) (*env)->DeleteLocalRef(env, activity_class);
-    // the internal files folder (DM_HOME) keeps the log, saves/ and sync.txt whatever volume holds the game data (DM_ROOT: storage_android.c, the player's choice)
-    char home[512]; snprintf(home, sizeof home, "%s", act->externalDataPath ? act->externalDataPath : act->internalDataPath);
+    snprintf(g_root, sizeof g_root, "%s", act->externalDataPath ? act->externalDataPath : act->internalDataPath);
     char p[700];
-    snprintf(p, sizeof p, "%s/log.txt", home); char prev[720]; snprintf(prev, sizeof prev, "%s/log.prev.txt", home); rename(p, prev);
+    snprintf(p, sizeof p, "%s/log.txt", g_root); char prev[720]; snprintf(prev, sizeof prev, "%s/log.prev.txt", g_root); rename(p, prev);
     if (!freopen(p, "w", stderr)) __android_log_print(ANDROID_LOG_ERROR, "dmhost", "cannot write %s", p);
     setvbuf(stderr, NULL, _IOLBF, 0);
-    setenv("DM_HOME", home, 1);
-    if (act->internalDataPath) setenv("DM_INTERNAL", act->internalDataPath, 1);   // the app's own storage, where code may be loaded from (gfx_vk_core.c drv_slot: a test driver)
     snprintf(p, sizeof p, "%s/save", act->internalDataPath); mkdir(p, 0700); setenv("DM_SAVE", p, 0);
     snprintf(p, sizeof p, "%s/temp", act->internalDataPath); mkdir(p, 0700); setenv("DM_TEMP", p, 0);
-    g_sdk = sdk;
-    char root[512]; int missing = dm_storage_start(act, root, sizeof root);
-    // an APK ported with --data-url downloads its data first (datasync_android.c), on threads of its own; the game starts on this thread when that ends
-    // the start screen (datasync_android.c), one for the data download, the shader preparation and the cloud's start: it shows only once they took 300 ms, and closes
-    // (its thread, EGL, fonts and icon gone) before the game takes the window (game_run)
-    dm_cloud_attach(act);   // (savecloud_android.c: the device link's key, model and the app's names, before the launcher can ask for a link)
-    if (missing) {   // the card that holds the data is not in: the start screen asks (insert it, or internal storage), then the start goes on from storage_found
-        dm_start_screen_open(act, home); atomic_store(&g_syncing, 1);   // (nothing reads the data before the answer: DM_ROOT is not set yet; the input is the screen's)
-        if (dm_storage_ask(act, storage_found)) return;
-        LOG("[RED] storage: the start screen cannot ask: internal storage is used"); dm_storage_use_internal(root, sizeof root);
-        root_apply(root); start_flow(act, 0); return;
-    }
-    root_apply(root);
-    dm_start_screen_open(act, g_root);
-    start_flow(act, 0);
-}
-static void start_flow(ANativeActivity *act, int late) {   // onCreate's start once the data root is known (late: after onCreate returned, the card's question answered)
-    dm_cloud_precheck(act);   // (savecloud_android.c: the cloud's early check beside the data's step: the link, the server's meta; its questions wait for game_start)
-    atomic_store(&g_syncing, 1);
-    if (dm_sync_begin(act, g_root, prep_late)) return;
-    if (prep_start()) return;
-    atomic_store(&g_syncing, 0);
-    game_start(act, late);
-}
-// The shader preparation (datasync_android.c dm_prep_begin) between the download and the game: with env.txt's switches read (the Vulkan driver, DM_VK_GPL), as game_start reads them again
-static int prep_start(void) { char p[700]; snprintf(p, sizeof p, "%s/env.txt", g_root); env_file(p); return dm_prep_begin(g_act, phone_window(), game_start_late); }
-static void prep_late(void) { if (!prep_start()) game_start_late(); }   // the main thread, once the data download ended
-static void game_start_late(void) {   // the main thread, once the data download ended: its input queue goes to the input thread, as at a start without the download
-    if (g_queue) AInputQueue_detachLooper(g_queue);
-    atomic_store(&g_syncing, 0);
-    game_start(g_act, 1);
-    if (atomic_load(&g_syncing)) { if (g_queue) AInputQueue_attachLooper(g_queue, ALooper_forThread(), 2, on_input_early, NULL); return; }   // the cloud sync's start screen: still before the game
-    if (g_queue && !g_quit) { while (!g_ilooper) usleep(1000); AInputQueue_attachLooper(g_queue, g_ilooper, 1, on_input, NULL); }   // (no input thread when the game was not started)
+    fork_on_create(act, sdk);   // (this fork: the data's place, the start screen and launcher, the download; the game then starts from game_start)
 }
 static void game_start(ANativeActivity *act, int late) {   // late: after onCreate returned (the data download), so an end asked for here finishes the activity at once
     int sdk = g_sdk; char p[700];
@@ -1679,44 +1527,14 @@ static void game_start(ANativeActivity *act, int late) {   // late: after onCrea
     unsetenv("DM_CTL");   // a release build takes no remote key presses (the control file is a development tool)
 #endif
     // the save manager's requests (saves_android.c), before the host mounts the save: an import chosen in the menu or pushed by porter, an export porter asks for
-    if (dm_saves_start(dm_storage_home())) { LOG("[saves] the request asked the app to end: the game is not started"); g_quit = 1; dm_start_screen_close(); if (late) act_finish(act); return; }
-    if (!romfs_readable(act, sdk)) { g_quit = 1; dm_start_screen_close(); if (late) act_finish(act); return; }   // after the save manager's requests, which need no RomFS
-    char why[300];
-    if (!rewrite_abi_fits(why, sizeof why)) {   // the start screen shows the notice until the player leaves the app; its input goes to on_input_early (g_syncing), which hands the keys back
-        LOG("[RED] the game's rewritten code does not fit this APK's host (%s): the game is not started. Install the APK that came with the data, or port the game again "
-            "from its files (porter apk-update refuses such a pack)", why);
-        static const char *const ko[3] = {"게임을 시작할 수 없어요", "이 앱과 기기에 있는 게임 데이터가 서로 맞지 않아요", "데이터와 함께 배포된 앱을 설치하거나 배포한 곳에 알려 주세요"};
-        static const char *const en[3] = {"The game cannot start", "This app and the game data on the device do not fit together", "Install the app that came with the data, or tell where you got it"};
-        atomic_store(&g_syncing, 1);
-        if (!dm_notice_begin(act, phone_window(), ko, en, why)) { atomic_store(&g_syncing, 0); g_quit = 1; dm_start_screen_close(); if (late) act_finish(act); }
-        return;
-    }
-    // the save's cloud sync (savecloud_android.c, sync.txt), still before the host mounts the save: its start screen runs on threads of its own and the game starts from
-    // cloud_done on this thread; without sync.txt (or in a trial build) the game starts at once, as before
-    atomic_store(&g_syncing, 1);
-    if (dm_cloud_begin(act, phone_window(), cloud_done)) return;
-    if (dm_launcher_gate(launch_go)) return;   // the launcher: the game starts with its Start (launch_go); the start screen keeps the input (g_syncing)
-    atomic_store(&g_syncing, 0);
+    if (dm_saves_start(dm_storage_home())) { LOG("[saves] the request asked the app to end: the game is not started"); g_quit = 1; fork_start_ended(act, late); return; }
+    if (!romfs_readable(act, sdk)) { g_quit = 1; fork_start_ended(act, late); return; }   // after the save manager's requests, which need no RomFS
+    if (fork_start_gate(act, late)) return;   // (this fork: the data's contract, the cloud's start, the launcher; the game starts from them later)
     game_run(act);
 }
-static void cloud_done(int quit) {   // the main thread, once the cloud sync's start ended: the game starts (its input queue to the input thread), or the player chose to end the app
-    if (g_queue) AInputQueue_detachLooper(g_queue);
-    atomic_store(&g_syncing, 0);
-    if (quit) { LOG("cloud: the player cancelled the start: the app ends"); g_quit = 1; dm_start_screen_close(); act_finish(g_act); return; }
-    if (dm_launcher_gate(launch_go)) { atomic_store(&g_syncing, 1); if (g_queue) AInputQueue_attachLooper(g_queue, ALooper_forThread(), 2, on_input_early, NULL); return; }
-    game_run(g_act);
-    if (g_queue) { while (!g_ilooper) usleep(1000); AInputQueue_attachLooper(g_queue, g_ilooper, 1, on_input, NULL); }
-}
-static void launch_go(void) {   // the main thread, the launcher's Start once the start was ready: the game starts (its input queue to the input thread)
-    if (g_queue) AInputQueue_detachLooper(g_queue);
-    atomic_store(&g_syncing, 0);
-    game_run(g_act);
-    if (g_queue) { while (!g_ilooper) usleep(1000); AInputQueue_attachLooper(g_queue, g_ilooper, 1, on_input, NULL); }
-}
 static void game_run(ANativeActivity *act) {   // the game itself: settings, the input and host threads
-    dm_start_screen_close();   // the window is the game's from here: the start screen's thread, EGL and everything it loaded are gone before the host starts
-    dm_cloud_game_start();     // (the save's uploads, when this run syncs: from the game's start, not the check's, so the launcher's choices come first)
-    settings_load(); aspect_variant(act); limit_apply(1);   // (after the variant's env-4x3.txt, which comes after env.txt: Auto gives back what both set)
+    fork_game_run();
+    settings_load(); fork_settings_loaded(act);
     dm_haptics_android_start(act, atomic_load(&g_set_rumble)); dm_lan_android_start(act);
     g_vm = act->vm;
     { pthread_t w; if (!pthread_create(&w, NULL, pad_watch, act->vm)) pthread_detach(w); }

@@ -57,7 +57,7 @@ static int tx_key(AInputEvent *e) { (void)e; return 1; }
 static void menu_open(int tab) { (void)tab; }
 static void menu_close(void) {}
 static void menu_key(uint64_t bit) { (void)bit; }
-static void menu_key_up(uint64_t bit) { (void)bit; }
+static void fork_menu_key_up(uint64_t bit) { (void)bit; }
 #define OVM_ROWS 7   // (the menu a controller opens: its button row chosen)
 static uint64_t key_bit(int k) { return k == TEST_A ? 1 : 0; }
 static void dm_pad_players(int n) { assert(n == 1); }

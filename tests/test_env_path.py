@@ -88,9 +88,13 @@ int main(void) {{
 
     def test_front_uses_it(self):   # env_file reads every env.txt row through it
         src = (DM / 'android/front_android.c').read_text(encoding='utf-8')
-        self.assertIn('#include "env_path.h"', src)
+        hooks = (DM / 'android/fork_hooks_android.inc').read_text(encoding='utf-8')   # (the fork's part of front_android.c)
+        self.assertIn('#include "fork_hooks_android.h"', src)
+        self.assertIn('#include "env_path.h"', (DM / 'android/fork_hooks_android.h').read_text(encoding='utf-8'))
         body = src[src.index('static void env_file('):]; body = body[:body.index('\n}\n')]
-        self.assertIn('dm_env_own_path(eq + 1, g_root', body)
+        self.assertIn('setenv(line, fork_env_value(line, eq + 1), 1)', body)
+        hook = hooks[hooks.index('static const char *fork_env_value('):]; hook = hook[:hook.index('\n}\n')]
+        self.assertIn('dm_env_own_path(value, g_root', hook)
 
 
 if __name__ == '__main__':
