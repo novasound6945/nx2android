@@ -828,8 +828,8 @@ class Port:
         adb = Adb(self.tools['adb'], self.o.device or self.cfg.get('device'), log=say)
         try:
             adb.pick()
-            got = adb.pull_new(f'{datapack.files_folder(self.package)}/captured_shaders', self.aw / 'captured_shaders', pattern=lambda n: re.fullmatch(r'[0-9a-f]{16}\.bin', n))
-        except AdbError as e: say(f'shaders captured on the device not pulled ({e})'); return
+            got = adb.pull_new(f'{datapack.device_files(adb, self.package)}/captured_shaders', self.aw / 'captured_shaders', pattern=lambda n: re.fullmatch(r'[0-9a-f]{16}\.bin', n))
+        except (AdbError, BuildError) as e: say(f'shaders captured on the device not pulled ({e})'); return
         if got: say(f'{len(got)} shader(s) missing from the bundle, captured on the device: {" ".join(n[:16] for n in got)}')
 
     def translator(self):

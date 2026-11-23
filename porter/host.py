@@ -178,7 +178,7 @@ def build_host(package, title_id, debug, out, jobs=os.cpu_count() or 8, games_di
 
 def update(adb, package, jobs=os.cpu_count() or 8):
     """package's libdmhost.so built again from this checkout and installed. → {'package', 'title_id', 'debug', 'host'}"""
-    files = datapack.files_folder(package)
+    files = datapack.device_files(adb, package)
     try: manifest = json.loads(adb.read_text(f'{files}/nx2a-data.json') or '{}')
     except ValueError: manifest = {}
     if not isinstance(manifest, dict): manifest = {}

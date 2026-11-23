@@ -13,6 +13,7 @@
 #include "overlay_layout.h"
 #include "stick_axis.h"
 #include "env_path.h"
+#include "storage_android.h"
 #include "pixel_font.h"
 #include "saves_android.h"
 #include "savecloud.h"
@@ -252,6 +253,11 @@ static void act_finish(ANativeActivity *a) {
     }
     if (attached) (*a->vm)->DetachCurrentThread(a->vm);
     if (!ok) { LOG("[RED] Activity.finish() failed: the app ends itself"); _exit(0); }
+}
+// datasync_android.c, once the game data moved to another volume (storage_android.c): the app ends (the next start is a new process, which reads the new root); any thread
+void dm_front_quit(void) {
+    static _Atomic int once; if (atomic_exchange(&once, 1)) return;
+    LOG("storage: the data moved: the app ends"); g_quit = 1; act_finish(g_act);
 }
 // #294: Game Mode can change while the app is paused. Query on every resume, including NativeActivity without Java helpers.
 extern void dm_perf_game_mode(int mode);
@@ -1531,8 +1537,9 @@ static void env_file(const char *path) {   // KEY=VALUE per line (# comments): s
         char *e = line + strlen(line); while (e > line && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' ')) *--e = 0;
         if (!line[0] || line[0] == '#') continue;
         char *eq = strchr(line, '='); if (!eq) continue; *eq = 0;
-        if (dm_env_own_path(eq + 1, g_root, own, sizeof own)) {   // env_path.h: a pack ported under another package (an APK renamed by porter apk-update --package)
-            if (!said) LOG("env: %s=%s is another package's files folder: read as %s", line, eq + 1, own);
+        if (strcmp(line, "DM_CTL") && (dm_env_own_path(eq + 1, g_root, own, sizeof own) || dm_env_moved_path(eq + 1, g_root, own, sizeof own))) {   // (DM_CTL: devtools' file, in the internal files folder)   // env_path.h: a pack ported under another package (an APK
+            // renamed by porter apk-update --package), or its internal files folder's path while the data is on an SD card (storage_android.c), or the reverse
+            if (!said) LOG("env: %s=%s is not the data's folder: read as %s", line, eq + 1, own);
             setenv(line, own, 1); moved = 1;
         } else setenv(line, eq + 1, 1);
     }
@@ -1588,9 +1595,9 @@ static void open_access_page(ANativeActivity *act, int sdk) {   // the app's All
     LOG("[RED] RomFS: Android's All files access page could not be opened: open it by hand (Settings > Apps > the game)");
 }
 static int romfs_readable(ANativeActivity *act, int sdk) {   // 0: the game cannot read its RomFS, and the app ends
-    const char *r = getenv("DM_ROMFS"), *own[] = {g_root, act->internalDataPath}; char rr[4096], orr[4096];
+    const char *r = getenv("DM_ROMFS"), *own[] = {g_root, act->internalDataPath, dm_storage_home()}; char rr[4096], orr[4096];
     const char *rp = r && realpath(r, rr) ? rr : r;   // canonical paths: /sdcard/… is the /storage/emulated/0/… Android names the files folder by
-    for (int i = 0; i < 2; i++) { const char *o = own[i] && realpath(own[i], orr) ? orr : own[i]; size_t n = o ? strlen(o) : 0;
+    for (int i = 0; i < 3; i++) { const char *o = own[i] && realpath(own[i], orr) ? orr : own[i]; size_t n = o ? strlen(o) : 0;
         if (!rp || (n && !strncmp(rp, o, n) && (rp[n] == '/' || !rp[n]))) return 1; }   // the app's own folders need no permission
     JNIEnv *E = act->env; jclass c; jmethodID m; int ok = -1;   // -1: not known
     if (sdk >= 30) { c = (*E)->FindClass(E, "android/os/Environment"); m = c ? (*E)->GetStaticMethodID(E, c, "isExternalStorageManager", "()Z") : NULL; if (m) ok = (*E)->CallStaticBooleanMethod(E, c, m) ? 1 : 0; }
@@ -1638,6 +1645,23 @@ static int rewrite_abi_fits(char *why, size_t cap) {   // 0: a module of another
 static int g_sdk;
 static void game_start(ANativeActivity *act, int late); static void game_start_late(void); static int prep_start(void); static void prep_late(void);
 static void game_run(ANativeActivity *act); static void cloud_done(int quit); static void launch_go(void);
+int dm_storage_ask(ANativeActivity *act, void (*done)(const char *root));   // datasync_android.c: the card that holds the data is not in: insert it, or internal storage
+// the data root (storage_android.c's choice) for everything of the start: the paths under it, as the environment names them
+static void root_apply(const char *root) {
+    char p[700]; snprintf(g_root, sizeof g_root, "%s", root);
+    setenv("DM_ROOT", g_root, 1);
+    snprintf(p, sizeof p, "%s/RomFS", g_root); setenv("DM_ROMFS", p, 0);
+    snprintf(p, sizeof p, "%s/shaders.dmsv", g_root); setenv("DM_VK_SHADERS", p, 0);
+    snprintf(g_mods, sizeof g_mods, "%s/mods", g_root);
+}
+static void start_flow(ANativeActivity *act, int late);
+static void storage_found(const char *root) {   // the main thread, the start's question answered (the card is in again, or internal storage chosen): the start as from onCreate
+    root_apply(root); LOG("storage: the start goes on with %s", g_root);
+    if (g_queue) AInputQueue_detachLooper(g_queue);   // (start_flow attaches it again as onCreate's input would be)
+    start_flow(g_act, 1);
+    if (atomic_load(&g_syncing)) { if (g_queue) AInputQueue_attachLooper(g_queue, ALooper_forThread(), 2, on_input_early, NULL); return; }
+    if (g_queue && !g_quit) { while (!g_ilooper) usleep(1000); AInputQueue_attachLooper(g_queue, g_ilooper, 1, on_input, NULL); }
+}
 __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActivity *act, void *saved, size_t saved_size) {
     (void)saved; (void)saved_size;
     g_act = act;
@@ -1655,29 +1679,39 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
     if (activity_class) g_audio_menu_method = (*env)->GetMethodID(env, activity_class, "openAudioMenu", "()V");
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
     if (activity_class) (*env)->DeleteLocalRef(env, activity_class);
-    snprintf(g_root, sizeof g_root, "%s", act->externalDataPath ? act->externalDataPath : act->internalDataPath);
+    // the internal files folder (DM_HOME) keeps the log, saves/ and sync.txt whatever volume holds the game data (DM_ROOT: storage_android.c, the player's choice)
+    char home[512]; snprintf(home, sizeof home, "%s", act->externalDataPath ? act->externalDataPath : act->internalDataPath);
     char p[700];
-    snprintf(p, sizeof p, "%s/log.txt", g_root); char prev[720]; snprintf(prev, sizeof prev, "%s/log.prev.txt", g_root); rename(p, prev);
+    snprintf(p, sizeof p, "%s/log.txt", home); char prev[720]; snprintf(prev, sizeof prev, "%s/log.prev.txt", home); rename(p, prev);
     if (!freopen(p, "w", stderr)) __android_log_print(ANDROID_LOG_ERROR, "dmhost", "cannot write %s", p);
     setvbuf(stderr, NULL, _IOLBF, 0);
-    setenv("DM_ROOT", g_root, 1);
+    setenv("DM_HOME", home, 1);
     if (act->internalDataPath) setenv("DM_INTERNAL", act->internalDataPath, 1);   // the app's own storage, where code may be loaded from (gfx_vk_core.c drv_slot: a test driver)
-    snprintf(p, sizeof p, "%s/RomFS", g_root); setenv("DM_ROMFS", p, 0);
     snprintf(p, sizeof p, "%s/save", act->internalDataPath); mkdir(p, 0700); setenv("DM_SAVE", p, 0);
     snprintf(p, sizeof p, "%s/temp", act->internalDataPath); mkdir(p, 0700); setenv("DM_TEMP", p, 0);
-    snprintf(p, sizeof p, "%s/shaders.dmsv", g_root); setenv("DM_VK_SHADERS", p, 0);
-    g_sdk = sdk; snprintf(g_mods, sizeof g_mods, "%s/mods", g_root);
+    g_sdk = sdk;
+    char root[512]; int missing = dm_storage_start(act, root, sizeof root);
     // an APK ported with --data-url downloads its data first (datasync_android.c), on threads of its own; the game starts on this thread when that ends
     // the start screen (datasync_android.c), one for the data download, the shader preparation and the cloud's start: it shows only once they took 300 ms, and closes
     // (its thread, EGL, fonts and icon gone) before the game takes the window (game_run)
     dm_cloud_attach(act);   // (savecloud_android.c: the device link's key, model and the app's names, before the launcher can ask for a link)
+    if (missing) {   // the card that holds the data is not in: the start screen asks (insert it, or internal storage), then the start goes on from storage_found
+        dm_start_screen_open(act, home); atomic_store(&g_syncing, 1);   // (nothing reads the data before the answer: DM_ROOT is not set yet; the input is the screen's)
+        if (dm_storage_ask(act, storage_found)) return;
+        LOG("[RED] storage: the start screen cannot ask: internal storage is used"); dm_storage_use_internal(root, sizeof root);
+        root_apply(root); start_flow(act, 0); return;
+    }
+    root_apply(root);
     dm_start_screen_open(act, g_root);
+    start_flow(act, 0);
+}
+static void start_flow(ANativeActivity *act, int late) {   // onCreate's start once the data root is known (late: after onCreate returned, the card's question answered)
     dm_cloud_precheck(act);   // (savecloud_android.c: the cloud's early check beside the data's step: the link, the server's meta; its questions wait for game_start)
     atomic_store(&g_syncing, 1);
     if (dm_sync_begin(act, g_root, prep_late)) return;
     if (prep_start()) return;
     atomic_store(&g_syncing, 0);
-    game_start(act, 0);
+    game_start(act, late);
 }
 // The shader preparation (datasync_android.c dm_prep_begin) between the download and the game: with env.txt's switches read (the Vulkan driver, DM_VK_GPL), as game_start reads them again
 static int prep_start(void) { char p[700]; snprintf(p, sizeof p, "%s/env.txt", g_root); env_file(p); return dm_prep_begin(g_act, phone_window(), game_start_late); }
@@ -1697,7 +1731,7 @@ static void game_start(ANativeActivity *act, int late) {   // late: after onCrea
     unsetenv("DM_CTL");   // a release build takes no remote key presses (the control file is a development tool)
 #endif
     // the save manager's requests (saves_android.c), before the host mounts the save: an import chosen in the menu or pushed by porter, an export porter asks for
-    if (dm_saves_start(g_root)) { LOG("[saves] the request asked the app to end: the game is not started"); g_quit = 1; dm_start_screen_close(); if (late) act_finish(act); return; }
+    if (dm_saves_start(dm_storage_home())) { LOG("[saves] the request asked the app to end: the game is not started"); g_quit = 1; dm_start_screen_close(); if (late) act_finish(act); return; }
     if (!romfs_readable(act, sdk)) { g_quit = 1; dm_start_screen_close(); if (late) act_finish(act); return; }   // after the save manager's requests, which need no RomFS
     char why[300];
     if (!rewrite_abi_fits(why, sizeof why)) {   // the start screen shows the notice until the player leaves the app; its input goes to on_input_early (g_syncing), which hands the keys back
@@ -1739,7 +1773,7 @@ static void game_run(ANativeActivity *act) {   // the game itself: settings, the
     g_vm = act->vm;
     { pthread_t w; if (!pthread_create(&w, NULL, pad_watch, act->vm)) pthread_detach(w); }
     { pthread_t w; if (!pthread_create(&w, NULL, temp_watch, act->vm)) pthread_detach(w); }
-    LOG("NX2A host on Android: files %s, RomFS %s, saves %s", g_root, getenv("DM_ROMFS"), act->internalDataPath);
+    LOG("NX2A host on Android: files %s, RomFS %s, saves %s, log %s", g_root, getenv("DM_ROMFS"), act->internalDataPath, dm_storage_home());
     pthread_t t; pthread_create(&t, NULL, input_thread, NULL); pthread_detach(t);
     // The game's main thread: a 16 MB stack mapped here and handed over whole (pthread_attr_setstack), so the range pthread_getattr_np reports, which
     // svcQueryMemory gives the game as its main thread stack (hle_svc.c), is exactly mapped memory: IL2CPP's garbage collector scans that range from

@@ -41,7 +41,9 @@ typedef struct {
     char quick[48], quick_desc[2][96]; int quick_on;        // the start-at-once switch, two lines under its name
     int nrow; char key[3][32], val[3][96]; int col[3];      // the data's card
     char verify[48], clear[48]; int verify_off, clear_off;  // Check the data again, Clear the shader cache
-    char note[200], keys[96]; int sel;   // the line under the buttons; sel: 0 the switch, 1 verify, 2 clear
+    char loc[48], loc_desc[2][96], loc_val[32]; int loc_off; // the data's place (under the switch): its name, two lines (each volume's room), where it is now at its right;
+                                                             // loc_off: it cannot be chosen now (no SD card, the start not ready): dimmed
+    char note[200], keys[96]; int sel;   // the line under the buttons; sel: 0 the switch, 1 verify, 2 clear, 3 the data's place
 } stv_apppage;
 // the device link's page: BUSY a code is asked for (a spinner); CODE the QR code, the address, the code and the time left (LinkCode.dc.html); EXPIRED the same, the code
 // faded and run out; FAIL no code (the server not reached, asked too often); DONE linked (LinkDone.dc.html: a check, the device's name, Continue)

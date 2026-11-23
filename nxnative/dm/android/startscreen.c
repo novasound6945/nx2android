@@ -665,11 +665,11 @@ static void draw_cloudpage(stv_canvas *c, const stv_view *v) {
 
 // the app's page: one column of 720 (AppSettings.dc.html), or where that is too tall for the window, two (the switch at the left, the data's card, its buttons and the
 // note at the right; each half of the page's width)
-typedef struct { float x0, w, y0, lab1, lab2, lab2x, labw, note_x, note_y, note_w, sw[4], card[4], btn[2][4]; } alay;
+typedef struct { float x0, w, y0, lab1, lab2, lab2x, labw, note_x, note_y, note_w, sw[4], loc[4], card[4], btn[2][4]; } alay;   // loc: the data's place, under the switch
 static float ap_sh(void) { return 40 + LHN * 18 + 4 + 2 * 1.5f * 14; }
 static float ap_data(void) { return 40 + 3 * LHN * 15 + 2 * 12 + 10 + 56 + 10 + 2 * 1.5f * 13; }   // the data's card, the buttons, the note's two lines
-static float ap_one(void) { return PG_TITLE + LHN * 14 + 10 + ap_sh() + 28 + LHN * 14 + 10 + ap_data(); }
-static float ap_two(void) { return PG_TITLE + LHN * 14 + 10 + fmaxf(ap_sh(), ap_data()); }
+static float ap_one(void) { return PG_TITLE + LHN * 14 + 10 + 2 * ap_sh() + 12 + 28 + LHN * 14 + 10 + ap_data(); }
+static float ap_two(void) { return PG_TITLE + LHN * 14 + 10 + fmaxf(2 * ap_sh() + 12, ap_data()); }
 static box ap_box(int w, int h) {
     box b = box_of(w, h);
     return b.H >= 32 + ap_one() + PG_FOOT ? b : box_need(w, h, 880 + 64, 32 + ap_two() + PG_FOOT);
@@ -681,7 +681,8 @@ static alay ap_layout(box b) {
     else { L.w = fminf(1040, b.W - 64); L.x0 = (b.W - L.w) / 2; cw = L.labw = (L.w - 40) / 2; cx = L.x0 + cw + 40; L.y0 = pg_top(b, ap_two()); }
     y = L.y0 + PG_TITLE; L.lab1 = y; y += LHN * 14 + 10;
     L.sw[0] = L.x0; L.sw[1] = y; L.sw[2] = cw; L.sw[3] = sh;
-    if (!two) { y += sh + 28; L.lab2 = y; y += LHN * 14 + 10; } else L.lab2 = L.lab1;
+    L.loc[0] = L.x0; L.loc[1] = y + sh + 12; L.loc[2] = cw; L.loc[3] = sh;
+    if (!two) { y += 2 * sh + 12 + 28; L.lab2 = y; y += LHN * 14 + 10; } else L.lab2 = L.lab1;
     L.lab2x = cx;
     L.card[0] = cx; L.card[1] = y; L.card[2] = cw; L.card[3] = ch; y += ch + 10;
     float bw = (cw - 10) / 2;   // (the mock-up's 355, 10 apart)
@@ -701,6 +702,11 @@ static void draw_apppage(stv_canvas *c, const stv_view *v) {
     float tx = r[0] + r[2] - 24 - 56, ty = r[1] + (r[3] - 32) / 2;
     rrect(c, tx * s, ty * s, 56 * s, 32 * s, 16 * s, p->quick_on ? ACC : TRACK_OFF, 1);
     disc(c, (tx + (p->quick_on ? 28 : 4) + 12) * s, (ty + 4 + 12) * s, 12 * s, p->quick_on ? 0xFFFFFFu : BODY, 1);
+    const float *q = L.loc;   // the data's place: the name (18), its two lines, where it is now at the right (bold, the accent; dimmed when it cannot be chosen)
+    if (p->sel == 3) edged(c, s, q, 16, 2, ACC, CARD); else rrect(c, q[0] * s, q[1] * s, q[2] * s, q[3] * s, 16 * s, CARD, 1);
+    float vw = p->loc_val[0] ? line(c, p->loc_val, (q[0] + q[2] - 24) * s, q[1] * s, q[3] * s, 1, 17 * s, p->loc_off ? DIM2 : ACC, RIGHT, q[2] * 0.4f * s, 0) / s : 0;
+    line(c, p->loc, (q[0] + 24) * s, (q[1] + 20) * s, 0, 0, 18 * s, p->loc_off ? DIM2 : INK, LEFT, (q[2] - 48 - vw - 20) * s, 0);
+    for (int i = 0; i < 2; i++) line(c, p->loc_desc[i], (q[0] + 24) * s, (q[1] + 20 + LHN * 18 + 4 + i * 21) * s, 21 * s, 0, 14 * s, DIM, LEFT, (q[2] - 48 - vw - 20) * s, 0);
     line(c, p->label[1], L.lab2x * s, L.lab2 * s, 0, 0, 14 * s, DIM, LEFT, L.labw * s, 0);
     kv_card(c, s, L.card[0], L.card[1], L.card[2], L.card[3], p->nrow > 3 ? 3 : p->nrow, p->key, p->val, p->col, 24);
     for (int i = 0; i < 2; i++) {
@@ -793,7 +799,7 @@ int stv_page_hit(const stv_view *v, int w, int h, float x, float y) {
     if (v->screen == STV_SCREEN_LAUNCHER) { ll = ln_layout(b, wide_of(w, h)); for (int i = 0; i < 4; i++) r[n++] = ll.r[i]; }
     else if (v->screen == STV_SCREEN_CLOUD) { cl = cp_layout(&v->cp, b); for (int i = 0; i < 6; i++) r[n++] = cl.r[i]; }
     else if (v->screen == STV_SCREEN_LINK) { int k = lk_buttons(&v->lk, b, lr); for (int i = 0; i < k; i++) r[n++] = lr[i]; }
-    else if (v->screen == STV_SCREEN_APP) { al = ap_layout(b); r[n++] = al.sw; r[n++] = al.btn[0]; r[n++] = al.btn[1]; }
+    else if (v->screen == STV_SCREEN_APP) { al = ap_layout(b); r[n++] = al.sw; r[n++] = al.btn[0]; r[n++] = al.btn[1]; r[n++] = al.loc; }
     for (int i = 0; i < n; i++) if (X >= r[i][0] && X < r[i][0] + r[i][2] && Y >= r[i][1] && Y < r[i][1] + r[i][3]) return i;
     return -1;
 }

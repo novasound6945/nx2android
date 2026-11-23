@@ -29,6 +29,7 @@
 #include "savecloud.h"
 #include "pixel_font.h"
 #include "startscreen.h"
+#include "storage_android.h"
 #include <android/keycodes.h>
 #include <sys/stat.h>
 #include <EGL/egl.h>
@@ -247,7 +248,7 @@ static void sync_log(void *u, const char *m) { (void)u; LOG("%s", m); }
 // frame (dm_start_screen_close from front_android.c game_run): startscreen.c draws its picture into a canvas the window's size, shown as one texture through GLES 2.
 // It shows once the start took 300 ms, at once for a question or an error: a start with nothing to do shows nothing. Closing it ends its thread, lets the window go
 // (EGL's surface and context destroyed) and frees the fonts, the glyphs, the icon, the background and the canvas: nothing of it is left while the game runs ----
-enum { PH_NONE, PH_DATA, PH_PREP, PH_CLOUD, PH_NOTICE };
+enum { PH_NONE, PH_DATA, PH_PREP, PH_CLOUD, PH_NOTICE, PH_STORAGE };   // PH_STORAGE: the card that holds the data is not in (dm_storage_ask)
 static struct {
     int open, closing, closed, phase, shown, first_run, need_net, retry_now, has_server;
     int64_t t0;
@@ -264,12 +265,13 @@ typedef struct {
     int holding, hold_touch; int64_t hold_t0, hint_until;   // Back to the cloud save held (by the finger); "hold it" shown until
     int vrun, vbad; ds_progress vpr; char amsg[160];        // Check the data again runs, failed; its progress; the App page's last outcome
     int data_rc, data_net, data_off, data_known, has_server, verify_ok, last_act; int64_t checked_t, shader_bytes; uint64_t data_bytes;
+    int mvq, mvsel, moving; int64_t mv_done_t;   // the data's place: its question asked (Move / Cancel), its choice; a move runs or ended (the app ends): no Start
 } lnr_t;
 static lnr_t LN = {.gpipe = {-1, -1}, .data_rc = -1};
 static int lnr_input(const AInputEvent *e);
 static int lnr_busy_locked(const dm_cloud_info *ci); static void go_locked(void); static int verify_ok_locked(const dm_cloud_info *ci);
 // the start is ready (front_android.c reached dm_launcher_gate) and no launcher's action runs: Start and Play without the sync can be chosen (else they are off)
-static int lnr_ready(const lnr_t *l, const dm_cloud_info *ci) { return l->gate && !l->vrun && !ci->act && !ci->checking; }
+static int lnr_ready(const lnr_t *l, const dm_cloud_info *ci) { return l->gate && !l->vrun && !l->moving && !ci->act && !ci->checking; }
 static uint64_t data_bytes_now(void); static int64_t shader_bytes_now(void); static void lnr_path(char *o, size_t n);
 static struct { uint8_t *ttf[2]; size_t n[2]; uint32_t *icon; int iw, ih; uint32_t glow; int tried; } R;   // the screen thread's own
 static int korean(void) { const pf_index *g = pf_find(dm_overlay_font(), 0xAC00); return g && (g->cp_adv >> 8) == 0xAC00; }   // the APK's font has Hangul (assets/font/ui.bin)
@@ -326,7 +328,61 @@ static void paused_view(dm_cloud_view *q) {
     snprintf(q->line[0], sizeof q->line[0], "%s", L("받은 파일은 그대로예요. 이어 받으면 멈춘 곳부터 받아요.", "What was downloaded stays. It goes on from where it stopped."));
     snprintf(q->btn[0], sizeof q->btn[0], "%s", L("이어 받기", "Resume"));
 }
-typedef struct { int phase, status, wait_s, wait_tot, need_net, pd, pt; ds_progress p; char msg[256], nt_ko[3][200], nt_en[3][200], nt_detail[300]; lnr_t ln; int paused, notif_off, bg; } snap_t;
+// the card that holds the game data is not in (storage_android.c): Check again, or Use internal storage (the data downloaded there again; an APK without a server: installed again)
+static struct { void (*done)(const char *root); int sel, tries; } SQ;   // under S.mu
+static void fmt_gb(char *o, size_t n, uint64_t b);
+void dm_front_quit(void);   // front_android.c: the app ends (Activity.finish), after a move of its data
+static void storage_view(dm_cloud_view *q, int sel, int tries, int has_server) {
+    memset(q, 0, sizeof *q); q->ask = 1; q->urgent = 1; q->icon = DM_CLOUD_ICON_WARN; q->progress = -1; q->count_permille = -1; q->nbtn = 2; q->sel = sel;
+    snprintf(q->title, sizeof q->title, "%s", L("SD 카드를 찾을 수 없어요", "The SD card cannot be found"));
+    snprintf(q->line[0], sizeof q->line[0], "%s", L("게임 데이터가 SD 카드에 있어요. 카드를 꽂거나 데이터 위치를 내부 저장소로 바꿔 주세요.", "The game data is on the SD card. Insert it, or change the data's place to internal storage."));
+    snprintf(q->line[1], sizeof q->line[1], "%s", has_server ? L("내부 저장소로 바꾸면 게임 데이터를 다시 받아요. 세이브는 그대로예요.", "Internal storage downloads the game data again. The save stays as it is.")
+                                                             : L("내부 저장소로 바꾸면 PC에서 게임 데이터를 다시 설치해야 해요. 세이브는 그대로예요.", "With internal storage the game data has to be installed again from a PC. The save stays as it is."));
+    snprintf(q->btn[0], sizeof q->btn[0], "%s", L("다시 확인", "Check again")); snprintf(q->btn[1], sizeof q->btn[1], "%s", L("내부 저장소로 바꾸기", "Use internal storage"));
+    if (tries) snprintf(q->foot, sizeof q->foot, "%s", L("아직 SD 카드가 없어요", "Still no SD card"));
+}
+// the data's move (the App settings' data place, storage_android.c) as the launcher's question: its confirmation, the room it lacks, the copy's progress, its end. 1 when there is one
+static int move_view(dm_cloud_view *q, const lnr_t *n) {
+    dm_storage_move m; dm_storage_move_get(&m); int ko = korean(); char a[48], b[48];
+    memset(q, 0, sizeof *q); q->ask = 1; q->urgent = 1; q->icon = DM_CLOUD_ICON_NONE; q->progress = -1; q->count_permille = -1; q->nbtn = 1;
+    if (m.state == DM_MV_RUN) {
+        snprintf(q->title, sizeof q->title, "%s", m.to_sd ? L("SD 카드로 옮기는 중", "Moving to the SD card") : L("내부 저장소로 옮기는 중", "Moving to internal storage"));
+        snprintf(q->line[0], sizeof q->line[0], "%s", L("다 옮기면 앱이 닫혀요. 옮기는 동안은 게임을 시작할 수 없어요.", "The app closes once it is moved. The game cannot start meanwhile."));
+        snprintf(q->line[1], sizeof q->line[1], "%s", L("취소하면 복사한 것을 지우고 원래 자리에 그대로 둬요. 세이브는 내부 저장소에 그대로예요.", "Cancel removes the copy and leaves the data where it was. The save stays in internal storage."));
+        if (m.sizing || !m.total) snprintf(q->count, sizeof q->count, "%s", L("옮길 데이터를 세는 중…", "Counting the data…"));
+        else { stv_fmt_bytes(a, sizeof a, m.done < m.total ? m.done : m.total, m.total); int pc = (int)((m.done < m.total ? m.done : m.total) * 100 / m.total);
+               snprintf(q->count, sizeof q->count, "%s · %d%%", a, pc); q->count_permille = pc * 10; }
+        snprintf(q->btn[0], sizeof q->btn[0], "%s", L("취소", "Cancel"));
+        return 1;
+    }
+    if (m.state == DM_MV_DONE) {
+        q->icon = DM_CLOUD_ICON_NONE;
+        snprintf(q->title, sizeof q->title, "%s", L("옮겼어요", "Moved"));
+        snprintf(q->line[0], sizeof q->line[0], "%s", m.to_sd ? L("이제 게임 데이터를 SD 카드에서 읽어요. 앱이 닫히면 다시 열어 주세요.", "The game data is read from the SD card now. Open the app again once it closes.")
+                                                             : L("이제 게임 데이터를 내부 저장소에서 읽어요. 앱이 닫히면 다시 열어 주세요.", "The game data is read from internal storage now. Open the app again once it closes."));
+        snprintf(q->btn[0], sizeof q->btn[0], "%s", L("닫기", "Close"));
+        return 1;
+    }
+    if (!n->mvq) return 0;
+    dm_storage_info si; dm_storage_info_get(&si); int to_sd = !si.on_sd; uint64_t room = to_sd ? si.free_sd : si.free_int, need = n->data_known ? n->data_bytes : 0;
+    if (need && need + (64ull << 20) > room) {
+        q->icon = DM_CLOUD_ICON_WARN; fmt_gb(a, sizeof a, room); fmt_gb(b, sizeof b, need);
+        snprintf(q->title, sizeof q->title, "%s", L("공간이 모자라요", "Not enough room"));
+        snprintf(q->line[0], sizeof q->line[0], ko ? "%s 여유 %s · 게임 데이터 %s" : "%s: %s free · the game data %s", to_sd ? L("SD 카드", "The SD card") : L("내부 저장소", "Internal storage"), a, b);
+        snprintf(q->btn[0], sizeof q->btn[0], "%s", L("확인", "OK"));
+        return 1;
+    }
+    if (need) fmt_gb(a, sizeof a, need); else snprintf(a, sizeof a, "%s", "");
+    fmt_gb(b, sizeof b, room);
+    snprintf(q->title, sizeof q->title, "%s", to_sd ? L("게임 데이터를 SD 카드로 옮길까요?", "Move the game data to the SD card?") : L("게임 데이터를 내부 저장소로 옮길까요?", "Move the game data to internal storage?"));
+    if (need) snprintf(q->line[0], sizeof q->line[0], ko ? "게임 데이터 %s를 복사하고 원래 자리의 것은 지워요 (%s 여유). 다 옮기면 앱이 닫혀요." : "The game data (%s) is copied, then removed from where it was (%s free there). The app closes once it is moved.", a, b);
+    else snprintf(q->line[0], sizeof q->line[0], ko ? "게임 데이터를 복사하고 원래 자리의 것은 지워요 (%s 여유). 다 옮기면 앱이 닫혀요." : "The game data is copied, then removed from where it was (%s free there). The app closes once it is moved.", b);
+    snprintf(q->line[1], sizeof q->line[1], "%s", to_sd ? L("세이브는 내부 저장소에 그대로 있어요. SD 카드는 내부 저장소보다 느려 불러오기가 길어질 수 있어요.", "The save stays in internal storage. An SD card is slower than internal storage: loading may take longer.")
+                                                        : L("세이브는 내부 저장소에 그대로 있어요.", "The save stays in internal storage."));
+    q->nbtn = 2; q->sel = n->mvsel; snprintf(q->btn[0], sizeof q->btn[0], "%s", L("옮기기", "Move")); snprintf(q->btn[1], sizeof q->btn[1], "%s", L("취소", "Cancel"));
+    return 1;
+}
+typedef struct { int phase, status, wait_s, wait_tot, need_net, pd, pt; ds_progress p; char msg[256], nt_ko[3][200], nt_en[3][200], nt_detail[300]; lnr_t ln; int paused, notif_off, bg, sq_sel, sq_tries; } snap_t;
 // the picture's state, from what the phases left (under no lock: snap and cv are copies)
 // the launcher's picture: its statuses, items and pages from the start's state (x), the launcher's (x->ln) and the cloud's (ci)
 static void fmt_gb(char *o, size_t n, uint64_t b) { if (b >= 1024ull << 20) snprintf(o, n, "%.1f GB", b / 1073741824.0); else snprintf(o, n, "%.0f MB", b / 1048576.0); }
@@ -499,6 +555,12 @@ static void build_launcher(stv_view *v, const snap_t *x, const stv_step *steps, 
             snprintf(p->verify, sizeof p->verify, ko ? "%s · %d%%" : "%s · %d%%", n->vpr.phase == DS_PH_DOWNLOAD || n->vpr.phase == DS_PH_UNPACK ? L("다시 받는 중", "Downloading") : L("확인 중", "Checking"), pc); }
         else snprintf(p->verify, sizeof p->verify, "%s", L("데이터 다시 확인", "Check the data again"));
         p->verify_off = !n->verify_ok; snprintf(p->clear, sizeof p->clear, "%s", L("셰이더 캐시 비우기", "Clear the shader cache")); p->clear_off = n->shader_bytes <= 0 || x->phase == PH_PREP;
+        { dm_storage_info si; dm_storage_info_get(&si); int ready = lnr_ready(n, ci) && x->phase == PH_NONE;
+          snprintf(p->loc, sizeof p->loc, "%s", L("데이터 위치", "Data location")); snprintf(p->loc_val, sizeof p->loc_val, "%s", si.on_sd ? L("SD 카드", "SD card") : L("내부 저장소", "Internal"));
+          fmt_gb(a, sizeof a, si.free_int); snprintf(p->loc_desc[0], sizeof p->loc_desc[0], ko ? "내부 저장소 · 여유 %s" : "Internal storage · %s free", a);
+          if (si.has_sd) { fmt_gb(b, sizeof b, si.free_sd); snprintf(p->loc_desc[1], sizeof p->loc_desc[1], ko ? "SD 카드 · 여유 %s%s" : "SD card · %s free%s", b, ready ? "" : L(" · 시작 준비 뒤에 옮길 수 있어요", " · once the start is ready")); }
+          else snprintf(p->loc_desc[1], sizeof p->loc_desc[1], "%s", L("SD 카드 없음", "No SD card"));
+          p->loc_off = !si.has_sd || !ready; }
         if (n->amsg[0]) snprintf(p->note, sizeof p->note, "%s", n->amsg);
         else if (!n->verify_ok && !n->vrun && (n->data_off || !n->has_server)) snprintf(p->note, sizeof p->note, "%s", n->has_server ? L("오프라인이라 데이터 다시 확인을 할 수 없어요.", "Offline: the data cannot be checked again.")
                                                                                                                : L("이 앱은 데이터 서버가 없어 다시 확인할 수 없어요.", "This app has no data server to check against."));
@@ -556,6 +618,8 @@ static void build_view(stv_view *v, const snap_t *x, const stv_rate *rate, dm_cl
             snprintf(v->bar_left, sizeof v->bar_left, "%s", t); stv_fmt_eta(v->bar_right, sizeof v->bar_right, x->pd > 16 ? rate->eta : -1, ko);
             snprintf(v->hint, sizeof v->hint, "%s", L("처음 한 번만 해요 · 게임 데이터나 드라이버가 바뀌면 다시 해요", "Done once · again after a data or driver update"));
         }
+    } else if (x->phase == PH_STORAGE) {
+        storage_view(dq, x->sq_sel, x->sq_tries, V.has_server); v->ask = dq;
     } else if (x->phase == PH_NOTICE) {   // a question's screen without buttons: the warning's icon, the title, two lines, the log's words small at the bottom
         int k = korean(); memset(dq, 0, sizeof *dq); dq->ask = 1; dq->urgent = 1; dq->icon = DM_CLOUD_ICON_WARN; dq->progress = -1;
         snprintf(dq->title, sizeof dq->title, "%s", k ? x->nt_ko[0] : x->nt_en[0]);
@@ -571,6 +635,7 @@ static void build_view(stv_view *v, const snap_t *x, const stv_rate *rate, dm_cl
             if (cv->nbtn) snprintf(v->foot, sizeof v->foot, "%s", L("B · 동기화 없이 플레이", "B · play without the sync"));
         }
     }
+    if (x->ln.on && !v->ask && x->phase == PH_NONE && move_view(dq, &x->ln)) v->ask = dq;   // (the data's move: its question, its progress)
     if (x->ln.on && cv->ask && !v->ask) v->ask = cv;   // (a question of a check the launcher asked for)
     if (x->ln.on && !v->ask && x->phase != PH_NOTICE && !(x->phase == PH_DATA && (v->bar >= 0 || x->status >= 0))) build_launcher(v, x, steps, ci);   // else the steps: a download, an error
 }
@@ -640,14 +705,25 @@ static void *screen_thread(void *a) {
     for (;;) {
         if (S.lost) { gl_drop(); S.lost = 0; S.released = 1; pthread_cond_broadcast(&S.cv); }
         if (V.closing) break;
-        dm_cloud_info ci; memset(&ci, 0, sizeof ci); ci.progress = -1; int fire = 0;
+        dm_cloud_info ci; memset(&ci, 0, sizeof ci); ci.progress = -1; int fire = 0, quit = 0;
         if (LN.on) {   // (savecloud.h: its lock is never held while this file's is taken)
             dm_cloud_info_get(&ci); int64_t tm = now_ms();
             if (LN.holding && tm - LN.hold_t0 >= 1500) { LN.holding = 0; fire = 1; LN.last_act = DM_CLOUD_ACT_RESTORE; }   // Back to the cloud save held 1.5 s
             if (LN.want && LN.gate && !lnr_busy_locked(&ci)) go_locked();
             LN.verify_ok = verify_ok_locked(&ci);
+            dm_storage_move m; dm_storage_move_get(&m);   // (storage_android.c's lock is never held while this file's is taken)
+            LN.moving = m.state == DM_MV_RUN || m.state == DM_MV_DONE;
+            if (m.state == DM_MV_FAIL || m.state == DM_MV_CANCELLED) {   // its outcome in the App page's note
+                char g1[48], g2[48]; fmt_gb(g1, sizeof g1, m.need); fmt_gb(g2, sizeof g2, m.room);
+                if (m.state == DM_MV_CANCELLED) snprintf(LN.amsg, sizeof LN.amsg, "%s", L("옮기기를 취소했어요 · 데이터는 원래 자리에 있어요", "The move was cancelled · the data is where it was"));
+                else if (m.err == -ENOSPC) snprintf(LN.amsg, sizeof LN.amsg, korean() ? "공간이 모자라 옮기지 않았어요 · 필요 %s, 여유 %s" : "Not moved: %s needed, %s free", g1, g2);
+                else snprintf(LN.amsg, sizeof LN.amsg, korean() ? "옮기지 못했어요 (오류 %d) · 데이터는 원래 자리에 있어요" : "The move failed (error %d) · the data is where it was", -m.err);
+                dm_storage_move_clear();
+            }
+            if (m.state == DM_MV_DONE && !LN.mv_done_t) LN.mv_done_t = tm;
+            if (m.state == DM_MV_DONE && tm - LN.mv_done_t > 4000 && LN.mv_done_t > 0) { LN.mv_done_t = -1; quit = 1; }   // the app ends by itself 4 s after
         }
-        snap_t x = {V.phase, S.status, S.wait_s, S.wait_tot, V.need_net, P.done, P.total}; x.p = S.pr; snprintf(x.msg, sizeof x.msg, "%s", S.msg); x.ln = LN; x.paused = S.paused; x.notif_off = S.notif_off; x.bg = S.svc_cls != NULL;
+        snap_t x = {V.phase, S.status, S.wait_s, S.wait_tot, V.need_net, P.done, P.total}; x.p = S.pr; snprintf(x.msg, sizeof x.msg, "%s", S.msg); x.ln = LN; x.paused = S.paused; x.notif_off = S.notif_off; x.bg = S.svc_cls != NULL; x.sq_sel = SQ.sel; x.sq_tries = SQ.tries;
         if (x.phase == PH_NOTICE) { memcpy(x.nt_ko, NT.ko, sizeof NT.ko); memcpy(x.nt_en, NT.en, sizeof NT.en); memcpy(x.nt_detail, NT.detail, sizeof NT.detail); }
         stv_step steps[STV_NSTEPS]; memcpy(steps, V.step, sizeof steps); ANativeWindow *w = S.win; int64_t t = now_ms();
         dm_cloud_view cv; memset(&cv, 0, sizeof cv); cv.progress = -1;
@@ -656,12 +732,13 @@ static void *screen_thread(void *a) {
         if (x.phase == PH_DATA && (x.p.phase == DS_PH_DOWNLOAD || x.p.phase == DS_PH_UNPACK || x.p.phase == DS_PH_CHECK) && x.p.total)   // network bytes only: a resumed part's bytes join done at once, not the speed
             stv_rate_feed(&rate, t, x.p.phase == DS_PH_DOWNLOAD ? (double)x.p.net : (double)x.p.done, (double)(x.p.total - (x.p.done < x.p.total ? x.p.done : x.p.total)));
         if (x.phase == PH_PREP && x.pt) stv_rate_feed(&rate, t, x.pd, x.pt - x.pd);
-        int urgent = x.phase == PH_NOTICE || (x.phase == PH_CLOUD && cv.urgent) || (x.phase == PH_DATA && x.status >= 0);
+        int urgent = x.phase == PH_NOTICE || x.phase == PH_STORAGE || (x.phase == PH_CLOUD && cv.urgent) || (x.phase == PH_DATA && x.status >= 0);
         int show = w && (LN.on || (x.phase != PH_NONE && (V.shown || urgent || t - V.t0 > 300))), animated = 0;   // (the launcher: at once, and with no step running)
         if (show && !gl_tried) { gl_tried = 1; G.ok = !gl_load(); if (!G.ok) { LOG("[RED] start screen: no EGL / GLES 2: the start runs without its screen"); gl_end(); } }
         if (show && G.ok) {
             pthread_mutex_unlock(&S.mu);
             if (fire && dm_cloud_act(DM_CLOUD_ACT_RESTORE)) LOG("[RED] launcher: Back to the cloud save cannot run now");
+            if (quit) dm_front_quit();
             if (x.ln.on) {   // the pages' numbers: the pack's size once its data step ended, the shader cache's, this device's save on the Cloud page
                 if (!x.ln.data_known && V.step[STV_DATA].state == STV_DONE && x.phase != PH_DATA && !x.ln.vrun) { uint64_t db = data_bytes_now(); pthread_mutex_lock(&S.mu); LN.data_bytes = db; LN.data_known = 1; pthread_mutex_unlock(&S.mu); x.ln.data_bytes = db; x.ln.data_known = 1; }
                 if (x.ln.page == 2 || !x.ln.shader_bytes) { int64_t sb = shader_bytes_now(); pthread_mutex_lock(&S.mu); LN.shader_bytes = sb; pthread_mutex_unlock(&S.mu); x.ln.shader_bytes = sb; }
@@ -738,7 +815,7 @@ void dm_start_screen_open(ANativeActivity *act, const char *root) {
     for (int i = 0; i < STV_NSTEPS; i++) { snprintf(V.step[i].name, sizeof V.step[i].name, "%s", korean() ? KO[i] : EN[i]); V.step[i].state = STV_WAIT; snprintf(V.step[i].note, sizeof V.step[i].note, "%s", L("대기", "Waiting")); }
     if (!V.has_server && !ds_bundles_dir(root)) { V.step[STV_DATA].state = STV_DONE; snprintf(V.step[STV_DATA].note, sizeof V.step[STV_DATA].note, "%s", L("준비됨", "Ready")); }
     if (!vk_gpl_prepare) { V.step[STV_SHADERS].state = STV_SKIP; snprintf(V.step[STV_SHADERS].note, sizeof V.step[STV_SHADERS].note, "%s", L("필요 없음", "Not needed")); }
-    snprintf(p, sizeof p, "%s/sync.txt", root);
+    { const char *h = getenv("DM_HOME"); snprintf(p, sizeof p, "%s/sync.txt", h && h[0] ? h : root); }   // (sync.txt stays in the internal files folder: storage_android.c)
     if (stat(p, &st)) { V.step[STV_CLOUD].state = STV_SKIP; snprintf(V.step[STV_CLOUD].note, sizeof V.step[STV_CLOUD].note, "%s", noserver ? L("클라우드 서버 없음", "No cloud server") : L("기기 연결 필요", "Not linked")); }
     checked_path(p, sizeof p); size_t n = 0; char *ck = p[0] ? ds_read(p, &n, 64) : NULL; V.checked[0] = 0;
     if (ck) LN.checked_t = strtoll(ck, NULL, 10);
@@ -766,7 +843,50 @@ void dm_start_screen_close(void) {
     pthread_mutex_unlock(&S.mu);
 }
 // The input before the game that is not the cloud's (front_android.c on_input_early): the first start's Retry when it has no network. 1 when it was the screen's
+static void storage_pick(int i) {   // the main thread: the card's question answered (0 Check again, 1 Use internal storage)
+    char root[512]; int missing = i ? (dm_storage_use_internal(root, sizeof root), 0) : dm_storage_recheck(S.act, root, sizeof root);
+    pthread_mutex_lock(&S.mu); void (*done)(const char *) = NULL;
+    if (missing) { SQ.tries++; LOG("storage: the card is still not in"); }
+    else { done = SQ.done; SQ.done = NULL; V.phase = PH_NONE; char p[700]; struct stat st; snprintf(p, sizeof p, "%s/%s", root, DS_LIST); V.first_run = V.has_server && stat(p, &st); }
+    pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+    if (done) done(root);
+}
+static int storage_input(const AInputEvent *e) {   // PH_STORAGE's keys and touches (the main thread)
+    int type = AInputEvent_getType(e), go = -1;
+    if (type == AINPUT_EVENT_TYPE_KEY) {
+        int k = AKeyEvent_getKeyCode(e);
+        if (k == AKEYCODE_VOLUME_UP || k == AKEYCODE_VOLUME_DOWN || k == AKEYCODE_VOLUME_MUTE) return 0;
+        if (AKeyEvent_getAction(e) != AKEY_EVENT_ACTION_DOWN || AKeyEvent_getRepeatCount(e)) return 1;
+        pthread_mutex_lock(&S.mu);
+        if (k == AKEYCODE_DPAD_LEFT) SQ.sel = 0; else if (k == AKEYCODE_DPAD_RIGHT) SQ.sel = 1;
+        else if (k == AKEYCODE_BUTTON_A || k == AKEYCODE_DPAD_CENTER || k == AKEYCODE_ENTER || k == AKEYCODE_BUTTON_START) go = SQ.sel;
+        pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+    } else if (type == AINPUT_EVENT_TYPE_MOTION) {
+        int src = AInputEvent_getSource(e);
+        if ((src & AINPUT_SOURCE_JOYSTICK) == AINPUT_SOURCE_JOYSTICK) {
+            float x = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_HAT_X, 0); if (fabsf(x) < 0.5f) x = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_X, 0);
+            if (fabsf(x) > 0.5f) { pthread_mutex_lock(&S.mu); SQ.sel = x > 0; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); }
+        } else if ((AMotionEvent_getAction(e) & AMOTION_EVENT_ACTION_MASK) == AMOTION_EVENT_ACTION_UP) {
+            pthread_mutex_lock(&S.mu); ANativeWindow *w = S.win; dm_cloud_view q; storage_view(&q, SQ.sel, SQ.tries, V.has_server); pthread_mutex_unlock(&S.mu);
+            int kind = 0; if (w) go = stv_hit(&q, ANativeWindow_getWidth(w), ANativeWindow_getHeight(w), AMotionEvent_getX(e, 0), AMotionEvent_getY(e, 0), &kind);
+            if (go >= 0) { pthread_mutex_lock(&S.mu); SQ.sel = go; pthread_mutex_unlock(&S.mu); }
+        }
+    }
+    if (go >= 0) { LOG("storage: the player chose %s", go ? "internal storage" : "to check for the card again"); storage_pick(go); }
+    return 1;
+}
+// front_android.c, onCreate: the card that holds the game data is not in. The start screen asks (Check again, Use internal storage); done(root) on the main thread once
+// it is answered. 0 when the screen is not open (the caller goes on with internal storage)
+int dm_storage_ask(ANativeActivity *act, void (*done)(const char *root)) {
+    pthread_mutex_lock(&S.mu);
+    int ok = V.open && !V.closing;
+    if (ok) { S.act = act; SQ.done = done; SQ.sel = 0; SQ.tries = 0; V.phase = PH_STORAGE; pthread_cond_broadcast(&S.cv); }
+    pthread_mutex_unlock(&S.mu);
+    return ok;
+}
 int dm_start_input(const AInputEvent *e) {
+    pthread_mutex_lock(&S.mu); int sq = V.phase == PH_STORAGE; pthread_mutex_unlock(&S.mu);
+    if (sq) return storage_input(e);
     pthread_mutex_lock(&S.mu); int paused = V.phase == PH_DATA && S.paused, on = paused || (V.phase == PH_DATA && V.need_net && S.status >= 0); ANativeWindow *w = S.win; int ws = S.wait_s, wt = S.wait_tot; pthread_mutex_unlock(&S.mu);
     if (!on) return lnr_input(e);   // (the launcher's, and − at a start without it)
     int go = 0;
@@ -1185,7 +1305,7 @@ static void lnr_save_quick(int on) {
     char p[700]; lnr_path(p, sizeof p); if (!p[0]) return;
     char t[32]; int n = snprintf(t, sizeof t, "quick=%d\n", on ? 1 : 0); if (ds_write(p, t, (size_t)n)) LOG("[RED] launcher: cannot write %s (errno %d)", p, errno);
 }
-static int lnr_busy_locked(const dm_cloud_info *ci) { return LN.vrun || ci->act || ci->checking; }   // a launcher's action runs: the game waits for it
+static int lnr_busy_locked(const dm_cloud_info *ci) { return LN.vrun || LN.moving || ci->act || ci->checking; }   // a launcher's action runs: the game waits for it
 static void go_locked(void) {   // the game starts (the main thread's gate_ready)
     char b = 1; LN.gate = 0; LN.want = 0;
     if (LN.gpipe[1] < 0 || write(LN.gpipe[1], &b, 1) != 1) LOG("[RED] launcher: cannot wake the main thread");
@@ -1286,6 +1406,7 @@ static void lnr_activate(int page, int sel, int touch) {   // A (or a touch) on 
         if (sel == 0) { LN.quick = !LN.quick; lnr_save_quick(LN.quick); LOG("launcher: start at once %s", LN.quick ? "on (− at the start opens the launcher)" : "off"); }
         else if (sel == 1 && verify_ok_locked(&ci)) { act = 4; LN.vrun = 1; LN.amsg[0] = 0; memset(&LN.vpr, 0, sizeof LN.vpr); }
         else if (sel == 2 && LN.shader_bytes > 0 && V.phase != PH_PREP) act = 5;
+        else if (sel == 3 && lnr_ready(&LN, &ci) && V.phase == PH_NONE) { dm_storage_info si; dm_storage_info_get(&si); if (si.has_sd) { LN.mvq = 1; LN.mvsel = 0; LN.amsg[0] = 0; } }
     }
     pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
     if (act == 1) { LOG("launcher: Play without the sync"); if (dm_cloud_play_unsynced() < 0) { pthread_mutex_lock(&S.mu); LN.nosync = 0; pthread_mutex_unlock(&S.mu); } }
@@ -1323,7 +1444,9 @@ static void lnr_key(int k) {
         else if (k == K_A && (two || lkk.state == DM_LINK_DONE)) go = two ? s0 : 0;
         else if (k == K_B) go = lkk.state == DM_LINK_DONE ? 0 : 1;
     } else {
-        if (k == K_UP) *sel = 0; else if (k == K_DOWN && s0 == 0) *sel = 1; else if (k == K_LEFT && s0 == 2) *sel = 1; else if (k == K_RIGHT && s0 == 1) *sel = 2;
+        // the switch (0) over the data's place (3), the data's buttons (1, 2) under or right of them
+        if (k == K_UP) *sel = s0 == 1 || s0 == 2 ? 3 : 0; else if (k == K_DOWN) *sel = s0 == 0 ? 3 : s0 == 3 ? 1 : s0;
+        else if (k == K_LEFT) *sel = s0 == 2 ? 1 : s0 == 1 ? 3 : s0; else if (k == K_RIGHT) *sel = s0 == 1 ? 2 : s0 == 0 || s0 == 3 ? 1 : s0;
         else if (k == K_A) go = s0; else if (k == K_B) { LN.page = 0; LN.sel[0] = 2; }
     }
     pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
@@ -1354,8 +1477,46 @@ static void lnr_touch(int act, float x, float y) {
 }
 // the launcher is what the screen shows (not a download, an error of the data or a notice)
 static int lnr_visible_locked(void) {
-    if (!LN.on || V.phase == PH_NOTICE) return 0;
+    if (!LN.on || V.phase == PH_NOTICE || V.phase == PH_STORAGE) return 0;
     if (V.phase == PH_DATA && (S.status >= 0 || V.need_net || ((S.pr.phase == DS_PH_DOWNLOAD || S.pr.phase == DS_PH_UNPACK) && S.pr.total))) return 0;
+    return 1;
+}
+// the data's move question (move_view) on the screen: its keys and touches. 1 when it was its
+static void move_button(int i) {
+    dm_storage_move m; dm_storage_move_get(&m); int start = -1;
+    if (m.state == DM_MV_RUN) { dm_storage_move_cancel(); return; }
+    if (m.state == DM_MV_DONE) { dm_front_quit(); return; }
+    pthread_mutex_lock(&S.mu);
+    if (LN.mvq) { lnr_t l = LN; dm_cloud_view q; int two = move_view(&q, &l) && q.nbtn == 2; LN.mvq = 0;
+        if (two && i == 0) { dm_storage_info si; dm_storage_info_get(&si); start = !si.on_sd; LN.amsg[0] = 0; } }
+    pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
+    if (start >= 0) {
+        int r = dm_storage_move_begin(start);
+        LOG("launcher: the game data moves to %s%s", start ? "the SD card" : "internal storage", r ? " — refused" : "");
+        if (r) { pthread_mutex_lock(&S.mu); snprintf(LN.amsg, sizeof LN.amsg, "%s", r == -EBUSY ? L("이미 옮기는 중이에요", "A move runs already") : L("지금은 옮길 수 없어요", "It cannot be moved now")); pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); }
+    }
+}
+static int move_input(const AInputEvent *e) {
+    pthread_mutex_lock(&S.mu); lnr_t l = LN; ANativeWindow *w = S.win; int none = V.phase != PH_NONE; pthread_mutex_unlock(&S.mu);
+    dm_cloud_view q; if (none || !l.on || !move_view(&q, &l)) return 0;
+    int type = AInputEvent_getType(e), go = -1;
+    if (type == AINPUT_EVENT_TYPE_KEY) {
+        int k = AKeyEvent_getKeyCode(e);
+        if (k == AKEYCODE_VOLUME_UP || k == AKEYCODE_VOLUME_DOWN || k == AKEYCODE_VOLUME_MUTE) return 0;
+        if (AKeyEvent_getAction(e) != AKEY_EVENT_ACTION_DOWN || AKeyEvent_getRepeatCount(e)) return 1;
+        if ((k == AKEYCODE_DPAD_LEFT || k == AKEYCODE_DPAD_RIGHT) && q.nbtn == 2) { pthread_mutex_lock(&S.mu); LN.mvsel = k == AKEYCODE_DPAD_RIGHT; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); }
+        else if (k == AKEYCODE_BUTTON_A || k == AKEYCODE_DPAD_CENTER || k == AKEYCODE_ENTER || k == AKEYCODE_NUMPAD_ENTER || k == AKEYCODE_BUTTON_START) go = q.nbtn == 2 ? l.mvsel : 0;
+        else if (k == AKEYCODE_BUTTON_B || k == AKEYCODE_BACK || k == AKEYCODE_ESCAPE) go = q.nbtn == 2 ? 1 : 0;   // (B: Cancel, the copy's Cancel, OK, Close)
+    } else if (type == AINPUT_EVENT_TYPE_MOTION) {
+        int src = AInputEvent_getSource(e);
+        if ((src & AINPUT_SOURCE_JOYSTICK) == AINPUT_SOURCE_JOYSTICK) {
+            float x = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_HAT_X, 0); if (fabsf(x) < 0.5f) x = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_X, 0);
+            if (fabsf(x) > 0.5f && q.nbtn == 2) { pthread_mutex_lock(&S.mu); LN.mvsel = x > 0; pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu); }
+        } else if ((AMotionEvent_getAction(e) & AMOTION_EVENT_ACTION_MASK) == AMOTION_EVENT_ACTION_UP && w) {
+            int kind = 0; go = stv_hit(&q, ANativeWindow_getWidth(w), ANativeWindow_getHeight(w), AMotionEvent_getX(e, 0), AMotionEvent_getY(e, 0), &kind);
+        }
+    }
+    if (go >= 0) move_button(go);
     return 1;
 }
 static int lnr_input(const AInputEvent *e) {   // 1 when it was the launcher's
@@ -1371,6 +1532,7 @@ static int lnr_input(const AInputEvent *e) {   // 1 when it was the launcher's
             LOG("launcher: − at the start: the launcher opens"); return 1;
         }
         if (!vis) return 0;
+        if (move_input(e)) return 1;
         dm_cloud_view cv; dm_cloud_view_get(&cv); if (cv.ask) return 0;   // a question of the cloud's: its input
         int isA = k == AKEYCODE_BUTTON_A || k == AKEYCODE_DPAD_CENTER || k == AKEYCODE_ENTER || k == AKEYCODE_NUMPAD_ENTER || k == AKEYCODE_BUTTON_START;
         if (a == AKEY_EVENT_ACTION_UP) { if (isA) lnr_hold_end(0); return 1; }
@@ -1380,6 +1542,7 @@ static int lnr_input(const AInputEvent *e) {   // 1 when it was the launcher's
         return 1;
     }
     if (type != AINPUT_EVENT_TYPE_MOTION || !vis) return 0;
+    if (move_input(e)) return 1;
     dm_cloud_view cv; dm_cloud_view_get(&cv); if (cv.ask) return 0;
     int src = AInputEvent_getSource(e), act = AMotionEvent_getAction(e) & AMOTION_EVENT_ACTION_MASK;
     if ((src & AINPUT_SOURCE_JOYSTICK) == AINPUT_SOURCE_JOYSTICK) {   // the hat and the left stick: one step a push

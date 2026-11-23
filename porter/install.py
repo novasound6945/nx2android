@@ -194,6 +194,17 @@ def seed_from_sibling(adb, man, files, have, data):
     return copied
 
 
+def on_card(adb, package, files, romfs_at):
+    """The folder the pack goes into: the app's own folder on the SD card when the player keeps its data there (datapack.device_files: the app's pointer), else files.
+    --romfs-at, a RomFS outside the data folder, is for data in internal storage only"""
+    d = datapack.device_files(adb, package)
+    if d != datapack.files_folder(package):
+        if romfs_at not in (None, APP, NO_SD): raise BuildError(f'the app keeps its game data on the SD card ({d}), where the RomFS is too: install without --romfs-at '
+                                                                 '(or choose internal storage in the app first: App settings > Data location)')
+        return d
+    return files
+
+
 def apk_asks_access(apk):   # whether the APK asks for All files access: one made before mkapk.py did cannot be given it (`appops set` takes, but FUSE checks the permission)
     try:
         with zipfile.ZipFile(apk) as z: m = z.read('AndroidManifest.xml')
@@ -226,6 +237,8 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
     pushing, lock = False, None
     try:
         dev = adb.pick(); lock = adb.hold(paths.user_dir())   # one install per device at a time: released in the finally below
+        files = on_card(adb, man['package'], files, romfs_at)   # the app's data on the SD card (its App settings): the pack goes there
+        target = romfs_target(romfs_at, files)
         model = adb.prop('ro.product.model')
         say(f'device: {model or dev} ({dev}), GPU {adb.gpu() or "unknown"}')
         if 'bcn' in man.get('requires', []):   # the profile's requires: BC-compressed textures
@@ -239,6 +252,7 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
             say(f'RomFS on the SD card (the first mounted portable volume, an SD card before a USB drive): {target}')
         dev_env = adb.read_text(f'{files}/env.txt') or ''
         was = device_romfs(dev_env)   # an earlier --romfs-at install's folder
+        if was and posixpath.normpath(was) == f'{files}/{datapack.ROMFS}': was = None   # the data folder's own RomFS (the data moved to the card that held it): no folder of its own
         prev_keys = manifest_env_keys(adb.read_text(f'{files}/{datapack.MANIFEST}'))   # the pack already on the device: which env rows were its, not the player's. Read before the APK goes in:
         # --replace-signer uninstalls the app first, and Android deletes the files folder with it (the device's manifest is pushed last, so the one there is the previous pack's)
         sd_dir = card_folder(was, man['package'])   # the folder an earlier --romfs-at sd made
@@ -276,7 +290,9 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
                                         ', add --romfs-push to put the pack\'s RomFS into that folder') + ', or --romfs-at app to keep the RomFS in the app\'s files folder')
                 say(f'{target}: {len(missing) + len(other) + len(changed):,} of the RomFS\'s {len(rom):,} files to push' + (f', {len(extra):,} files that are not the pack\'s to remove' if extra else '') + ('' if own else ' (--romfs-push)'))
             else: say(f'{target} holds this pack\'s RomFS ({len(rom):,} files, {sum(rom.values()) / 2**30:.1f} GB): it is not pushed')
-        free = adb.free_bytes()
+        free = adb.free_bytes(files)
+        if files == datapack.files_folder(man['package']) and not adb.installed(man['package']) and (vol := adb.sd_volume()) and (cf := adb.free_bytes(vol)) is not None:
+            free = max(free or 0, cf)   # a new app puts its data on the volume with the most room at its first start (below: the room is checked again there)
         have = adb.remote_sizes(files)
         was_packed = 'DM_ROMFS_ZSTD=1' in dev_env.split()
         in_files = any(r.startswith(datapack.ROMFS + '/') for r in have)
@@ -309,6 +325,11 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
         adb.install(apk, man['package'], replace_signer=replace_signer)
         PROG.set(step='letting the app create its files folder')
         if adb.prepare_app_files(man['package']): say('started the app once so Android made its files folder (it stops at once without its data)')
+        if (now := on_card(adb, man['package'], files, romfs_at)) != files:   # a new app chose the SD card at its first start (the volume with the most room)
+            say(f'the app keeps its game data on the SD card: {now}')
+            if target: raise BuildError(f'the app keeps its game data on the SD card ({now}): install without --romfs-at')
+            files = now
+            if (f := adb.free_bytes(files)) is not None and need > f: raise BuildError(f'the SD card has {f / 2**30:.1f} GB free; the game needs {need / 2**30:.1f} GB more')
         if target:   # after the install too: a new package, one --replace-signer made again, or an update from an APK that did not ask for the access (granted above
             # when it did) has no grant yet. Before the push, so a refusal leaves the data as it was: a new app has none, and an older APK's update is the one case
             # that cannot be refused before the APK goes in

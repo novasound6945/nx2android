@@ -86,7 +86,7 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(out, {'driver': 'libvulkan_freedreno.so', 'dropped': ['libvulkan.purple.so'], 'package': PKG})
         self.assertEqual(dev.env_text, 'DM_LANG=en-US\nDM_VK_DRIVER=libvulkan_freedreno.so\n')
         apk = self.t / 'installed.apk'; apk.write_bytes(dev.installed_apk); self.assertIn('libvulkan_freedreno.so', libs(apk))
-        self.assertEqual(dev.ops, ['shell', 'pull', 'shell', 'install', 'shell', 'push'])   # pm path, pull, force-stop, install, cat env.txt, push it
+        self.assertEqual(dev.ops, ['shell', 'pull', 'shell', 'install', 'shell', 'shell', 'push'])   # pm path, pull, force-stop, install, cat the data folder's pointer, cat env.txt, push it
         with self.assertRaises(BuildError): driver.swap(dev, PKG, self.t / 'missing.so')
 
     def test_host_swap(self):   # apkdriver.py --host: libdmhost.so replaced, the driver library kept

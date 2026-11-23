@@ -264,8 +264,37 @@ int main(int argc, char **argv) {
     ap->nrow = 3; for (int i = 0; i < 3; i++) { snprintf(ap->key[i], sizeof ap->key[i], "%s", AK[i]); snprintf(ap->val[i], sizeof ap->val[i], "%s", AV[i]); }
     snprintf(ap->verify, sizeof ap->verify, "데이터 다시 확인"); snprintf(ap->clear, sizeof ap->clear, "셰이더 캐시 비우기");
     snprintf(ap->note, sizeof ap->note, "데이터 다시 확인은 파일을 하나씩 검사해 망가진 것만 다시 받아요."); snprintf(ap->keys, sizeof ap->keys, "↑↓ 고르기 · A 선택 · B 돌아가기"); ap->sel = -1;
+    snprintf(ap->loc, sizeof ap->loc, "데이터 위치"); snprintf(ap->loc_val, sizeof ap->loc_val, "내부 저장소");
+    snprintf(ap->loc_desc[0], sizeof ap->loc_desc[0], "내부 저장소 · 여유 7.9 GB"); snprintf(ap->loc_desc[1], sizeof ap->loc_desc[1], "SD 카드 · 여유 328.4 GB");
     stv_draw(&c, &v, 0); save(&c, argv[4], "15-app-settings");
-    touch_check(&c, &v, 3, &ap->sel, 3);
+    touch_check(&c, &v, 4, &ap->sel, 4);
+    // 15a. the data on the SD card; no card: the place dimmed
+    snprintf(ap->loc_val, sizeof ap->loc_val, "SD 카드"); ap->sel = 3; stv_draw(&c, &v, 0); save(&c, argv[4], "15a-app-settings-on-sd");
+    snprintf(ap->loc_val, sizeof ap->loc_val, "내부 저장소"); snprintf(ap->loc_desc[1], sizeof ap->loc_desc[1], "SD 카드 없음"); ap->loc_off = 1; stv_draw(&c, &v, 0); save(&c, argv[4], "15e-app-settings-no-sd");
+    ap->loc_off = 0; ap->sel = -1;
+    // 15b-d. the move: asked, under way, done (datasync_android.c move_view's words)
+    { dm_cloud_view mq; memset(&mq, 0, sizeof mq); mq.ask = 1; mq.urgent = 1; mq.progress = -1; mq.count_permille = -1; mq.nbtn = 2; mq.sel = 0;
+      snprintf(mq.title, sizeof mq.title, "게임 데이터를 SD 카드로 옮길까요?");
+      snprintf(mq.line[0], sizeof mq.line[0], "게임 데이터 6.2 GB를 복사하고 원래 자리의 것은 지워요 (328.4 GB 여유). 다 옮기면 앱이 닫혀요.");
+      snprintf(mq.line[1], sizeof mq.line[1], "세이브는 내부 저장소에 그대로 있어요. SD 카드는 내부 저장소보다 느려 불러오기가 길어질 수 있어요.");
+      snprintf(mq.btn[0], sizeof mq.btn[0], "옮기기"); snprintf(mq.btn[1], sizeof mq.btn[1], "취소");
+      v.ask = &mq; stv_draw(&c, &v, 0); save(&c, argv[4], "15b-app-move-confirm"); TQ = &mq; touch_check(&c, &v, 2, &mq.sel, 2); TQ = NULL;
+      memset(&mq, 0, sizeof mq); mq.ask = 1; mq.urgent = 1; mq.progress = -1; mq.nbtn = 1;
+      snprintf(mq.title, sizeof mq.title, "SD 카드로 옮기는 중"); snprintf(mq.line[0], sizeof mq.line[0], "다 옮기면 앱이 닫혀요. 옮기는 동안은 게임을 시작할 수 없어요.");
+      snprintf(mq.line[1], sizeof mq.line[1], "취소하면 복사한 것을 지우고 원래 자리에 그대로 둬요. 세이브는 내부 저장소에 그대로예요.");
+      snprintf(mq.count, sizeof mq.count, "2.6 / 6.2 GB · 42%%"); mq.count_permille = 420; snprintf(mq.btn[0], sizeof mq.btn[0], "취소");
+      stv_draw(&c, &v, 0); save(&c, argv[4], "15c-app-moving"); TQ = &mq; touch_check(&c, &v, 1, NULL, 0); TQ = NULL;
+      memset(&mq, 0, sizeof mq); mq.ask = 1; mq.urgent = 1; mq.progress = -1; mq.count_permille = -1; mq.nbtn = 1;
+      snprintf(mq.title, sizeof mq.title, "옮겼어요"); snprintf(mq.line[0], sizeof mq.line[0], "이제 게임 데이터를 SD 카드에서 읽어요. 앱이 닫히면 다시 열어 주세요."); snprintf(mq.btn[0], sizeof mq.btn[0], "닫기");
+      stv_draw(&c, &v, 0); save(&c, argv[4], "15d-app-moved");
+      // 27. the card that holds the data is not in (datasync_android.c storage_view)
+      memset(&mq, 0, sizeof mq); mq.ask = 1; mq.urgent = 1; mq.icon = DM_CLOUD_ICON_WARN; mq.progress = -1; mq.count_permille = -1; mq.nbtn = 2; mq.sel = 0;
+      snprintf(mq.title, sizeof mq.title, "SD 카드를 찾을 수 없어요");
+      snprintf(mq.line[0], sizeof mq.line[0], "게임 데이터가 SD 카드에 있어요. 카드를 꽂거나 데이터 위치를 내부 저장소로 바꿔 주세요.");
+      snprintf(mq.line[1], sizeof mq.line[1], "내부 저장소로 바꾸면 게임 데이터를 다시 받아요. 세이브는 그대로예요.");
+      snprintf(mq.btn[0], sizeof mq.btn[0], "다시 확인"); snprintf(mq.btn[1], sizeof mq.btn[1], "내부 저장소로 바꾸기"); snprintf(mq.foot, sizeof mq.foot, "아직 SD 카드가 없어요");
+      stv_draw(&c, &v, 0); save(&c, argv[4], "27-sd-missing"); TQ = &mq; touch_check(&c, &v, 2, &mq.sel, 2); TQ = NULL;
+      v.ask = NULL; }
     { stv_view e; memset(&e, 0, sizeof e); e.screen = STV_SCREEN_APP;
       for (int y = 0; y < H; y += 7) for (int x = 0; x < W; x += 7) assert(stv_page_hit(&e, W, H, x, y) == stv_page_hit(&v, W, H, x, y)); }
     // 16. the last run was played without the sync

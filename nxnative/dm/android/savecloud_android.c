@@ -62,6 +62,10 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <sys/system_properties.h>
+// the internal files folder (front_android.c DM_HOME): sync.txt and the save manager's folder stay there whatever volume holds the game data (storage_android.c);
+// DM_ROOT for a host without it
+static const char *home_or_null(void) { const char *h = getenv("DM_HOME"); return h && h[0] ? h : getenv("DM_ROOT"); }
+static const char *home_dir(void) { const char *h = home_or_null(); return h ? h : "."; }
 
 uint64_t dm_fs_commit_count(void);       // hle_fs.c
 void dm_perf_background_thread(const char *who);   // perf_android.c: nice 19, the slowest cores, out of the ADPF session
@@ -240,8 +244,8 @@ static void you_seen_locked(const char *you) {
     if (!n[0] || !C.began || !strcmp(n, C.cfg.device)) return;
     char old[64]; snprintf(old, sizeof old, "%s", C.cfg.device);
     ss_cfg_rename(&C.cfg, n);   // (this run's name now, also when sync.txt cannot be written)
-    const char *root = getenv("DM_ROOT"); char p[700], out[2048]; size_t len = 0; ss_cfg f; int wrote = 0;
-    snprintf(p, sizeof p, "%s/sync.txt", root ? root : ".");
+    const char *root = home_or_null(); char p[700], out[2048]; size_t len = 0; ss_cfg f; int wrote = 0;
+    snprintf(p, sizeof p, "%s/sync.txt", home_dir());
     char *txt = root ? ds_read(p, &len, 1 << 16) : NULL;
     if (txt && ss_cfg_text(txt, &f) && !strcmp(f.token, C.cfg.token) && !ss_cfg_renamed(txt, n, out, sizeof out)) {   // (a sync.txt with another token is not this run's: left as it is)
         if (ss_write_private(p, out, strlen(out))) LOG("[RED] cloud: sync.txt cannot be written with the server's name (errno %d)", errno); else wrote = 1;
@@ -983,9 +987,9 @@ void dm_cloud_attach(ANativeActivity *act) {
 }
 // sync.txt read into C.cfg, with the state it goes with (C.mu held): 1 when the sync is on. The start's (dm_cloud_begin) or, after it, a link's (link_done)
 static int cfg_load_locked(void) {
-    const char *root = getenv("DM_ROOT"); char p[700]; size_t n = 0;
+    const char *root = home_or_null(); char p[700]; size_t n = 0;
     if (!root) return 0;
-    snprintf(p, sizeof p, "%s/sync.txt", root); char *txt = ds_read(p, &n, 1 << 16);
+    snprintf(p, sizeof p, "%s/sync.txt", home_dir()); char *txt = ds_read(p, &n, 1 << 16);
     if (!txt) return 0;   // no sync.txt: as before the sync existed (or a link to come)
     int on = ss_cfg_text(txt, &C.cfg); memset(txt, 0, n); free(txt); C.cfg_gen++;
     if (!on) { LOG("[RED] cloud: %s has no url= (http:// or https://) and token=: the sync is off", p); return 0; }
@@ -1149,7 +1153,7 @@ void dm_cloud_precheck(ANativeActivity *act) {
     dm_cloud_attach(act);
     pthread_mutex_lock(&C.mu); int was = PC.started; PC.started = 1; pthread_mutex_unlock(&C.mu);
     if (was) return;
-    env_early(); dm_saves_paths(getenv("DM_ROOT"));   // (the save's paths: dm_saves_start sets the same ones later)
+    env_early(); dm_saves_paths(home_dir());   // (the save's paths: dm_saves_start sets the same ones later)
     pthread_mutex_lock(&C.mu); C.trial = C.trial_base || g_env_off; PC.running = 1; changed_locked(); pthread_mutex_unlock(&C.mu);
     pthread_t t;
     if (pthread_create(&t, NULL, pre_thread, NULL)) { LOG("[RED] cloud: cannot start the early check: the start's check asks itself"); pthread_mutex_lock(&C.mu); PC.running = 0; pthread_mutex_unlock(&C.mu); }
@@ -1173,8 +1177,8 @@ static int link_start(JNIEnv *E, int conn_ms, int64_t deadline, ss_link *l, char
 }
 // a token: sync.txt written (0600), and once the start has reached the cloud, read as the start reads it. 0, -1 (not written)
 static int link_take(const ss_link *l) {
-    const char *root = getenv("DM_ROOT"); char p[700], base[600]; if (!root) return -1;
-    snprintf(p, sizeof p, "%s/sync.txt", root); if (link_base(base, sizeof base)) return -1;
+    const char *root = home_or_null(); char p[700], base[600]; if (!root) return -1;
+    snprintf(p, sizeof p, "%s/sync.txt", home_dir()); if (link_base(base, sizeof base)) return -1;
     pthread_mutex_lock(&C.mu); char dev[64]; snprintf(dev, sizeof dev, "%s", l->dev_name[0] ? l->dev_name : C.model); pthread_mutex_unlock(&C.mu);
     if (ss_link_write(p, base, l->token, dev)) { LOG("[RED] cloud: the link's sync.txt cannot be written (errno %d)", errno); return -1; }
     LOG("cloud: this device is linked (%s, device %s, token %.6s...): sync.txt written", base, dev, l->token);
@@ -1187,7 +1191,7 @@ static int link_take(const ss_link *l) {
 // else not linked: this run on without the sync (sync-state.txt kept), as an app never linked. Never a question (the game may be running). gen: the refused request's
 // hres.gen (another thread dealt with it since: its outcome). 1: send it again, 0: not linked now
 static int token_refused(JNIEnv *E, unsigned gen) {
-    const char *root = getenv("DM_ROOT"); char p[700]; snprintf(p, sizeof p, "%s/sync.txt", root ? root : ".");
+    char p[700]; snprintf(p, sizeof p, "%s/sync.txt", home_dir());
     pthread_mutex_lock(&C.mu);
     while (C.reauth_busy) pthread_cond_wait(&C.cv, &C.mu);
     if (C.cfg_gen != gen || !C.began) { int on = C.began && C.mode == SS_RUN_SYNC; pthread_mutex_unlock(&C.mu); return on; }
@@ -1307,8 +1311,8 @@ void dm_cloud_link_end(void) {
     dm_cloud_screen_poke();
 }
 int dm_cloud_unlink(void) {
-    const char *root = getenv("DM_ROOT"); char p[700]; if (!root) return -1;
-    snprintf(p, sizeof p, "%s/sync.txt", root);
+    const char *root = home_or_null(); char p[700]; if (!root) return -1;
+    snprintf(p, sizeof p, "%s/sync.txt", home_dir());
     pthread_mutex_lock(&C.mu);
     int ok = C.began && !C.trial && !C.busy && !W.active && !C.up_started && C.reached && !PC.running;
     if (ok && unlink(p) && errno != ENOENT) { LOG("[RED] cloud: sync.txt cannot be removed (errno %d)", errno); ok = 0; }

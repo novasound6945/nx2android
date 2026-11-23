@@ -228,6 +228,30 @@ def bundled(man): return bool(man and man.get('bundles'))   # whether a pack's m
 def files_folder(package): return f'/sdcard/Android/data/{package}/files'
 
 
+ROOT_POINTER = 'nx2a_root.txt'   # in the internal files folder: root=<the folder the app reads its data from> while the player keeps it on an SD card (nxnative/dm/android/storage.h DM_ST_POINTER)
+
+
+def pointer_root(text, package):
+    """The data folder an app's pointer names: its own files folder on another volume (/storage/<volume id>/Android/data/<package>/files), None for anything else"""
+    import re
+    for ln in (text or '').splitlines():
+        if ln.startswith('root='):
+            d = ln[5:].strip().rstrip('/')
+            m = re.fullmatch(r'/storage/([A-Za-z0-9-]+)/Android/data/' + re.escape(package) + '/files', d)
+            if m and m.group(1) not in ('emulated', 'self'): return d
+    return None
+
+
+def device_files(adb, package):
+    """The folder the app reads its data from on the device: its internal files folder, or the one on the SD card the player moved the data to (the app's App settings:
+    the pointer it keeps in the internal files folder). A card that is not in raises: pushing into internal storage would not be read while the app's choice is the card"""
+    files = files_folder(package)
+    d = pointer_root(adb.read_text(f'{files}/{ROOT_POINTER}'), package)
+    if not d: return files
+    if not adb.is_dir(d): raise BuildError(f'{package} keeps its game data on the SD card ({d}), which is not in the device: insert it, or choose internal storage in the app (App settings > Data location)')
+    return d
+
+
 SEEDABLE = ('RomFS', 'aoc')   # parts another port of the same game version on the device can give a new install (porter/install.py seed_from_sibling)
 
 

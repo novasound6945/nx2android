@@ -53,6 +53,7 @@ DM_GL_STUBS	str		debug,ios	?	hle_gl.m
 DM_GPU_TURBO	str		profile	live	perf_android.c	"auto" or 1: ask the GPU for its high clocks while the game is GPU-bound; unset or 0 = no
 DM_GUEST_SPAWN_TEST	int		debug	?	hle_guestthread.c	
 DM_HLECOUNT	str		debug	start	hle_count.c	count every HLE call and write a TSV (category, name, count) at exit; the `ctl.txt` line `hlecount <file>` writes the counts so far, so two dumps around one action show the calls it made
+DM_HOME	str		app	start	front_android.c savecloud_android.c datasync_android.c	the internal files folder (the Android front end sets it): the log, saves/ and sync.txt stay there while the game data (DM_ROOT) is on an SD card
 DM_IMPORTS	str		debug	?	main.c	
 DM_INTERNAL	str		app	start	front_android.c gfx_vk_core.c	the app's own storage, where code may be loaded from (gfx_vk_core.c drv_slot: a test driver)
 DM_KBD	str		debug	?	hle_swkbd.c	
@@ -212,7 +213,7 @@ DM_ROMFS_OVERLAY	str		porter	?	hle_fs.c
 DM_ROMFS_PACK	str		porter	start	hle_fs_pack.inc	the RomFS packs' index (packs/romfs.nxbi): the host reads the small files in place from their tar packs (android.tsv romfs_packs)
 DM_ROMFS_PACK_VERIFY	str		debug	start	hle_fs_pack.inc	
 DM_ROMFS_ZSTD	bool	0	porter	?	hle_fs.c	1 = the RomFS holds zstd-packed files (porter writes it for a packed RomFS)
-DM_ROOT	str		app	?	gfx_vk_exec.c gfx_vk_pipeline_cache.inc gfx_vk_present.c …	the app's files folder (the Android front end sets it)
+DM_ROOT	str		app	?	gfx_vk_exec.c gfx_vk_pipeline_cache.inc gfx_vk_present.c …	the app's data folder (the Android front end sets it: the files folder on internal storage or the SD card the player chose)
 DM_RT	str		debug	?	hle_nvn.c	
 DM_RT_COMP	int		debug	?	hle_nvn.c	−1 = auto
 DM_RUMBLE	int		debug,ios	?	haptics_apple.m	

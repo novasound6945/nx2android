@@ -54,7 +54,7 @@ def swap(adb, package, driver=None):
         say(f'{package}: installing the APK with ' + (f'{res["driver"]}' if res['driver'] else 'no driver library (the device\'s driver)'))
         try: adb.install(out, package)
         except AdbError as e: raise BuildError(str(e)) from e
-        env = f'{datapack.files_folder(package)}/env.txt'
+        env = f'{datapack.device_files(adb, package)}/env.txt'
         new = Path(t) / 'env.txt'; new.write_text(env_with_driver(adb.read_text(env), res['driver']), encoding='utf-8', newline='\n')
         adb.run('push', new, env)
     say(f'{package}: ' + (f'{ROW}={res["driver"]}' if res['driver'] else f'no {ROW} row: the device\'s driver') + ' (dropped: ' + (', '.join(res['dropped']) or 'none') + ')')
@@ -120,11 +120,11 @@ def env_value(text):   # DM_VK_DRIVER as the app sees it (the last row wins), No
     return v
 
 
-def drivers_folder(package): return f'{datapack.files_folder(package)}/{DRIVERS}'
+def drivers_folder(adb, package): return f'{datapack.device_files(adb, package)}/{DRIVERS}'   # (the data folder: internal storage, or the SD card the player chose)
 
 
 def slots(adb, package):   # {name: size} of the drivers folder's files the app can load (its own folder level; a push's .part files left out)
-    return {n: s for n, s in adb.remote_sizes(drivers_folder(package)).items() if '/' not in n and not n.startswith('.') and slot_name_ok(n)}
+    return {n: s for n, s in adb.remote_sizes(drivers_folder(adb, package)).items() if '/' not in n and not n.startswith('.') and slot_name_ok(n)}
 
 
 def apk_driver(adb, package):
@@ -137,7 +137,7 @@ def apk_driver(adb, package):
         libs = [n.strip() for n in lines[:-1] if n.strip().endswith('.so') and n.strip() not in OWN and not n.strip().startswith('libVkLayer')]
         if len(libs) > 1: raise BuildError(f'{package}: the APK carries more than one library that could be its driver ({", ".join(libs)})')
         return (libs[0] if libs else ''), 'the APK'
-    v = env_value(adb.read_text(f'{datapack.files_folder(package)}/env.pack.txt'))
+    v = env_value(adb.read_text(f'{datapack.device_files(adb, package)}/env.pack.txt'))
     if v is not None: return v, 'the pack\'s env.txt as downloaded (env.pack.txt)'
     raise BuildError(f'{package}: the APK\'s driver is not known (its library folder {libdir} cannot be listed and there is no env.pack.txt): nothing to go back to; '
                      f'porter driver <library> puts a driver in the APK and names it')
@@ -151,7 +151,7 @@ def push_slot(adb, package, src, name=None):
     try: apk_name = apk_driver(adb, package)[0]
     except BuildError: apk_name = ''
     if apk_name and name == apk_name: raise BuildError(f'{name} is the APK\'s driver library\'s name, so --select apk would load this one: give it another with --name')
-    folder = drivers_folder(package); remote, part = f'{folder}/{name}', f'{folder}/.{name}.part'
+    folder = drivers_folder(adb, package); remote, part = f'{folder}/{name}', f'{folder}/.{name}.part'
     with tempfile.TemporaryDirectory(prefix='nx2a_slot_') as t:
         local = Path(t) / name; local.write_bytes(data)
         adb.shell(f'mkdir -p {shlex.quote(folder)}')
@@ -167,7 +167,7 @@ def push_slot(adb, package, src, name=None):
 def select(adb, package, choice):
     """env.txt's DM_VK_DRIVER row: a file of the drivers folder (its name), 'apk' (the APK's own driver) or 'system' (DM_VK_DRIVER=, the device's driver). The app reads it
     at its next start. → {'package', 'selected', 'value', 'from'}"""
-    env = f'{datapack.files_folder(package)}/{datapack.ENV}'
+    env = f'{datapack.device_files(adb, package)}/{datapack.ENV}'
     text = adb.read_text(env)
     if not text.strip(): raise BuildError(f'{package}: no env.txt on the device ({env}): install the port first')
     have = slots(adb, package)
@@ -178,7 +178,7 @@ def select(adb, package, choice):
         if value in have: raise BuildError(f'{package}: the drivers folder has a file named as the APK\'s driver ({value}), which the app would load instead: remove it first')
     else:
         if not slot_name_ok(choice): raise BuildError(f'{choice}: not a name the drivers folder takes (no / or .., ending in .so, at most 100 characters), nor apk or system')
-        if choice not in have: raise BuildError(f'{choice} is not in the drivers folder ({drivers_folder(package)}): ' + (', '.join(sorted(have)) or 'it holds none') + '; porter driver --push puts one there')
+        if choice not in have: raise BuildError(f'{choice} is not in the drivers folder ({drivers_folder(adb, package)}): ' + (', '.join(sorted(have)) or 'it holds none') + '; porter driver --push puts one there')
         value, kind, src = choice, 'drivers', 'the drivers folder'
     with tempfile.TemporaryDirectory(prefix='nx2a_env_') as t:
         new = Path(t) / datapack.ENV; new.write_text(env_select(text, value), encoding='utf-8', newline='')
@@ -189,6 +189,6 @@ def select(adb, package, choice):
 
 def listing(adb, package):
     """The drivers folder's files and what env.txt selects: → {'package', 'folder', 'drivers': [{'name', 'size'}], 'selected': 'drivers' | 'apk' | 'system', 'value'}"""
-    have = slots(adb, package); v = env_value(adb.read_text(f'{datapack.files_folder(package)}/{datapack.ENV}')) or ''
+    have = slots(adb, package); v = env_value(adb.read_text(f'{datapack.device_files(adb, package)}/{datapack.ENV}')) or ''
     kind = 'system' if not v else 'drivers' if v in have else 'apk'   # as vk_init chooses: no value, the system's; a file of the folder by that name, it; else the APK's
-    return {'package': package, 'folder': drivers_folder(package), 'drivers': [{'name': n, 'size': s} for n, s in sorted(have.items())], 'selected': kind, 'value': v}
+    return {'package': package, 'folder': drivers_folder(adb, package), 'drivers': [{'name': n, 'size': s} for n, s in sorted(have.items())], 'selected': kind, 'value': v}

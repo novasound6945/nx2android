@@ -272,6 +272,27 @@ class RomfsAt(unittest.TestCase):
         env = {f'{FILES}/env.txt': install.env_with_romfs('DM_LANG=en-US\n', DUMP)}
         with self.assertRaisesRegex(BuildError, 'earlier install'): self.run_on(Device({f'{DUMP}/c.bin': 5}, text=env, access='allow'), romfs_at='no-sd')   # another folder: kept, checked as without --romfs-at
 
+    def test_data_on_the_card(self):   # the app keeps its data on the SD card (its pointer in the internal files folder): the pack goes there, env.txt too; nothing into internal storage
+        card = f'/storage/ABCD-1234/Android/data/{PKG}/files'
+        dev = self.run_on(Device(text={f'{FILES}/{datapack.ROOT_POINTER}': f'root={card}\n'}, installed=True))
+        self.assertEqual({k[len(card) + 1:] for k in dev.fs if k.startswith(card + '/RomFS/')}, {f'RomFS/{r}' for r in ROM})
+        self.assertIn(f'{card}/{datapack.MANIFEST}', dev.fs); self.assertIn(f'{card}/env.txt', dev.text)
+        self.assertFalse([k for k in dev.fs if k.startswith(FILES + '/')])
+        with self.assertRaisesRegex(BuildError, 'without --romfs-at'): self.run_on(Device(text={f'{FILES}/{datapack.ROOT_POINTER}': f'root={card}\n'}, installed=True), romfs_at='sd')
+        gone = Device(text={f'{FILES}/{datapack.ROOT_POINTER}': f'root={card}\n'}, installed=True); gone.gone = '/storage/ABCD-1234'
+        with self.assertRaisesRegex(BuildError, 'not in the device'): self.run_on(gone)
+        self.assertFalse(gone.step('install') >= 0 and gone.fs)   # refused before anything was pushed
+
+    def test_new_app_chooses_the_card(self):   # a new app takes the volume with the most room at its first start (porter starts it once): the push follows its pointer
+        card = f'/storage/ABCD-1234/Android/data/{PKG}/files'
+        class First(Device):
+            def prepare_app_files(self, package): self.text[f'{FILES}/{datapack.ROOT_POINTER}'] = f'root={card}\n'; return True
+        dev = self.run_on(First())
+        self.assertIn(f'{card}/{datapack.MANIFEST}', dev.fs); self.assertFalse([k for k in dev.fs if k.startswith(FILES + '/')])
+        self.assertIsNone(datapack.pointer_root('root=/storage/emulated/0/Android/data/x/files\n', 'x'))   # internal storage, another package, a folder that is not the files folder: no card
+        self.assertIsNone(datapack.pointer_root(f'root=/storage/ABCD-1234/Android/data/other/files\n', PKG))
+        self.assertIsNone(datapack.pointer_root(f'root={card}/RomFS\n', PKG)); self.assertEqual(datapack.pointer_root(f'# x\nroot={card}/\n', PKG), card)
+
     def test_card_folder(self):   # only the app's own folder on a portable volume, normalised; not internal storage's, another app's, or a folder a user chose
         sd = '/storage/ABCD-1234/Android/data/org.nx2a.test/files/RomFS'
         for yes in (sd, sd + '/', '/storage/ABCD-1234/Android/data/org.nx2a.test/files/x/../RomFS'): self.assertTrue(install.card_folder(yes, PKG), yes)
