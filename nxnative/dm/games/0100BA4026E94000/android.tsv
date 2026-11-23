@@ -14,3 +14,11 @@ package	org.nx2a.castlevaniabelmontscurse
 orientation	landscape
 readme_image	docs/images/castlevania-belmonts-curse.jpg
 readme_tag	v0.2.0
+# Invalidate-only barriers keep the render pass open (DM_VK_INVAL_KEEP=1): the game ends a pass at each barrier 0x20 (113 of 124 passes in the intro movie
+# frame), 121 -> 13 passes a frame in the movie and 112 -> 25 at the dock, GPU 6.3 -> 4.9 ms and 5.4 -> 4.1 ms, nothing seen wrong (Retroid Pocket Nova, Turnip,
+# v131072, 2026-11-23).
+env	DM_VK_INVAL_KEEP=1
+# The governor held at 60 (DM_FPS_PIN=60): during the intro movie the game renders the next scene behind it (906 of 931 draws), its frame work p90 sat at
+# 17.8-18.6 ms, just over the step-down mark, so it went to 40 fps; at 40 the mid cores fell to 1.65 GHz (of 2.8) and p90 stayed near 20 ms, so it never
+# came back. Pinned at 60 the same movie drops 0 of 300 frames, as do the dock and the sewer (Nova, v131072, 2026-11-23). Not checked over a long play.
+env	DM_FPS_PIN=60
