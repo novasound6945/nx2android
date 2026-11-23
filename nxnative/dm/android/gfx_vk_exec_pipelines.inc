@@ -132,6 +132,30 @@ static void fast_note(const pkey *k) {
     for (uint32_t i = 0; i < g_fast_nlist; i++) if (g_fast_list[i].vs == k->key[0] && g_fast_list[i].fs == k->key[1] && g_fast_list[i].samples == k->samples && g_fast_list[i].atest == k->atest) return;
     if (g_fast_nlist < 16) { g_fast_list[g_fast_nlist].vs = k->key[0]; g_fast_list[g_fast_nlist].fs = k->key[1]; g_fast_list[g_fast_nlist].samples = k->samples; g_fast_list[g_fast_nlist].atest = k->atest; g_fast_nlist++; }
 }
+// #404: the Samsung driver crashed compiling a pipeline after reporting no vertex-buffer support for RGB16F.
+// 1 when every vertex attribute format of the key supports vertex buffers. The answer per format is cached (0 unknown, 1 supported, 2 not); a format
+// beyond the table is asked every time. log: the first rejection of a format is logged once (prewarm and draw threads can reject the same format at once).
+static int pkey_vi_ok(const pkey *k, int log) {
+    static atomic_uchar known[256], noted[256];
+    for (uint32_t i = 0; i < k->nattr; i++) {
+        VkFormat format = (VkFormat)k->attr[i].fmt;
+        int in_table = (unsigned)format < sizeof known / sizeof *known, ok;
+        unsigned c = in_table ? atomic_load(&known[format]) : 0;
+        if (c) ok = c == 1;
+        else {
+            VkFormatProperties properties;
+            vkGetPhysicalDeviceFormatProperties(V.pd, format, &properties);
+            ok = (properties.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) != 0;
+            if (in_table) atomic_store(&known[format], ok ? 1 : 2);
+        }
+        if (ok) continue;
+        if (log && (!in_table || !atomic_exchange(&noted[format], 1)))
+            VKLOG("[RED] graphics pipeline skipped: vertex attribute %u format %d lacks vertex-buffer support (vertex shader %016llx)",
+                  k->attr[i].loc, (int)format, (unsigned long long)k->key[0]);
+        return 0;
+    }
+    return 1;
+}
 static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout); static int gpl_parts_async(const pkey *k); static int gpl_eligible(const pkey *k); static void gpl_opt_queue(const pkey *k); static void gpl_old_built(uint64_t ns);
 static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
     uint64_t swaps = atomic_load(&g_gpl_swaps); g_pipe_new = 0; g_pipe_first = 0;
@@ -148,7 +172,7 @@ static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
     // in minutes instead of in the few frames after a scene change (Fire Emblem Engage's device lost)
     static int link_on = 1, link_ms = 1, fast_only = 0; static unsigned lk; if (!(lk++ & 255)) { const char *e = getenv("DM_VK_GPL_LINK"); link_on = !(e && !atoi(e));
         e = getenv("DM_VK_GPL_LINK_MS"); link_ms = !(e && !atoi(e)); e = getenv("DM_VK_X_GPL_FAST"); fast_only = e && atoi(e); }
-    if (V.gpl && link_on && (link_ms || k->samples <= 1) && (fast_only ? gpl_eligible(k) : gpl_route(V.gpl, gpl_eligible(k), opt) == GPL_USE_FAST)) {
+    if (V.gpl && link_on && (link_ms || k->samples <= 1) && (fast_only ? gpl_eligible(k) : gpl_route(V.gpl, gpl_eligible(k), opt) == GPL_USE_FAST) && pkey_vi_ok(k, 0)) {   // (an unsupported vertex format: no linked pipeline, build_pipeline skips it below)
         VkPipeline f = nvn_hm_get(&g_gfast, k);
         if (!f && gpl_parts_async(k)) return VK_NULL_HANDLE;   // (a shader part is being made in the background: the draw is left out, nothing memoized)
         if (!f) { f = gpl_link(k, layout); nvn_hm_put(&g_gfast, k, f ? f : (VkPipeline)1); if (f && opt == GPL_OPT_NONE) { gpl_opt_queue(k); opt = GPL_OPT_PENDING; }
@@ -332,21 +356,8 @@ static uint32_t int_out_bits(const pkey *k, const vkshader_t *fs) {
     return u << 8 | s << 16;
 }
 static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshader_t *const stg_in[3]) {
-    // #404: the Samsung driver crashed compiling a pipeline after reporting no vertex-buffer support for RGB16F.
-    // Check the final formats here, after integer remapping and for keys restored by prewarm.
-    for (uint32_t i = 0; i < k->nattr; i++) {
-        VkFormat format = (VkFormat)k->attr[i].fmt;
-        VkFormatProperties properties;
-        vkGetPhysicalDeviceFormatProperties(V.pd, format, &properties);
-        if (!(properties.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)) {
-            // Core vertex formats fit here. Prewarm workers can reject the same format concurrently.
-            static atomic_uchar noted[256];
-            if ((unsigned)format >= sizeof noted / sizeof *noted || !atomic_exchange(&noted[format], 1))
-                VKLOG("[RED] graphics pipeline skipped: vertex attribute %u format %d lacks vertex-buffer support (vertex shader %016llx)",
-                      k->attr[i].loc, (int)format, (unsigned long long)k->key[0]);
-            return (VkPipeline)1;
-        }
-    }
+    // #404: the vertex attribute formats are checked here, after integer remapping and for keys restored by prewarm (pkey_vi_ok)
+    if (!pkey_vi_ok(k, 1)) return (VkPipeline)1;
     // DM_VK_PIPE_LOG: one line per pipeline built, with the state that decides how a material is drawn (shaders, cull/front, depth test/write/func,
     // colour formats, blend). For a game where some materials render wrong and others do not, the lines of the wrong material name the state to compare.
     { static int on = -1; if (on < 0) on = getenv("DM_VK_PIPE_LOG") ? atoi(getenv("DM_VK_PIPE_LOG")) : 0;

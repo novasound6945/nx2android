@@ -137,11 +137,12 @@ class VertexFormatSupport(unittest.TestCase):
         formats = between(source, "static VkFormat vertex_format(", "static VkPrimitiveTopology topo(")
         key = between(source, "typedef struct {\n    uint64_t key[3];", "static nvn_hmap g_pipes")
         builder = function(source, "static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshader_t *const stg_in[3]) {")
+        vi_ok = function(source, "static int pkey_vi_ok(const pkey *k, int log) {")
         headers = REPO / "nxnative/dm/third_party/vulkan-headers/include"
         with tempfile.TemporaryDirectory() as folder:
             probe = Path(folder) / "probe.c"
             binary = Path(folder) / "probe"
-            probe.write_text(STUBS + formats + key + FORK_STUBS + builder + PROBE, encoding="utf-8")
+            probe.write_text(STUBS + formats + key + FORK_STUBS + vi_ok + builder + PROBE, encoding="utf-8")
             compile_result = subprocess.run(
                 ["cc", "-std=gnu11", "-I", str(headers), str(probe), "-o", str(binary)],
                 capture_output=True, text=True,
@@ -160,3 +161,14 @@ class VertexFormatSupport(unittest.TestCase):
                     if expected.startswith("0"):
                         self.assertIn("[RED]", result.stderr)
                         self.assertEqual(result.stderr.count("graphics pipeline skipped:"), 2 if scenario == 0 else 1)
+
+    def test_linked_fast_path_checks_vertex_formats_first(self):
+        # graphics_pipeline's linked-pipeline path never reaches build_pipeline, so it must test the key itself, before any library is requested
+        source = unit("nxnative/dm/android/gfx_vk_exec.c")
+        head = function(source, "static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {")
+        cond = next(l for l in head.splitlines() if "if (V.gpl && link_on" in l)
+        self.assertIn("pkey_vi_ok(k, 0)", cond)
+        self.assertLess(source.index("static int pkey_vi_ok("), source.index("static VkPipeline graphics_pipeline("))
+        fast = head[head.index("if (V.gpl && link_on"):]
+        self.assertLess(fast.index("pkey_vi_ok(k, 0)"), fast.index("gpl_parts_async(k)"))
+        self.assertLess(fast.index("pkey_vi_ok(k, 0)"), fast.index("gpl_link(k, layout)"))
