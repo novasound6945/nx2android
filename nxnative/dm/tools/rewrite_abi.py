@@ -45,6 +45,8 @@ COMMITS = {
     'f9d8d26c3a211a298b0fbebcd3db9119e0fd3403': ('same', 'merge of caaf20fa (progress lines)'),
     'df0f938a61ea84355e1c1640033ce38c36efaaf6': ('same', 'the fork\'s copy of 41cef539'),
     '937f81a6605325fd74ca78d19c62cb7a302be112': ('same', 'upstream main\'s commit of 41cef539 (#423): the fall-through stub for a give-up branch; the tables\' format is unchanged, the stub a branch goes to differs'),
+    '6367e2292d26ffa32530fd4555601f8e3116e225': ('same', 'upstream merge of main into the EA shader branch: against its first parent it brings 937f81a6\'s fall-through stub (#423)'),
+    '74704d0f33d91f3e92e4ce8d8aae0352936e8aa2': ('same', 'the spin analysis drops decoded instructions of heads already passed (#488): memory only, the same sites and tables'),
 }
 
 
