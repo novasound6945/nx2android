@@ -77,6 +77,14 @@ static VkResult vkCreateGraphicsPipelines(VkDevice dev, VkPipelineCache cache, u
 }
 """
 
+# This fork's builder also asks for the vertex input sign flips and the integer output bits (gfx_vk_exec_pipelines.inc vi_flip_of, int_out_bits)
+# and serializes pipeline creation on some drivers (PSERIAL): none of them changes which vertex formats reach the driver
+FORK_STUBS = r"""
+static uint32_t vi_flip_of(const pkey *k, const vkshader_t *vs) { (void)k; (void)vs; return 0; }
+static uint32_t int_out_bits(const pkey *k, const vkshader_t *fs) { (void)k; (void)fs; return 0; }
+#define PSERIAL(call) (call)
+"""
+
 PROBE = r"""
 int main(int argc, char **argv) {
     assert(argc == 2);
@@ -133,7 +141,7 @@ class VertexFormatSupport(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             probe = Path(folder) / "probe.c"
             binary = Path(folder) / "probe"
-            probe.write_text(STUBS + formats + key + builder + PROBE, encoding="utf-8")
+            probe.write_text(STUBS + formats + key + FORK_STUBS + builder + PROBE, encoding="utf-8")
             compile_result = subprocess.run(
                 ["cc", "-std=gnu11", "-I", str(headers), str(probe), "-o", str(binary)],
                 capture_output=True, text=True,

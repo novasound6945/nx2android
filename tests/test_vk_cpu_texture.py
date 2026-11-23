@@ -21,7 +21,7 @@ enum { NVN_TEXTURE_FLAGS_IMAGE=1, NVN_TEXTURE_FLAGS_COMPRESSIBLE=2, NVN_TEXTURE_
  NVN_TEXTURE_FLAGS_DISPLAY=32, NVN_TEXTURE_FLAGS_VIDEO_DECODE=64 };
 typedef struct { unsigned flags; } pool_t;
 typedef struct { const pool_t *pool; const uint8_t *mem; int has_layout; int64_t off; struct { unsigned target,samples,flags,width,height,depth,format; } d; struct { uint64_t size; } L; } tex_t;
-typedef struct { int compressed,depth,stencil; } vkfmt_t;
+typedef struct { int compressed,depth,stencil,dec; } vkfmt_t;
 typedef struct { int gpu_w; uint64_t pool; int64_t off,size; } vkimg_t;
 static struct { uint32_t cap; void *vals[4]; } g_by_key={.cap=4};
 static int g_img_mu, marked;
