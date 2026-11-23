@@ -163,6 +163,28 @@ static int res_step(void) {
     for (int i = 0; i < 3; i++) { float d = fabsf(strtof(g_res_scales[order[i]], NULL) - v); if (d < best) { best = d; s = order[i]; } }
     return s;
 }
+// ---- the frame rate counter's options (overlay_layout.h fpso_*): settings.txt fps_rows (a bit a row: 1 FPS, 2 SOC, 4 BAT, 8 driver, 16 graph), fps_pos (0 top left, 1 top right,
+// 2 bottom left, 3 bottom right), fps_colour (0 white, 1 yellow, 2 green, 3 cyan, 4 magenta), fps_outline (0 box, 1 none, 2 thin, 3 medium, 4 thick), fps_size (0 small,
+// 1 normal, 2 large, 3 extra large). A value out of range is the default. This fork's pause menu has no Counter / Style tabs (its two tabs and their rows stay as they are):
+// the options come from settings.txt and the profile's setting rows only
+static _Atomic int g_fps_opts = FPSO_DEFAULT;
+// FPS_OPTS_BEGIN
+static int fps_opt_parse(const char *line) {   // one settings.txt line: 1 when it was one of the counter's
+    int v, o = atomic_load(&g_fps_opts), r = fpso_rows(o), p = fpso_pos(o), c = fpso_colour(o), l = fpso_outline(o), z = fpso_size(o);
+    if (sscanf(line, "fps_rows=%d", &v) == 1) r = v >= 0 && v <= FPSO_ALL ? v : FPSO_ROWS_DEFAULT;
+    else if (sscanf(line, "fps_pos=%d", &v) == 1) p = v >= 0 && v < FPSO_POS_N ? v : FPSO_TL;
+    else if (sscanf(line, "fps_colour=%d", &v) == 1) c = v >= 0 && v < FPSO_COLOUR_N ? v : FPSO_WHITE;
+    else if (sscanf(line, "fps_outline=%d", &v) == 1) l = v >= 0 && v < FPSO_OUTLINE_N ? v : FPSO_BOX;
+    else if (sscanf(line, "fps_size=%d", &v) == 1) z = v >= 0 && v < FPSO_SIZE_N ? v : FPSO_NORMAL;
+    else return 0;
+    atomic_store(&g_fps_opts, fpso_pack(r, p, c, l, z)); return 1;
+}
+static void fps_opt_write(FILE *f) {   // (all five keys: a file without them is the default)
+    int o = atomic_load(&g_fps_opts);
+    fprintf(f, "fps_rows=%d\nfps_pos=%d\nfps_colour=%d\nfps_outline=%d\nfps_size=%d\n", fpso_rows(o), fpso_pos(o), fpso_colour(o), fpso_outline(o), fpso_size(o));
+}
+// FPS_OPTS_END
+int dm_fps_opts(void) { return atomic_load(&g_fps_opts); }   // gfx_vk_present.c: the counter's options, packed (fpso_*)
 static void settings_load(void) {
     char p[600]; snprintf(p, sizeof p, "%s/settings.txt", g_root); FILE *f = fopen(p, "r"); char line[128];
     { const char *e = getenv("DM_TOUCH"); atomic_store(&g_set_touch, e && *e && strcmp(e, "0")); }   // env.txt's until settings.txt says (a port without touch= keeps it)
@@ -171,6 +193,7 @@ static void settings_load(void) {
         else if (sscanf(line, "touch=%d", &v) == 1) atomic_store(&g_set_touch, v != 0);
         else if (sscanf(line, "fps=%d", &v) == 1) atomic_store(&g_set_fps, v != 0);
         else if (sscanf(line, "limit=%d", &v) == 1) { if (limit_step(v) >= 0) atomic_store(&g_set_limit, v); else LOG("[RED] settings.txt: limit=%d is not 0 (auto), 60, 40 or 30: auto", v); }   // limit_apply
+        else if (fps_opt_parse(line)) {}
         else if (sscanf(line, "docked=%d", &v) == 1) setenv("DM_OPMODE", v ? "1" : "0", 1);   // over env.txt's: the host reads it once, at its first query
         else if (sscanf(line, "aspect=%15s", g_set_aspect) == 1) { if (strcmp(g_set_aspect, "auto")) setenv("DM_ASPECT", g_set_aspect, 1); else unsetenv("DM_ASPECT"); }   // aspect_variant
         else if (sscanf(line, "opacity=%d", &v) == 1) atomic_store(&g_set_opacity, v < OV_OPACITY_MIN ? OV_OPACITY_MIN : v > OV_OPACITY_MAX ? OV_OPACITY_MAX : v);
@@ -200,6 +223,7 @@ static void settings_save(void) {
     if (atomic_load(&g_set_rate) > 0) fprintf(f, "rate=%d\n", atomic_load(&g_set_rate));
     if (atomic_load(&g_set_detail)) fprintf(f, "detail=%d\n", atomic_load(&g_set_detail));
     if (atomic_load(&g_set_res) >= 0) fprintf(f, "res=%d\n", atomic_load(&g_set_res));   // (only once the player chose: until then env.txt decides)
+    fps_opt_write(f);
     if (atomic_load(&g_set_labels) >= 0) fprintf(f, "labels=%d\n", atomic_load(&g_set_labels));   // (only once the player chose: until then env.txt decides)
     if (g_set_aspect[0]) fprintf(f, "aspect=%s\n", g_set_aspect);
     fprintf(f, "touch=%d\n", atomic_load(&g_set_touch));
@@ -772,8 +796,8 @@ static void menu_close(void) {
     g_menu_ptr = -1; atomic_store(&g_menu_t, 0); exit_leave();
     hold_sync(); dm_haptics_suspend(4, 0); dm_overlay_redraw();
     char lim[16]; int rate = atomic_load(&g_set_limit); if (rate) snprintf(lim, sizeof lim, "%d fps", rate); else snprintf(lim, sizeof lim, "auto");
-    LOG("[menu] closed: the game goes on (gamepad %s, opacity %d%%, rumble %s, face buttons by %s, frame rate %s, limit %s, %s, %s)", atomic_load(&g_set_overlay) ? "on" : "off", atomic_load(&g_set_opacity),
-        atomic_load(&g_set_rumble) ? "on" : "off", pad_labels() ? "label" : "position", atomic_load(&g_set_fps) ? "shown" : "hidden", lim, dm_opmode() ? "docked" : "handheld",
+    LOG("[menu] closed: the game goes on (gamepad %s, opacity %d%%, rumble %s, face buttons by %s, frame rate %s %#x, limit %s, %s, %s)", atomic_load(&g_set_overlay) ? "on" : "off", atomic_load(&g_set_opacity),
+        atomic_load(&g_set_rumble) ? "on" : "off", pad_labels() ? "label" : "position", atomic_load(&g_set_fps) ? "shown" : "hidden", atomic_load(&g_fps_opts), lim, dm_opmode() ? "docked" : "handheld",
         atomic_load(&g_set_touch) ? "touch passthrough: the game's touch screen" : "touch input: the gamepad");
 }
 static void menu_opacity(int v) {   // the slider: a new value is drawn at once and saved when the finger lifts (menu_touch) or with each controller step

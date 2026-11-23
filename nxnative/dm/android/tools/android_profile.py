@@ -41,7 +41,9 @@ import settings_registry   # noqa: E402  (nxnative/dm/settings.tsv: which switch
 STATUS = ('playable', 'wip', 'boots', 'experimental')
 SETTINGS = {'overlay': ('0', '1'), 'rumble': ('0', '1'), 'docked': ('0', '1'), 'fps': ('0', '1'), 'aspect': ('auto', '4:3', '16:9'),   # the pause menu's settings (front_android.c settings_load)
             'opacity': tuple(str(v) for v in range(20, 81, 5)),                                    # the gamepad's, percent (overlay_layout.h OV_OPACITY_MIN..MAX)
-            'limit': ('0', '60', '40', '30')}                                                      # the frame rate limit, 0 auto (front_android.c LIMIT_STEPS)
+            'limit': ('0', '60', '40', '30'),                                                      # the frame rate limit, 0 auto (front_android.c LIMIT_STEPS)
+            'fps_rows': tuple(str(v) for v in range(32)), 'fps_pos': tuple('0123'), 'fps_colour': tuple('01234'),   # the frame rate counter's rows (a bit each: 1 FPS, 2 SOC, 4 BAT,
+            'fps_outline': tuple('01234'), 'fps_size': tuple('0123')}                                               # 8 driver, 16 graph), corner, colour, outline and size (overlay_layout.h fpso_*)
 REQUIRES = ('bcn',)
 # pacing <preset>: the profile's frame-pacing policy in one row (docs/ARCHITECTURE.md, Frame pacing; nxnative/dm/host/dm_pacing.c reads the switches).
 # Each preset is env rows the data pack's env.txt gets before the profile's own env rows; a profile may not also set one of them.
@@ -167,7 +169,10 @@ class AndroidProfile:
         readme = [k for k in ('readme_image', 'readme_tag') if self.get(k)]
         if (readme or self.get('readme_name')) and len(readme) != 2: bad.append("readme_image and readme_tag go together (README.md's Games list and the game's own README.md, docs/gen_tables.py)")
         if self.get('readme_tag') and not re.fullmatch(r'v\d+\.\d+\.\d+', self.get('readme_tag')): bad.append(f"readme_tag {self.get('readme_tag')!r}: the nx2android version tested, v<major>.<minor>.<patch>")
-        if self.get('readme_image') and not (ANDROID.parents[2] / self.get('readme_image')).is_file(): bad.append(f"readme_image {self.get('readme_image')!r}: no such file in the repository")
+        # only where the repository's docs are (a checkout, or a bundle, which carries docs/images): the AppImage's engine copy (porter/paths.py engine_copy) holds nxnative alone,
+        # and refused every profile with an image there, so the AppImage stopped at start-up
+        root = ANDROID.parents[2]
+        if self.get('readme_image') and (root / 'docs').is_dir() and not (root / self.get('readme_image')).is_file(): bad.append(f"readme_image {self.get('readme_image')!r}: no such file in the repository")
         if self.pacing not in PACING: bad.append(f'pacing {self.pacing!r}: one of {", ".join(PACING)}')
         else:
             preset = {r.split('=', 1)[0] for r in PACING[self.pacing]}

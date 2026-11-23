@@ -6,7 +6,7 @@ Left out because they have an official Android release: Unpacking (ported here a
 
 "Profile here": `nxnative/dm/games/<title ID>/` has the game's profile from nxnative. "Upstream profile": only seedds/nxnative has one, to read as a reference or starter, not to pull. "60 fps with X" is upstream's note: they run that update at 60 fps (30 on the Switch).
 
-**68 / 115 ported**
+**72 / 118 ported**
 
 - [x] 13 Sentinels: Aegis Rim · `01003FC01670C000`
 - [x] 13 Sentinels: Aegis Rim (Asia) · `01008D7016438000`
@@ -45,7 +45,7 @@ Left out because they have an official Android release: Unpacking (ported here a
 - [x] FINAL FANTASY TACTICS - The Ivalice Chronicles · `010038B015560000` · profile here
 - [ ] FINAL FANTASY X/X-2 HD Remaster · `0100BC300CB48000` · upstream profile
 - [x] Fire Emblem Engage · `0100A6301214E000`
-- [ ] Fire Emblem: Three Houses · `010055D009F78000` · profile here · 60 fps with 1.2.0
+- [x] Fire Emblem: Three Houses · `010055D009F78000` · 60 fps with 1.2.0
 - [x] FM24 Touch · `01008B101B87A000`
 - [x] Football Manager 26 Touch · `0100D4A023450000`
 - [x] Graveyard Keeper 2 · `0100005027A18000`
@@ -68,6 +68,7 @@ Left out because they have an official Android release: Unpacking (ported here a
 - [ ] Monster Train 2 · `010051701FB46000` · profile here · 60 fps with 1.1.1 · only the first Monster Train is on mobile
 - [x] NEO: The World Ends with You · `010043B013C5C000`
 - [x] NieR:Automata The End of YoRHa Edition · `010056B015FE8000` · profile here · boots with 1.0.3; save-loaded map and geometry corrected; broader gameplay checks pending; [test record](NIER_AUTOMATA_ANDROID_PORT.md)
+- [x] NOBUNAGA'S AMBITION: Shinsei · `01007AB012872000`
 - [x] OCTOPATH TRAVELER · `010057D006492000` · profile here
 - [x] Octopath Traveler 0 · `01005270232F2000`
 - [x] Octopath Traveler 0 (Chinese release) · `01001300232F4000`
@@ -91,6 +92,7 @@ Left out because they have an official Android release: Unpacking (ported here a
 - [x] Rhythm Heaven Groove · `0100D9F01D474000`
 - [ ] ROMANCE OF THE THREE KINGDOMS 8 REMAKE · `0100C2A01A730000` · profile here · controller only
 - [x] ROMANCE OF THE THREE KINGDOMS XIV with the Diplomacy and Strategy Expansion Pack (三國志14 with 威力加強版) · `0100CD4012DCA000` · 30 fps, as on the Switch
+- [x] Rune Factory 3 Special · `0100E000191B4000` · experimental · 60 fps, about 51% GPU on the Adreno 740
 - [ ] SHIN MEGAMI TENSEI V: Vengeance · `010069C01AB82000` · upstream profile · 60 fps with 1.0.3
 - [ ] Silver Pines · `0100D5B026844000` · upstream profile
 - [x] South Park™: The Stick Of Truth™ · `010043600B6A6000` · needs a Vulkan 1.3 driver or imageless framebuffers with render pass 2 (Turnip packed on the Adreno 640)
@@ -104,6 +106,7 @@ Left out because they have an official Android release: Unpacking (ported here a
 - [ ] Super Mario Party Jamboree · `0100965017338000` · upstream profile
 - [ ] Super Smash Bros. Ultimate · `01006A800016E000` · profile here · offline
 - [ ] Taiko Risshiden V DX · `0100346017304000` · profile here · Japanese · played by touch
+- [x] Tales of Berseria Remastered · `01003FD01F22E000`
 - [x] Tales of Eternia Remastered · `010006E0230AC000`
 - [ ] The Great Ace Attorney Chronicles · `010036E00FB20000` · profile here
 - [x] The Legend of Zelda: Breath of the Wild · `01007EF00011E000` · Galaxy S25 Ultra / Turnip; tested in the opening and on the Great Plateau

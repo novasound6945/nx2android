@@ -373,9 +373,9 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
 // DM_VK_CRUMBS=1 (start-up), for a device lost (a GPU hang): every pass end and dispatch writes {submission, pass} into host-visible memory after a full barrier, and the host
 // keeps the shaders each pass drew with; when the device is lost (vk_crumbs_report), the last work the GPU finished and the passes after it are logged
 static int g_crumbs = -1; static VkBuffer g_crumb_buf; static volatile uint32_t *g_crumb;
-// k: the pass's first 8 shader triples, then up to 8 more that drew with a linked pipeline or a new one (a pass of Fire Emblem Engage draws up to 581 times);
+// k: the pass's first 32 shader triples, then up to 8 more that drew with a linked pipeline or a new one (a pass of Fire Emblem Engage draws up to 581 times);
 // fl: bit 0 a linked pipeline, bit 1 linked at that draw, bit 2 a whole one's first draw after its linked one
-enum { CRUMB_K = 16 };
+enum { CRUMB_K = 40 };
 typedef struct { uint32_t sub; int pass, n; uint64_t k[CRUMB_K][3]; uint32_t fl[CRUMB_K]; } crumb_t; static crumb_t g_cring[512]; static unsigned g_cn;
 static int crumbs_on(void) {
     if (g_crumbs < 0) { const char *e = getenv("DM_VK_CRUMBS"); g_crumbs = e && atoi(e);
@@ -389,7 +389,7 @@ static crumb_t *crumb_cur(void) { crumb_t *c = &g_cring[(g_cn ? g_cn - 1 : 0) % 
     if (!g_cn || c->sub != sub || c->pass != g_sub_pass - 1) { c = &g_cring[g_cn++ % 512]; memset(c, 0, sizeof *c); c->sub = sub; c->pass = g_sub_pass - 1; } return c; }
 static void crumb_draw(uint64_t a, uint64_t b, uint64_t c3, uint32_t fl) { if (!crumbs_on()) return; crumb_t *c = crumb_cur();
     for (int i = 0; i < c->n; i++) if (c->k[i][0] == a && c->k[i][1] == b && c->k[i][2] == c3) { c->fl[i] |= fl; return; }
-    if (c->n < 8 || (fl && c->n < CRUMB_K)) { c->k[c->n][0] = a; c->k[c->n][1] = b; c->k[c->n][2] = c3; c->fl[c->n] = fl; c->n++; } }
+    if (c->n < 32 || (fl && c->n < CRUMB_K)) { c->k[c->n][0] = a; c->k[c->n][1] = b; c->k[c->n][2] = c3; c->fl[c->n] = fl; c->n++; } }
 static void crumb_mark(int dispatch) { if (!crumbs_on()) return; VkCommandBuffer cb = vk_cmd(); vk_img_barrier_all(cb);
     vkCmdFillBuffer(cb, g_crumb_buf, 0, 4, ((uint32_t)(mtl_last_fence() + 1) & 0xffff) << 16 | (dispatch ? 0x8000u : 0) | ((uint32_t)(g_sub_pass - 1) & 0x7fff)); }
 void vk_crumbs_report(void) {

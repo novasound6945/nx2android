@@ -499,7 +499,12 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
     const char *tre = getenv("DM_AUDREN_TRACE"); int tr = tre != NULL;   // (live: a DM_CTL env line)
     uint64_t un = now_ns(), gap = un - atomic_exchange(&last_u_ns, un);
     uint64_t u = atomic_fetch_add(&g_updates, 1) + 1, r = atomic_load(&a->renders), last_r = a->last_r;
-    if (last_r != ~0ull && r == last_r) {
+    // DM_AUDREN_CATCHUP_FRAMES=n (profile): catch-up frames only while fewer than n frames have been rendered (the start-up case above), none after. Fire Emblem: Three Houses
+    // (KTGL) updates twice per renderer event, 0.05-0.4 ms apart, so every second update rendered a catch-up frame (55 a second): its voices stream from looping buffers
+    // that the game refills once per renderer event, which a catch-up frame does not signal, so the extra frames ran the play position past the refill and replayed the
+    // buffer's previous 20 ms: 45% of the output blocks were copies of the block 4 frames earlier, heard as a buzz or stutter in music and voices
+    static long long cu_max = -2; if (cu_max == -2) { const char *e = getenv("DM_AUDREN_CATCHUP_FRAMES"); cu_max = e && *e ? atoll(e) : -1; if (cu_max >= 0) LOG("audren: catch-up frames only in the first %lld rendered frames (DM_AUDREN_CATCHUP_FRAMES)", cu_max); }
+    if (last_r != ~0ull && r == last_r && (cu_max < 0 || r < (uint64_t)cu_max)) {
         uint64_t c = atomic_fetch_add(&g_catchups, 1) + 1;
         if (c <= 3) LOG("audren: no frame rendered before update %llu, rendering a catch-up frame first (%llu so far)", (unsigned long long)u, (unsigned long long)c);
         // DM_AUDREN_TRACE: the next 300 catch-ups with the calling thread, the time since the previous update and the frames queued ahead: a late sound thread that then updates
