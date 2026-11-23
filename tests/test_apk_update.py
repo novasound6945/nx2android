@@ -10,6 +10,8 @@ sys.path.insert(0, str(REPO))
 os.environ.setdefault('NX2A_HOME', tempfile.mkdtemp(prefix='nx2a_test_home_'))
 from porter import apkupdate, host, paths, pipeline, publish   # noqa: E402
 from porter.upstream import BuildError                # noqa: E402
+sys.path.insert(0, str(REPO / 'tests'))
+import android_sdk                                   # noqa: E402 (the highest Android build-tools found)
 import axml, nacp, rewrite_abi                       # noqa: E402 (dm/android/apk, dm/tools: on sys.path through porter)
 
 APK = REPO / 'nxnative/dm/android/apk'
@@ -17,8 +19,8 @@ TOOLS = REPO / 'nxnative/dm/tools'
 ATRAIN, PKG = '0100A3E010E56000', 'org.nx2a.t0100a3e010e56000'   # a profile without patches.py, version v65536 registered
 KO = 'A열차로 가자: 시작해요 관광지 개발'   # its name_ko (the Korean name in its control data)
 WAKE = 'android.permission.WAKE_LOCK'
-RELEASED = Path.home() / 'd2rm/ports/release-2026-11-21/OnePieceGrandGourmet/OnePieceGrandGourmet.apk'   # a released port (read only), when this computer has it
-AAPT2 = Path.home() / 'Library/Android/sdk/build-tools/32.1.0-rc1/aapt2'
+RELEASED = Path(os.environ.get('NX2A_TEST_RELEASED_APK', ''))   # a released port's APK (read only), when NX2A_TEST_RELEASED_APK names one; else those tests skip
+AAPT2 = android_sdk.build_tools() / 'aapt2'
 APKSIGNER = AAPT2.with_name('apksigner')
 SERVICE_BASE = '5f6f417b4eeaaa49a00ac065ff816a423b7ea574'   # the last mkapk.py from before the background download's service
 HAS_GIT = subprocess.run(['git', 'rev-parse', '--git-dir'], cwd=TOOLS, capture_output=True).returncode == 0

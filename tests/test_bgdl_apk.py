@@ -9,9 +9,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 APK = REPO / 'nxnative/dm/android/apk'
 sys.path.insert(0, str(APK))
-import axml, build_service_dex   # noqa: E402
+sys.path.insert(0, str(REPO / 'tests'))
+import android_sdk, axml, build_service_dex   # noqa: E402
 
-BT = Path(os.environ.get('NX2A_BUILD_TOOLS', Path.home() / 'Library/Android/sdk/build-tools/32.1.0-rc1'))
+BT = android_sdk.build_tools()   # NX2A_BUILD_TOOLS, else the highest build-tools of the Android SDK
 AAPT2, APKSIGNER, DEXDUMP = BT / 'aapt2', BT / 'apksigner', BT / 'dexdump'
 BASE = '5f6f417b4eeaaa49a00ac065ff816a423b7ea574'   # the last mkapk.py from before the service
 SERVICE = 'org.nx2a.DownloadService'

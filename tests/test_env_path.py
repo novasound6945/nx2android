@@ -41,14 +41,14 @@ int main(void) {
     char b[300]; assert(!dm_env_own_path("/sdcard/Android/data/a.b/files/x", "/data/user/0/a.c/files", b, sizeof b));
     assert(!dm_env_own_path("/sdcard/Android/data/a.b/files/x", OWN "/sub", b, sizeof b));
     // the data on an SD card (storage_android.c): the pack's internal paths of its own package read as the card's, another package's too; a path on the card stays
-#define SD "/storage/6AA8-165A/Android/data/kr.wook.srw.srwvswitchns/files"
+#define SD "/storage/1234-ABCD/Android/data/kr.wook.srw.srwvswitchns/files"
     assert(dm_env_own_path("/sdcard/Android/data/kr.wook.srw.srwvswitchns/files/aoc", SD, b, sizeof b) && !strcmp(b, SD "/aoc"));
     assert(dm_env_own_path(OWN "/standard.ttf", SD, b, sizeof b) && !strcmp(b, SD "/standard.ttf"));
     assert(dm_env_own_path("/storage/self/primary/Android/data/kr.wook.srw.srwvswitchns/files", SD, b, sizeof b) && !strcmp(b, SD));
     assert(dm_env_own_path("/data/media/0/Android/data/kr.wook.srw.srwvswitchns/files/x", SD, b, sizeof b) && !strcmp(b, SD "/x"));
     assert(dm_env_own_path("/sdcard/Android/data/org.nx2a.t0100ca400e300000/files/x", SD, b, sizeof b) && !strcmp(b, SD "/x"));
     assert(!dm_env_own_path(SD "/RomFS", SD, b, sizeof b));                                                       // the data's own folder
-    assert(!dm_env_own_path("/storage/6AA8-165A/Android/data/kr.wook.srw.srwvswitchns/files/RomFS", OWN, b, sizeof b));   // --romfs-at sd: the card's RomFS stays
+    assert(!dm_env_own_path("/storage/1234-ABCD/Android/data/kr.wook.srw.srwvswitchns/files/RomFS", OWN, b, sizeof b));   // --romfs-at sd: the card's RomFS stays
     assert(!dm_env_own_path("/storage/emulated/10x/Android/data/kr.wook.srw.srwvswitchns/files/x", SD, b, sizeof b));     // not internal storage's spelling
     // dm_env_moved_path: a card's path of the app's own that is gone, read in the data's folder when that has it
     assert(!dm_env_moved_path(SD "/RomFS", OWN, b, sizeof b));   // (neither there)

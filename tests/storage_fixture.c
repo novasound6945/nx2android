@@ -24,7 +24,7 @@ int main(int argc, char **argv) {
     // ---- the choice at the start ----
     dm_vol vs[3]; memset(vs, 0, sizeof vs);
     snprintf(vs[0].path, sizeof vs[0].path, "/storage/emulated/0/Android/data/a.b/files"); vs[0].mounted = 1; vs[0].free = 8ull << 30;
-    snprintf(vs[1].path, sizeof vs[1].path, "/storage/6AA8-165A/Android/data/a.b/files"); vs[1].mounted = 1; vs[1].removable = 1; vs[1].free = 300ull << 30;
+    snprintf(vs[1].path, sizeof vs[1].path, "/storage/1234-ABCD/Android/data/a.b/files"); vs[1].mounted = 1; vs[1].removable = 1; vs[1].free = 300ull << 30;
     int none[3] = {0, 0, 0}, in0[3] = {1, 0, 0}, in1[3] = {0, 1, 0};
     dm_st_pick k;
     k = dm_st_choose(vs, 2, "", none, 0); assert(k.vol == 1 && k.save && !k.missing);                // a first start: the most room
