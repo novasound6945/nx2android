@@ -68,13 +68,16 @@ static void pipe_seen(VkPipeline p) {
 // DM_VK_ASYNC_PIPE=0 (live): every pipeline is built at once
 #define PIPE_PENDING ((VkPipeline)(uintptr_t)2)
 enum { APQ = 256 };
-static pkey g_apq[APQ]; static int g_apq_h, g_apq_t, g_apq_on;   // queued keys (a draw left out counts as skipped for no pipeline)
+// The same threads make the shader parts a linked pipeline lacks (DM_VK_ASYNC_PARTS, gfx_vk_gpl.inc gpl_parts_async): a job with parts set, the key then only for the log
+struct gpl_pjob; static void gpl_pjob_run(struct gpl_pjob *j);
+static struct { pkey k; struct gpl_pjob *parts; } g_apq[APQ]; static int g_apq_h, g_apq_t, g_apq_on;   // queued jobs (a draw left out counts as skipped for no pipeline)
 static pthread_mutex_t g_apq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_apq_cv = PTHREAD_COND_INITIALIZER;
 static void *async_pipe_thread(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk async pipe");
     for (;;) {
         pthread_mutex_lock(&g_apq_mu); while (g_apq_h == g_apq_t) pthread_cond_wait(&g_apq_cv, &g_apq_mu);
-        pkey k = g_apq[g_apq_t % APQ]; g_apq_t++; pthread_mutex_unlock(&g_apq_mu);
+        pkey k = g_apq[g_apq_t % APQ].k; struct gpl_pjob *pj = g_apq[g_apq_t % APQ].parts; g_apq_t++; pthread_mutex_unlock(&g_apq_mu);
+        if (pj) { gpl_pjob_run(pj); continue; }
         vkshader_t *stg[3] = {0}; VkPipeline p = (VkPipeline)1;
         for (int s = 0; s < 3; s++) if (k.key[s] && !(s == 1 && k.raster_discard)) stg[s] = vk_shader(k.key[s], s);
         if (stg[0]) { VkDescriptorSetLayout dsl[5] = {0}; int nsets = 0;
@@ -89,21 +92,30 @@ static void *async_pipe_thread(void *arg) {
     }
     return NULL;
 }
-static int async_pipe(const pkey *k) {   // 1: queued (the draw is left out); under nothing (takes g_pipe_mu)
+// 1: the draw may be left out while its pipeline (or a shader part of it) is made in the background: not with DM_VK_ASYNC_PIPE=0, nor for the draws above that build at once
+static int async_skip_ok(const pkey *k) {
     if (!g_async_pipe || k->raster_discard || (S.sh[0] && S.sh[0]->xfb) || (S.sh[2] && S.sh[2]->xfb)) return 0;
     for (int i = 0; i < S.ncol && i < 8; i++) if (S.rt_has_col[i] && (S.rt_col[i].d.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) return 0;   // (the CPU reads it: lin_back)
     int natt = 0; for (int i = 0; i < 9; i++) { const vkimg_t *a = P_att[i].im; if (!a) continue; natt++; if (a->rt_frames < 3) {
             if (g_prof_on) { static int n; if (n++ < 300) VKLOG("pipeline built here: attachment %d %ux%u nvn format %#x drawn in %llu presents in a row (shaders %016llx %016llx)", i, a->w, a->h, a->nvn_format, (unsigned long long)a->rt_frames, (unsigned long long)k->key[0], (unsigned long long)k->key[1]); }
             return 0; } }   // (counted in this present too)
-    if (!natt) return 0;
+    return natt != 0;
+}
+static int apq_push(const pkey *k, struct gpl_pjob *parts) {   // 0: the queue is full (the caller builds at once)
     pthread_mutex_lock(&g_apq_mu);
     if (!g_apq_on) { g_apq_on = 1; for (int i = 0; i < 2; i++) { pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED); pthread_create(&t, &a, async_pipe_thread, NULL); pthread_attr_destroy(&a); } }
-    int ok = g_apq_h - g_apq_t < APQ; if (ok) { g_apq[g_apq_h % APQ] = *k; g_apq_h++; pthread_cond_signal(&g_apq_cv); }
+    int ok = g_apq_h - g_apq_t < APQ; if (ok) { g_apq[g_apq_h % APQ].k = *k; g_apq[g_apq_h % APQ].parts = parts; g_apq_h++; pthread_cond_signal(&g_apq_cv); }
     pthread_mutex_unlock(&g_apq_mu);
+    return ok;
+}
+static int async_pipe(const pkey *k) {   // 1: queued (the draw is left out); under nothing (takes g_pipe_mu)
+    if (!async_skip_ok(k)) return 0;
+    int ok = apq_push(k, NULL);
     if (ok) { pthread_mutex_lock(&g_pipe_mu); if (!nvn_hm_get(&g_pipes, k)) nvn_hm_put(&g_pipes, k, PIPE_PENDING); pthread_mutex_unlock(&g_pipe_mu); }
     return ok;
 }
 // Graphics pipeline libraries (gfx_vk_gpl.inc): a draw that can take a linked pipeline does until its whole one is built (vk_gpl.h gpl_route), and none is left out
+// but while a shader part it needs is made in the background (gpl_parts_async: DM_VK_ASYNC_PARTS, the draws async_skip_ok allows)
 static nvn_hmap g_gfast = {.klen = sizeof(pkey)};   // linked pipelines by key (the replay thread's only; (VkPipeline)1: the link failed), kept after the whole one took over (command buffers may hold them)
 static nvn_hmap g_gtook = {.klen = sizeof(pkey)};   // keys whose whole pipeline has drawn after their linked one (the replay thread's only; vk_ev VKEV_TAKEOVER once per key)
 static int g_pipe_new;   // graphics_pipeline linked a pipeline at this draw (1), or a whole one took over at it (2): the crumbs' flags
@@ -120,7 +132,7 @@ static void fast_note(const pkey *k) {
     for (uint32_t i = 0; i < g_fast_nlist; i++) if (g_fast_list[i].vs == k->key[0] && g_fast_list[i].fs == k->key[1] && g_fast_list[i].samples == k->samples && g_fast_list[i].atest == k->atest) return;
     if (g_fast_nlist < 16) { g_fast_list[g_fast_nlist].vs = k->key[0]; g_fast_list[g_fast_nlist].fs = k->key[1]; g_fast_list[g_fast_nlist].samples = k->samples; g_fast_list[g_fast_nlist].atest = k->atest; g_fast_nlist++; }
 }
-static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout); static int gpl_eligible(const pkey *k); static void gpl_opt_queue(const pkey *k); static void gpl_old_built(uint64_t ns);
+static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout); static int gpl_parts_async(const pkey *k); static int gpl_eligible(const pkey *k); static void gpl_opt_queue(const pkey *k); static void gpl_old_built(uint64_t ns);
 static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
     uint64_t swaps = atomic_load(&g_gpl_swaps); g_pipe_new = 0; g_pipe_first = 0;
     if (g_last_p && !memcmp(k, &g_last_k, sizeof *k) && (!g_last_fast || g_last_swaps == swaps)) { g_pipe_fast = g_last_fast;
@@ -138,6 +150,7 @@ static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
         e = getenv("DM_VK_GPL_LINK_MS"); link_ms = !(e && !atoi(e)); e = getenv("DM_VK_X_GPL_FAST"); fast_only = e && atoi(e); }
     if (V.gpl && link_on && (link_ms || k->samples <= 1) && (fast_only ? gpl_eligible(k) : gpl_route(V.gpl, gpl_eligible(k), opt) == GPL_USE_FAST)) {
         VkPipeline f = nvn_hm_get(&g_gfast, k);
+        if (!f && gpl_parts_async(k)) return VK_NULL_HANDLE;   // (a shader part is being made in the background: the draw is left out, nothing memoized)
         if (!f) { f = gpl_link(k, layout); nvn_hm_put(&g_gfast, k, f ? f : (VkPipeline)1); if (f && opt == GPL_OPT_NONE) { gpl_opt_queue(k); opt = GPL_OPT_PENDING; }
                   if (f) { g_sub_links++; g_pipe_new = 1; g_pipe_first = 2; vk_ev(VKEV_LINK, k->key[0], k->key[1], (uint64_t)(uintptr_t)f); } }
         else if (f != (void *)1 && opt == GPL_OPT_NONE) gpl_opt_queue(k);   // (its queue was full before)

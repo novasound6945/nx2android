@@ -262,6 +262,7 @@ DM_TOUCH_LOG	str		debug	?	hle_touch.c front_android.c	DM_TOUCH_LOG=1 also logs e
 DM_UDC_SELFTEST	str		debug,ios	?	nvn_mtl.m	
 DM_UI_LANG	str		app	start	overlay_layout.h	zh or en: the overlay's words (pause menu, layout editor, save picker) instead of the device language's
 DM_VK_ALPHA_TEST	bool	1	profile	live	gfx_vk_exec.c	NVN's alpha test in fragment shader variants (pipeline key atest); 0 draws without it, as before
+DM_VK_ASYNC_PARTS	bool	1	profile	live	gfx_vk_exec.c gfx_vk_gpl.inc	with graphics pipeline libraries, a shader part a draw needs and nobody made yet is made on the background pipeline threads and the draw is left out until it is ready (the same draws as DM_VK_ASYNC_PIPE leaves out; nothing when that is 0); 0 = made at the draw, as before
 DM_VK_ASYNC_PIPE	bool	1	profile	live	gfx_vk_exec.c	0 = new pipelines are built on the replay thread, not in the background
 DM_VK_BC_DRAW	int	0	profile	start	gfx_vk_tex.c	BC texture stand-in mode for drivers without BC: 0 = off
 DM_VK_BIND_ALIAS	str		profile	live	gfx_vk_exec.c	<shader key>:<binding>=<binding>[:...]: a shader's texture binding reads another binding's texture

@@ -7,9 +7,9 @@
 // dynamic state; gpl_dyn sets them at the bind). The two others hold no shader and are made at the draw. A draw whose pipeline does not exist yet links the four
 // at once without link-time optimization (fast linking: no compile), and the whole pipeline (build_pipeline, as before) is compiled in the background (gpl_opt_*)
 // and takes over once ready. A part the preparation could not know (integer-texel views, a vertex shader's outputs added for its fragment shader, the fragment
-// depth and dual-source variants, an alpha test other than GREATER, a geometry shader) is made at that draw: one shader, not a whole pipeline. No draw is left out for
-// its pipeline. The alpha test's reference is a push constant (gfx_vk_shader.c spv_alpha_test), so its variant's part does not depend on it: the preparation makes the
-// GREATER one of every fragment shader that takes it (vk_shader_alpha_ok; the function Dark Souls Remastered uses), others are made at their first draw. A fragment
+// depth and dual-source variants, an alpha test other than GREATER, a geometry shader) is made at that draw: one shader, not a whole pipeline (or, DM_VK_ASYNC_PARTS, in the
+// background while the draw is left out: gpl_parts_async). Otherwise no draw is left out for its pipeline. The alpha test's reference is a push constant
+// (gfx_vk_shader.c spv_alpha_test), so its variant's part does not depend on it: the preparation makes the GREATER one of every fragment shader that takes it (vk_shader_alpha_ok; the function Dark Souls Remastered uses), others are made at their first draw. A fragment
 // shader that writes its float outputs as integers (vk_spv_fragout.h spv_int_writer: Luigi's Mansion 3's ~1,400 G-buffer shaders) also gets its integer output part,
 // every float output UINT (the variant int_out_bits gives a draw into all-UINT targets), so its first G-buffer draw compiles nothing. The parts made at draws are
 // recorded (DM_ROOT/vk_gpl_seen.bin, gpl_seen_*) and made first at the next start's preparation or warm-up.
@@ -29,7 +29,9 @@ static pthread_mutex_t g_glib_mu = PTHREAD_MUTEX_INITIALIZER;   // the parts' ta
 // link: a linked pipeline's whole time at its draw, the parts made there included; link_only: the link call alone; part: a shader part made at a draw; parts_at: those
 // that were alpha test variants (fragment parts with a function in fd), parts_int integer output variants (fd bits 8-23); prep_at / ns_prep_at / ns_prep_all: the
 // preparation's alpha test parts and their time (summed over threads); prep_int / ns_prep_int: its integer output parts (gpl_part_i), int_writers: the shaders that take one
-static struct { gpl_stat link, link_only, part, opt; uint64_t links, parts[2], parts_at, parts_int, link_fail, part_fail, queued, qfull, opt_fail; uint64_t ns_part, ns_link, n_old, ns_old;
+// bg_part / parts_bg / bg_queued / bg_qfull: the shader parts made on the background pipeline threads for draws left out (DM_VK_ASYNC_PARTS, gpl_parts_async), their jobs and full queues
+static struct { gpl_stat link, link_only, part, opt, bg_part; uint64_t links, parts[2], parts_at, parts_int, link_fail, part_fail, queued, qfull, opt_fail; uint64_t ns_part, ns_link, n_old, ns_old;
+                uint64_t parts_bg[2], bg_queued, bg_qfull;
                 uint64_t prep_at, prep_at_skip, ns_prep_at, ns_prep_all, prep_int, ns_prep_int, int_writers, prep_seen; } g_gst;   // (under g_glib_mu)
 
 // DM_VK_GPL_LTO=1 (read once at startup: the parts must all be made the same way): the parts keep their link-time optimization information and a draw links them
@@ -155,10 +157,11 @@ static gfskey gpl_fs_key(const vkshader_t *fs, uint64_t um, uint64_t im, uint32_
     k.fs = fs->key; k.um = um; k.im = im; k.fd = fd; k.ms = gpl_fs_ms(fs) ? samples | a2c << 8 : 0; return k;
 }
 // a shader part: from its table, else made now (*made: its time, for the statistics; 0 when it was there)
+// a part the driver refused once is not made again: every other draw state with the same shaders would compile it again (one compile each, a few ms on the
+// replay thread), only to be refused again; its draws are left out as the first one's (graphics_pipeline, gfx_vk_exec_draws.inc). (under g_glib_mu)
+static nvn_hmap g_gpr_bad = {.klen = sizeof(gprkey)}, g_gfs_bad = {.klen = sizeof(gfskey)};
 static VkPipeline gpl_part(int fs_part, const void *key, vkshader_t *a, vkshader_t *b, uint64_t *made) {
-    // a part the driver refused once is not made again: every other draw state with the same shaders would compile it again (one compile each, a few ms on the
-    // replay thread), only to be refused again; its draws are left out as the first one's (graphics_pipeline, gfx_vk_exec_draws.inc)
-    static nvn_hmap bad_pr = {.klen = sizeof(gprkey)}, bad_fs = {.klen = sizeof(gfskey)}; nvn_hmap *bad = fs_part ? &bad_fs : &bad_pr;
+    nvn_hmap *bad = fs_part ? &g_gfs_bad : &g_gpr_bad;
     nvn_hmap *m = fs_part ? &g_gfs : &g_gpr; VkPipeline p = gpl_get(m, key); *made = 0; if (p) return p;
     if (gpl_get(bad, key)) return VK_NULL_HANDLE;
     uint64_t t0 = tick(); p = fs_part ? gpl_fs_make(key, a) : gpl_pr_make(key, a, b); *made = tick() - t0 + 1;
@@ -228,9 +231,8 @@ static int gpl_eligible(const pkey *k) {
     return V.gpl && !k->raster_discard && !k->alt && !k->debug_mode && !k->gs_split &&   // (gs_split: two geometry passes, gfx_vk_exec_xfb.inc, whole pipelines only)
            !(S.sh[0] && S.sh[0]->xfb) && !(S.sh[2] && S.sh[2]->xfb);
 }
-// the four parts of a draw's pipeline (shader parts from the preparation, or made now), linked without link-time optimization. NULL when one could not be made (logged)
-static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout) {
-    uint64_t t0 = tick();
+// the draw's shader parts' keys and shaders (S.sh: the replay thread's)
+static void gpl_draw_keys(const pkey *k, gprkey *out_pk, gfskey *out_fk, vkshader_t **out_vs, vkshader_t **out_fs, vkshader_t **out_gs) {
     vkshader_t *vs = S.sh[0], *fs = S.sh[1], *gs = S.sh[2] ? vk_shader_gs_topo(S.sh[2], (VkPrimitiveTopology)k->topo) : NULL;
     uint32_t xo0 = (gs ? gs->in_locs : fs ? fs->in_locs : 0) & ~vs->out_locs, xo2 = gs ? (fs ? fs->in_locs : 0) & ~gs->out_locs : 0;   // as build_pipeline
     gprkey pk = gpl_pr_key(vs, gs, k->um[0], k->im[0], xo0, k->um[2], k->im[2], xo2, gpl_rast_key(V.gpl_eds3, k->depth_clamp, k->mode, k->clip_neg1, V.has_depth_clip_ctl));
@@ -240,6 +242,12 @@ static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout) {
     // the draw's multisample state, as the whole pipeline's fragment shader does, not only the per-sample shaders (gpl_fs_ms). Valid either way (VUID-...-06633/06635:
     // the same state as the output part's); those parts are made at their first draw (one shader each), the preparation's stay for single-sampled draws
     { const char *e = getenv("DM_VK_GPL_FSMS"); if (fs && e && atoi(e) && !fk.ms && (k->samples > 1 || k->a2c)) fk.ms = k->samples | k->a2c << 8; }
+    *out_pk = pk; *out_fk = fk; *out_vs = vs; *out_fs = fs; *out_gs = gs;
+}
+// the four parts of a draw's pipeline (shader parts from the preparation, or made now), linked without link-time optimization. NULL when one could not be made (logged)
+static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout) {
+    uint64_t t0 = tick();
+    gprkey pk; gfskey fk; vkshader_t *vs, *fs, *gs; gpl_draw_keys(k, &pk, &fk, &vs, &fs, &gs);
     uint64_t mpr = 0, mfs = 0;
     VkPipeline lib[4] = {gpl_vi(k), gpl_part(0, &pk, vs, gs, &mpr), gpl_part(1, &fk, fs, NULL, &mfs), gpl_fo(k)}, p = VK_NULL_HANDLE;
     uint64_t t1 = tick();
@@ -267,11 +275,61 @@ static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout) {
     { static int nt; const char *e = getenv("DM_VK_GPL_TRACE"); if (p && e && nt < atoi(e)) { nt++;
         VKLOG("GPL trace %d: shaders %016llx %016llx %016llx; samples %u a2c %u, colour %u (format %u) depth format %u; outputs added %#x/%#x, views %#llx/%#llx %#llx/%#llx, fragment variant %#x ms %#x; "
               "cull %u front %u bias %u depth test %u write %u func %u stencil %u; clamp %u mode %u clip -1..1 %u; topology %u restart %u; blend %#x mask %#x",
-              nt, (unsigned long long)k->key[0], (unsigned long long)k->key[1], (unsigned long long)k->key[2], k->samples, k->a2c, k->ncol, k->cfmt[0], k->dfmt, xo0, xo2,
+              nt, (unsigned long long)k->key[0], (unsigned long long)k->key[1], (unsigned long long)k->key[2], k->samples, k->a2c, k->ncol, k->cfmt[0], k->dfmt, pk.xo0, pk.xo2,
               (unsigned long long)k->um[0], (unsigned long long)k->im[0], (unsigned long long)k->um[1], (unsigned long long)k->im[1], fk.fd, fk.ms,
               k->cull, k->front, k->bias_en, k->dt, k->dw, k->df, k->st, k->depth_clamp, k->mode, k->clip_neg1, k->topo, k->restart, k->blend_en, k->wmask[0]); } }
     if (p && (nl <= 8 || !(nl & (nl - 1)))) VKLOG("GPL: %llu pipelines linked at draws so far; this one %.2f ms (parts %.2f ms, link %.2f ms)", (unsigned long long)nl, (t2 - t0) / 1e6, (t1 - t0) / 1e6, (t2 - t1) / 1e6);
     return p;
+}
+// ---- a shader part a draw needs and nobody made yet, made on the background pipeline threads (gfx_vk_exec_pipelines.inc async_pipe_thread) ----
+// Made at the draw, one costs the replay thread its whole compile: Super Mario Bros. Wonder on a Retroid Pocket Nova, first start, 58 pre-rasterization parts
+// (vertex-input flips, uint-texel views) and a few fragment ones at 20-30 ms each, one at 590 ms. Instead (DM_VK_ASYNC_PARTS, live, default 1) the draw is left out
+// (counted with the draws skipped for no pipeline) while the part is made in the background, and a later draw links it (fast: no compile). Not with
+// DM_VK_ASYNC_PIPE=0 (Dark Souls Remastered's profile: a deferred renderer whose objects flash grey for a pass left out), nor for the draws async_pipe never leaves
+// out (targets drawn in fewer than three presents in a row: a target drawn once would stay missing; linear render targets, rasterizer-discard and transform-feedback
+// draws), nor when the queue is full: those make the part at the draw, as before. A part being made is in g_gpr_pend / g_gfs_pend (one job per key, under
+// g_glib_mu) until it is in its table or the driver refused it (then the draw links as before, which fails and builds the whole pipeline the way without libraries).
+// The parts made so are recorded for the next start (gpl_seen_note) as those made at draws. No teardown: the threads are the process's (it ends with _exit)
+static nvn_hmap g_gpr_pend = {.klen = sizeof(gprkey)}, g_gfs_pend = {.klen = sizeof(gfskey)};   // (under g_glib_mu)
+struct gpl_pjob { gprkey pk; gfskey fk; vkshader_t *vs, *gs, *fs; unsigned parts; };   // parts: GPL_PART_PR / GPL_PART_FS to make (vk_gpl.h)
+static void gpl_pjob_run(struct gpl_pjob *j) {   // (a background pipeline thread)
+    uint64_t mpr = 0, mfs = 0; VkPipeline ppr = VK_NULL_HANDLE, pfs = VK_NULL_HANDLE;
+    if (j->parts & GPL_PART_PR) ppr = gpl_part(0, &j->pk, j->vs, j->gs, &mpr);
+    if (j->parts & GPL_PART_FS) pfs = gpl_part(1, &j->fk, j->fs, NULL, &mfs);
+    pthread_mutex_lock(&g_glib_mu);
+    if (j->parts & GPL_PART_PR) nvn_hm_del(&g_gpr_pend, &j->pk);
+    if (j->parts & GPL_PART_FS) nvn_hm_del(&g_gfs_pend, &j->fk);
+    if (mpr) { g_gst.parts_bg[0]++; gpl_stat_add(&g_gst.bg_part, mpr); } if (mfs) { g_gst.parts_bg[1]++; gpl_stat_add(&g_gst.bg_part, mfs); }
+    pthread_mutex_unlock(&g_glib_mu);
+    if (mpr && ppr && !gpl_pr_std(&j->pk)) gpl_seen_note(0, &j->pk);
+    if (mfs && pfs && !gpl_fs_std(&j->fk, j->fs)) gpl_seen_note(1, &j->fk);
+    if (mpr || mfs) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 40) VKLOG("GPL: shader part made in the background for a draw left out: %s%s %.2f ms (vertex %016llx views %#llx/%#llx outputs added %#x flips %#x; fragment %016llx views %#llx/%#llx variant %#x ms %#x)",
+            mpr ? "pre-rasterization" : "", mfs ? (mpr ? " + fragment" : "fragment") : "", (mpr + mfs) / 1e6, (unsigned long long)j->pk.vs, (unsigned long long)j->pk.um0, (unsigned long long)j->pk.im0,
+            j->pk.xo0, j->pk.vi0, (unsigned long long)j->fk.fs, (unsigned long long)j->fk.um, (unsigned long long)j->fk.im, j->fk.fd, j->fk.ms); }
+    free(j);
+}
+// 1: a shader part of the draw's linked pipeline is being made in the background, the draw is left out; 0: link now (gpl_link makes what is missing, as before)
+static int gpl_parts_async(const pkey *k) {   // (the replay thread)
+    int async = g_async_parts && async_skip_ok(k);
+    if (!async) return 0;   // (the keys are not worked out for nothing: gpl_link does)
+    gprkey pk; gfskey fk; vkshader_t *vs, *fs, *gs; gpl_draw_keys(k, &pk, &fk, &vs, &fs, &gs);
+    unsigned need = 0, pend = 0, q;
+    pthread_mutex_lock(&g_glib_mu);
+    if (!nvn_hm_get(&g_gpr, &pk) && !nvn_hm_get(&g_gpr_bad, &pk)) { need |= GPL_PART_PR; if (nvn_hm_get(&g_gpr_pend, &pk)) pend |= GPL_PART_PR; }
+    if (fs && !nvn_hm_get(&g_gfs, &fk) && !nvn_hm_get(&g_gfs_bad, &fk)) { need |= GPL_PART_FS; if (nvn_hm_get(&g_gfs_pend, &fk)) pend |= GPL_PART_FS; }   // (no fragment shader: a part without one, nothing compiled)
+    int plan = gpl_parts_plan(async, need, pend, &q);
+    if (plan == GPL_PARTS_QUEUE) { if (q & GPL_PART_PR) nvn_hm_put(&g_gpr_pend, &pk, (void *)1); if (q & GPL_PART_FS) nvn_hm_put(&g_gfs_pend, &fk, (void *)1); }
+    pthread_mutex_unlock(&g_glib_mu);
+    if (plan != GPL_PARTS_QUEUE) return plan == GPL_PARTS_WAIT;
+    struct gpl_pjob *j = malloc(sizeof *j);
+    if (j) { j->pk = pk; j->fk = fk; j->vs = vs; j->gs = gs; j->fs = fs; j->parts = q; }
+    int ok = j && apq_push(k, j);
+    pthread_mutex_lock(&g_glib_mu);
+    if (ok) g_gst.bg_queued++;
+    else { g_gst.bg_qfull++; if (q & GPL_PART_PR) nvn_hm_del(&g_gpr_pend, &pk); if (q & GPL_PART_FS) nvn_hm_del(&g_gfs_pend, &fk); }   // (made at the draw instead)
+    pthread_mutex_unlock(&g_glib_mu);
+    if (!ok) { free(j); return 0; }
+    return 1;
 }
 // a linked pipeline's dynamic state, at its bind (and in each new command buffer): its key's, which the libraries left out
 static void gpl_dyn(VkCommandBuffer cb, const pkey *k) {
@@ -327,10 +385,13 @@ void vk_gpl_report(void) {   // gfx_vk_present.c, every 600 presents
     double l50, l95, lmx, k50, k95, kmx, p50, p95, pmx, o50, o95, omx;
     pthread_mutex_lock(&g_glib_mu); typeof(g_gst) s = g_gst; pthread_mutex_unlock(&g_glib_mu);
     gpl_stat_pct(&s.link, &l50, &l95, &lmx); gpl_stat_pct(&s.link_only, &k50, &k95, &kmx); gpl_stat_pct(&s.part, &p50, &p95, &pmx); gpl_stat_pct(&s.opt, &o50, &o95, &omx);
+    double b50, b95, bmx; gpl_stat_pct(&s.bg_part, &b50, &b95, &bmx);
     VKLOG("GPL: %llu pipelines linked at draws (ms p50 %.2f p95 %.2f max %.2f, parts made there included; the link alone ms p50 %.2f p95 %.2f max %.2f), %llu failed; "
           "shader parts made at draws: %llu pre-rasterization + %llu fragment, %llu of them alpha test variants and %llu integer output variants (ms p50 %.2f p95 %.2f max %.2f), %llu failed; "
+          "shader parts made in the background for draws left out: %llu pre-rasterization + %llu fragment (ms p50 %.2f p95 %.2f max %.2f), %llu jobs queued (%llu queue full: made at the draw); "
           "whole pipelines in the background: %llu queued (%llu queue full), %llu took over (ms p50 %.1f p95 %.1f max %.1f), %llu failed; whole pipelines built at draws %llu (%.1f ms); draws left out for no pipeline %llu",
           (unsigned long long)s.links, l50, l95, lmx, k50, k95, kmx, (unsigned long long)s.link_fail, (unsigned long long)s.parts[0], (unsigned long long)s.parts[1], (unsigned long long)s.parts_at, (unsigned long long)s.parts_int, p50, p95, pmx, (unsigned long long)s.part_fail,
+          (unsigned long long)s.parts_bg[0], (unsigned long long)s.parts_bg[1], b50, b95, bmx, (unsigned long long)s.bg_queued, (unsigned long long)s.bg_qfull,
           (unsigned long long)s.queued, (unsigned long long)s.qfull, (unsigned long long)atomic_load(&g_gpl_swaps) - s.opt_fail, o50, o95, omx, (unsigned long long)s.opt_fail, (unsigned long long)s.n_old, s.ns_old / 1e6,
           (unsigned long long)g_vkst.skip_pipe);
 }

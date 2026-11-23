@@ -64,6 +64,19 @@ static inline int gpl_route(int gpl_on, int eligible, int opt) {
     return GPL_USE_OLD;
 }
 
+// ---- a draw about to link whose shader part (pre-rasterization GPL_PART_PR, fragment GPL_PART_FS) is in no table: made at the draw, or (DM_VK_ASYNC_PARTS) on the
+// background pipeline threads while the draw is left out (gfx_vk_gpl.inc gpl_parts_async). need: the parts neither made nor refused by the driver; pend: those queued
+// already; async: the draw may be left out (DM_VK_ASYNC_PARTS and DM_VK_ASYNC_PIPE on, and its targets allow it: async_skip_ok). *queue: the parts to queue now ----
+enum { GPL_PART_PR = 1, GPL_PART_FS = 2 };
+enum { GPL_PARTS_LINK, GPL_PARTS_MAKE, GPL_PARTS_QUEUE, GPL_PARTS_WAIT };   // every part there: link; the missing ones made here (as before); queued, the draw left out; all queued already: left out
+static inline int gpl_parts_plan(int async, unsigned need, unsigned pend, unsigned *queue) {
+    *queue = 0;
+    if (!need) return GPL_PARTS_LINK;
+    if (!async) return GPL_PARTS_MAKE;   // (a part queued before DM_VK_ASYNC_PARTS went off is made here as well: the first one into its table is kept)
+    *queue = need & ~pend;
+    return *queue ? GPL_PARTS_QUEUE : GPL_PARTS_WAIT;
+}
+
 // ---- timing samples (microseconds): the last GPL_NS of them, for the log's p50 / p95 / max ----
 enum { GPL_NS = 2048 };
 typedef struct { uint32_t v[GPL_NS]; uint64_t n, sum_us; uint32_t max; } gpl_stat;
