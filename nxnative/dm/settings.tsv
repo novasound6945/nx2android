@@ -83,7 +83,7 @@ DM_MOVIE	str		debug	?	main.c
 DM_MOVIE_AAC_MPEG_ORDER	str		debug	?	audioconverter_mediacodec.c	
 DM_MOVIE_AUDIO_SLOTS	int		profile	start	hle_movie.c	audio output buffers of a movie with sound (4 up to the decoder's maximum). Default: the maximum
 DM_MOVIE_DIRECT	bool	1	debug	start	hle_nvn.c	native-texture movie frames go straight to the Vulkan image; 0 = through the CPU copy (A/B)
-DM_MOVIE_FAST	bool		profile	start	movie_avc.c hle_nvn.c nvn_deswizzle.c	the movie frame's NEON NV12 -> RGBA conversion (bit-exact) and block-linear copies a whole GOB at a time (the same addresses). MMBN Legacy Collection Vol. 1 and 2: 30 -> 60 fps on an Odin 2 in Standard mode
+DM_MOVIE_FAST	bool		profile	start	movie_avc.c hle_nvn.c	the movie frame's NEON NV12 -> RGBA conversion (bit-exact) and block-linear copies a whole GOB at a time (the same addresses). MMBN Legacy Collection Vol. 1 and 2: 30 -> 60 fps on an Odin 2 in Standard mode
 DM_MOVIE_NEON	bool	1	debug	start	yuv_neon.h	libvpx's I420 to RGBA conversion with NEON; 0 = the C loop (A/B)
 DM_MOVIE_QUEUE_LOCK	bool	1	debug	start	hle_movie.c	the movie player's output queues under one lock; 0 = as before (A/B)
 DM_MOVIE_TRACE	str		debug	?	hle_movie.c	

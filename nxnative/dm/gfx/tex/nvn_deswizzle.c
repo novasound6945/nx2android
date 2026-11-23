@@ -5,7 +5,6 @@
 //   block = 1 GOB wide × 2^tileH GOBs high × 2^tileD GOBs deep, ordered y first then z within a block; blocks fill the level in x → y → z row-major order.
 // Level / layer start offsets and the actual block height and block depth of this level come from nvn_tex.c; here we only do intra-level addressing and copying.
 #include "nvn_deswizzle.h"
-#include <stdlib.h>
 #include <string.h>
 
 static uint32_t gob_off(uint32_t x, uint32_t y) {
