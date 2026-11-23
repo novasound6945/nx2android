@@ -713,7 +713,7 @@ static float ov_glow(int64_t t, int64_t now) {   // a held button's glow: bright
     float f = (float)(now - t) / OV_FLASH_NS; return f >= 1 ? 0.22f : 0.22f + 0.48f * (1 - f) * (1 - f);
 }
 // The frame rate counter: the game's frames shown per second, measured over half a second, with the chip's and the battery's temperature and the Vulkan driver
-// in use, in a corner of the window (the pause menu's Counter and Style tabs, overlay_layout.h fpso_*: the rows, the corner, the colour, the outline or a dark block
+// in use, in a corner of the window (the options in overlay_layout.h fpso_*: the rows, the corner, the colour, the outline or a dark block
 // behind, the letters' size). The rows are put together from the characters of OV_FPS_CHARS on every present, so a changing number needs no upload. The characters are
 // rasterized in the current size: three sets (the colour, red for a temperature too hot, black for the outline), wrapped into rows of the atlas
 static int ov_fps_wmax(void) {   // the widest advance of OV_FPS_CHARS, in font columns
@@ -921,7 +921,6 @@ static void ov_render(VkCommandBuffer cb, int mode, int menu, int fps) {   // mo
     if (menu >= 0) g_fg_menu = now;   // (the counter's graph skips the interval across the menu)
     if (menu >= 0 && !edit) {   // paused: the frame dimmed, the panel, and the menu button (which closes it)
         ov_rect(cb, 0, 0, W, H, bx - 2, by - 2, bx + 2, by + 2, 0.55f);
-        if (fps && !(menu & OVT_ST)) ov_fps(cb, now);   // (the counter's preview on the Counter and Style tabs: under the panel, which stays readable; not over a game's text entry, OVT_ST)
         float r[4]; ov_menu_rect(W, H, r);
         float y0 = (float)(g_ov.h + g_ov.sh), hw = (float)ov_panel_half(), kx = r[2] / g_ov.pw, xm = r[0] + hw * kx;   // its two halves (ov_panel_copy)
         ov_rect(cb, r[0], r[1], xm, r[1] + r[3], 0, y0, hw, y0 + g_ov.ph, 1);
