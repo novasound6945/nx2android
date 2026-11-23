@@ -4,26 +4,9 @@
 #pragma once
 #include <math.h>
 #include <stdlib.h>
-#ifdef __ANDROID__
-#include <sys/system_properties.h>
-#endif
 #include "dm_input.h"
-// The overlay's words follow the device's language (Chinese when the system locale says zh, English otherwise), and DM_UI_LANG=zh / en (an env.txt row) overrides
-// it — the pause menu, the layout editor and the save picker all read this one switch, and each of their strings sits beside its use as an English/Chinese table or
-// a TR() pair.
-static inline int dm_ui_zh(void) {
-    static int v = -1;
-    if (v < 0) {
-        const char *e = getenv("DM_UI_LANG");
-        if (e && *e) v = e[0] == 'z' || e[0] == 'Z' || e[0] == 'c' || e[0] == 'C' || e[0] == '1';
-#ifdef __ANDROID__
-        else { char loc[PROP_VALUE_MAX] = ""; if (!__system_property_get("persist.sys.locale", loc) || !loc[0]) __system_property_get("ro.product.locale", loc); v = loc[0] == 'z' && loc[1] == 'h'; }
-#else
-        else v = 0;   // (the computer's harnesses: English)
-#endif
-    }
-    return v;
-}
+// The overlay's UI language (implemented in front_android.c: DM_UI_LANG=zh|en, else device locale).
+int dm_ui_zh(void);
 #define TR(en, zh) (dm_ui_zh() ? (zh) : (en))
 enum { OV_STICK_L, OV_STICK_R, OV_BUTTON, OV_DPAD, OV_MENU };   // OV_MENU: the menu button (shown with the gamepad on or off, 70%; env.txt DM_MENU_BUTTON=0 leaves it out): pauses the game and opens the settings
 typedef struct { int kind; float ax, x, y, w, h; uint64_t btn; const char *label, *name; } ov_ctl;   // ax: the anchor, as a fraction of the window's width; name: the table's
@@ -187,10 +170,18 @@ enum { FPSO_TL, FPSO_TR, FPSO_BL, FPSO_BR, FPSO_POS_N };   // fps_pos: the corne
 enum { FPSO_WHITE, FPSO_YELLOW, FPSO_GREEN, FPSO_CYAN, FPSO_MAGENTA, FPSO_COLOUR_N };   // fps_colour: the text (a temperature too hot stays red)
 enum { FPSO_BOX, FPSO_NONE, FPSO_THIN, FPSO_MEDIUM, FPSO_THICK, FPSO_OUTLINE_N };   // fps_outline: the dark block behind the rows; nothing; a black outline round each letter, 1, 2 or 3 font texels
 enum { FPSO_SMALL, FPSO_NORMAL, FPSO_LARGE, FPSO_XL, FPSO_SIZE_N };   // fps_size: the letters' scale = base - 1, base, base + 1, 2 * base (base: 2.2% of the window's height / PF_CAP, at least 2)
-static const char *const FPSO_POS_NAMES[FPSO_POS_N] = {"Top left", "Top right", "Bottom left", "Bottom right"};
-static const char *const FPSO_COLOUR_NAMES[FPSO_COLOUR_N] = {"White", "Yellow", "Green", "Cyan", "Magenta"};
-static const char *const FPSO_OUTLINE_NAMES[FPSO_OUTLINE_N] = {"Box", "None", "Thin", "Medium", "Thick"};
-static const char *const FPSO_SIZE_NAMES[FPSO_SIZE_N] = {"Small", "Normal", "Large", "Extra large"};
+static const char *const FPSO_POS_NAMES_EN[FPSO_POS_N] = {"Top left", "Top right", "Bottom left", "Bottom right"};
+static const char *const FPSO_POS_NAMES_ZH[FPSO_POS_N] = {"左上", "右上", "左下", "右下"};
+#define FPSO_POS_NAMES (dm_ui_zh() ? FPSO_POS_NAMES_ZH : FPSO_POS_NAMES_EN)
+static const char *const FPSO_COLOUR_NAMES_EN[FPSO_COLOUR_N] = {"White", "Yellow", "Green", "Cyan", "Magenta"};
+static const char *const FPSO_COLOUR_NAMES_ZH[FPSO_COLOUR_N] = {"白色", "黄色", "绿色", "青色", "洋红"};
+#define FPSO_COLOUR_NAMES (dm_ui_zh() ? FPSO_COLOUR_NAMES_ZH : FPSO_COLOUR_NAMES_EN)
+static const char *const FPSO_OUTLINE_NAMES_EN[FPSO_OUTLINE_N] = {"Box", "None", "Thin", "Medium", "Thick"};
+static const char *const FPSO_OUTLINE_NAMES_ZH[FPSO_OUTLINE_N] = {"黑底", "无", "细边", "中边", "粗边"};
+#define FPSO_OUTLINE_NAMES (dm_ui_zh() ? FPSO_OUTLINE_NAMES_ZH : FPSO_OUTLINE_NAMES_EN)
+static const char *const FPSO_SIZE_NAMES_EN[FPSO_SIZE_N] = {"Small", "Normal", "Large", "Extra large"};
+static const char *const FPSO_SIZE_NAMES_ZH[FPSO_SIZE_N] = {"小", "标准", "大", "特大"};
+#define FPSO_SIZE_NAMES (dm_ui_zh() ? FPSO_SIZE_NAMES_ZH : FPSO_SIZE_NAMES_EN)
 static const uint8_t FPSO_RGB[FPSO_COLOUR_N][3] = {{255, 255, 255}, {255, 220, 0}, {64, 255, 96}, {0, 230, 255}, {255, 64, 255}};
 #define FPSO_DEFAULT (FPSO_ROWS_DEFAULT | FPSO_TL << 5 | FPSO_WHITE << 7 | FPSO_BOX << 10 | FPSO_NORMAL << 13)
 static inline int fpso_rows(int o) { return o & 31; }
@@ -202,43 +193,39 @@ static inline int fpso_pack(int rows, int pos, int colour, int outline, int size
 static inline int fpso_scale(int base, int size) { return size == FPSO_SMALL ? (base > 1 ? base - 1 : 1) : size == FPSO_LARGE ? base + 1 : size == FPSO_XL ? 2 * base : base; }
 // ---- the pause menu: a panel in the middle of the window: a row of tabs, the open tab's rows, and Resume. Everything is placed in a panel rectangle p
 // (x, y, width, height: the window's for touches, the raster's for drawing), so the touches and the drawing agree ----
-enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_PAD, OVM_AUDIO, OVM_RATE, OVM_RES, OVM_LIMIT, OVM_TOUCH, OVM_RESUME, OVM_EXIT, OVM_TAB, OVM_N };   // OVM_TAB: the tabs' row;
+enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_PAD, OVM_AUDIO,
+       OVM_ROW_FPS, OVM_ROW_SOC, OVM_ROW_BAT, OVM_ROW_DRV, OVM_ROW_GRAPH, OVM_POS, OVM_COLOUR, OVM_OUTLINE, OVM_SIZE, OVM_RESUME, OVM_TAB, OVM_N };   // OVM_TAB: the tabs' row;
+            // OVM_ROW_*: the counter's rows on or off; OVM_POS .. OVM_SIZE: its corner, colour, outline and size, one value on with each press (fpso_step below);
             // OVM_EDIT: the layout editor; OVM_MODE: handheld (performance) or docked (resolution); OVM_EXPORT, OVM_IMPORT: the save manager (saves_android.c);
-            // OVM_PAD: a controller's face buttons by their position or by their label (front_android.c pad_labels); OVM_RATE: the frame step's target, 30 or 60 fps,
-            // for a game whose rewriter stubs step by the host's target; OVM_RES: the render scale of a game with a render-scale stub, in three steps. Both only
-            // for a profile that asks for them (front_android.c dm_menu_rate_available, dm_menu_res_available); OVM_LIMIT: the frame rate limit, every game's
-            // (front_android.c limit_apply: Auto, 60, 40, 30, held through DM_FPS_PIN); OVM_AUDIO: the audio output, a row only where the app has outputs to choose
-            // (dm_menu_audio_available: an external-screen port);
-            // OVM_TOUCH: no row any more (players did not need it): touch passthrough stays (front_android.c g_set_touch: env.txt DM_TOUCH, settings.txt touch=); OVM_EXIT: the button
-            // row's Exit game beside Resume (front_android.c menu_do: the app ends as Android ends it - Activity.finish(), never a hard exit)
-#define OVM_TABS 2
-#define OVM_PER_TAB 8
-static const int OVM_TAB_ITEMS[OVM_TABS][OVM_PER_TAB] = {{OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_PAD, -1, -1, -1},
-                                                        {OVM_FPS, OVM_RATE, OVM_RES, OVM_MODE, OVM_LIMIT, OVM_EXPORT, OVM_IMPORT, OVM_AUDIO}};
-#define OVM_LIMITS 4   // the frame rate limit's values, as the menu steps through them (front_android.c LIMIT_STEPS): Auto, 60, 40, 30 fps
-static const char *const OVM_TAB_NAMES_EN[OVM_TABS] = {"Gamepad", "Game"};
-static const char *const OVM_TAB_NAMES_ZH[OVM_TABS] = {"手柄", "游戏"};
+            // OVM_PAD: a controller's face buttons by their position or by their label (front_android.c pad_labels)
+#define OVM_TABS 4   // (a power of two: ov_menu_item masks the tab)
+#define OVM_PER_TAB 5
+static const int OVM_TAB_ITEMS[OVM_TABS][OVM_PER_TAB] = {{OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_PAD}, {OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_AUDIO},
+                                                         {OVM_ROW_FPS, OVM_ROW_SOC, OVM_ROW_BAT, OVM_ROW_DRV, OVM_ROW_GRAPH}, {OVM_POS, OVM_COLOUR, OVM_OUTLINE, OVM_SIZE, -1}};
+static const char *const OVM_TAB_NAMES_EN[OVM_TABS] = {"Gamepad", "Game", "Counter", "Style"};
+static const char *const OVM_TAB_NAMES_ZH[OVM_TABS] = {"手柄", "游戏", "计数", "样式"};
 #define OVM_TAB_NAMES (dm_ui_zh() ? OVM_TAB_NAMES_ZH : OVM_TAB_NAMES_EN)
-int dm_menu_audio_available(void); int dm_menu_rate_available(void); int dm_menu_res_available(void);
-static inline int ov_menu_shown(int it) { return it >= 0 && !(it == OVM_AUDIO && !dm_menu_audio_available()) && !(it == OVM_RATE && !dm_menu_rate_available()) && !(it == OVM_RES && !dm_menu_res_available()); }
-// The panel's rows: the tabs, a tab's rows (as many for every tab: the panel keeps its size from tab to tab), Resume. Five rows a tab, and more only when a tab shows
-// more (a game with the Frame rate, Resolution or Detail distance row): every other game's panel and rows keep their size
-#define OVM_ROWS_MAX (OVM_PER_TAB + 2)   // for arrays
-static inline int ov_menu_rows(void) {
-    int m = 5;
-    for (int t = 0; t < OVM_TABS; t++) { int n = 0; for (int k = 0; k < OVM_PER_TAB; k++) n += ov_menu_shown(OVM_TAB_ITEMS[t][k]); if (n > m) m = n; }
-    return m + 2;
-}
-#define OVM_ROWS ov_menu_rows()
-static inline int ov_menu_item(int tab, int row) {   // the rows a tab has follow each other: one the device or the game lacks (audio outputs, the frame rate) leaves no gap
-    if (row == 0) return OVM_TAB;
-    if (row == OVM_ROWS - 1) return OVM_RESUME;
-    if (row < 0 || row >= OVM_ROWS) return -1;
-    for (int k = 0, n = 0; k < OVM_PER_TAB; k++) {
-        int it = OVM_TAB_ITEMS[tab & 1][k];
-        if (ov_menu_shown(it) && ++n == row) return it;
+#define OVM_ROWS (OVM_PER_TAB + 2)   // the tabs, a tab's rows (as many for every tab: the panel keeps its size), Resume
+static inline int fpso_step(int o, int item) {   // the options after a press on a menu item: a row's bit flips, the others go to their next value (and round)
+    int r = fpso_rows(o), p = fpso_pos(o), c = fpso_colour(o), l = fpso_outline(o), z = fpso_size(o);
+    switch (item) {
+    case OVM_ROW_FPS: r ^= FPSO_FPS; break;
+    case OVM_ROW_SOC: r ^= FPSO_SOC; break;
+    case OVM_ROW_BAT: r ^= FPSO_BAT; break;
+    case OVM_ROW_DRV: r ^= FPSO_DRV; break;
+    case OVM_ROW_GRAPH: r ^= FPSO_GRAPH; break;
+    case OVM_POS: p = (p + 1) % FPSO_POS_N; break;
+    case OVM_COLOUR: c = (c + 1) % FPSO_COLOUR_N; break;
+    case OVM_OUTLINE: l = (l + 1) % FPSO_OUTLINE_N; break;
+    case OVM_SIZE: z = (z + 1) % FPSO_SIZE_N; break;
+    default: break;
     }
-    return -1;
+    return fpso_pack(r, p, c, l, z);
+}
+int dm_menu_audio_available(void);
+static inline int ov_menu_item(int tab, int row) {
+    int item = row == 0 ? OVM_TAB : row == OVM_ROWS - 1 ? OVM_RESUME : row > 0 && row < OVM_ROWS - 1 ? OVM_TAB_ITEMS[tab & (OVM_TABS - 1)][row - 1] : -1;
+    return item == OVM_AUDIO && !dm_menu_audio_available() ? -1 : item;
 }
 #define OV_MENU_ROW 0.115f   // row height, of the window's height
 #define OV_MENU_W 0.95f      // panel width, of the window's height
@@ -246,15 +233,14 @@ static inline int ov_menu_item(int tab, int row) {   // the rows a tab has follo
 #define OV_OPACITY_MIN 20    // the gamepad's opacity, percent (the Opacity slider, settings.txt opacity=)
 #define OV_OPACITY_MAX 80
 // what the menu shows (-1 = closed): bit 0 the gamepad is on, bit 1 rumble is on, bit 2 docked, bit 3 the frame rate shown, bits 4..7 the highlighted row + 1
-// (0 = none), bit 8 the open tab, bits 9..15 the opacity in percent, bits 20..23 the last export's outcome (OVX_*), bits 24..25 a count of exports (its name
-// changes with each, so two bits do), bits 26..27 the frame rate limit (0..OVM_LIMITS-1: Auto, 60, 40, 30), bit 28 face buttons by label, bit 29 the frame step's
-// target is 60 fps, bits 19 and 30 the Resolution row's step (0 to 2: bit 19 its low bit; bit 31 stays clear, a state is never negative). Bit 16: the text entry's
-// panel instead (its edit count below); bit 17: the layout editor (OVE_ST_* below); bit 18: the save picker (OVS_ST)
+// (0 = none), bit 8 the open tab, bits 9..15 the opacity in percent, bit 19 the open tab's second bit (the Counter and Style tabs), bits 29..30 a count of the counter options' changes (dm_fps_opts: the panel
+// shows them), bits 20..23 the last export's outcome (OVX_*), bits 24..27 a count of exports (its name
+// changes with each). Bit 16: the text entry's panel instead (its edit count below); bit 17: the layout editor (OVE_ST_* below); bit 18: the save picker (OVS_ST)
 #define OVT_ST 0x10000   // the mode bits of dm_menu_state, one each: OVT_ST the text entry, OVE_ST the layout editor, OVS_ST the save picker (tests/test_menu_bits.py)
 int dm_menu_state(void);
 enum { OVX_IDLE, OVX_BUSY, OVX_DONE, OVX_NOSAVE, OVX_FAILED };   // Export save: the button; copying; the export's name; the game has not saved yet; failed
 int dm_save_note(char *out, int cap);   // front_android.c: the outcome (OVX_*) and the last export's name, or why it failed
-static inline float ov_menu_scale(void) { float s = dm_overlay_scale(), fit = 0.92f / (OVM_ROWS_MAX * OV_MENU_ROW + 2 * OV_MENU_PAD); return s < fit ? s : fit; }   // (the most rows: the letters keep one size whichever rows a game shows)
+static inline float ov_menu_scale(void) { float s = dm_overlay_scale(), fit = 0.92f / (OVM_ROWS * OV_MENU_ROW + 2 * OV_MENU_PAD); return s < fit ? s : fit; }
 float dm_menu_row_need(float rh);   // gfx_vk_present.c: the width (window pixels) the menu's rows need at its letters' size, rows rh high (0: none known)
 // the panel: OV_MENU_W window heights wide, or as wide as its rows need (larger letters on a screen that has the room: gfx_vk_present.c ovm_letters), never more than
 // 0.96 of the window's width; the touches (front_android.c) and the drawing both place it here
@@ -275,39 +261,6 @@ static inline int ov_menu_row_at(float x, float y, float W, float H) {   // the 
     return i >= 0 && i < OVM_ROWS ? i : -1;
 }
 static inline int ov_menu_tab_at(float x, const float p[4]) { float r[4]; ov_menu_rowrect(p, 0, r); int t = (int)((x - r[0]) / (r[2] / OVM_TABS)); return t < 0 ? 0 : t >= OVM_TABS ? OVM_TABS - 1 : t; }
-// The button row (the last): Exit game in its left half, Resume in its right (front_android.c menu_touch, gfx_vk_present.c ov_menu_panel split it at the same midline)
-static inline int ov_menu_exit_at(float x, float y, float W, float H) {   // (x, y) on Exit game's half
-    float p[4]; ov_menu_rect(W, H, p);
-    return ov_menu_row_at(x, y, W, H) == OVM_ROWS - 1 && x < p[0] + p[2] / 2;
-}
-// Exit game ends the game only when held OV_EXIT_HOLD_NS (a finger on its half, or A with it chosen): a tap, or a slip of the finger onto it, never does. While held its
-// half fills red from the left and reads "Hold to exit"; let go before the end, or the finger off its half, and it is as it was. A tap (let go within OV_EXIT_TAP_NS) shows
-// "Hold to exit" for OV_EXIT_HINT_NS instead. Times: CLOCK_MONOTONIC ns (front_android.c runs it, a thread of its own times the hold)
-#define OV_EXIT_HOLD_NS 1500000000ll
-#define OV_EXIT_TAP_NS 500000000ll
-#define OV_EXIT_HINT_NS 1500000000ll
-enum { OV_EXIT_IDLE, OV_EXIT_HINT, OV_EXIT_HOLDING, OV_EXIT_GOING };   // what the half shows: Exit game, Hold to exit (the tap's hint, or held), Exiting...
-typedef struct { int64_t t0, hint; int going; } ov_exit_hold;   // t0: held since (0 not held); hint: the hint shows until; going: the hold completed
-static inline void ov_exit_press(ov_exit_hold *h, int64_t now) { if (!h->going) { h->t0 = now ? now : 1; h->hint = 0; } }
-static inline void ov_exit_release(ov_exit_hold *h, int64_t now) {   // let go before the end: a tap shows the hint, a longer hold is just let go
-    if (!h->t0 || h->going) return;
-    h->hint = now - h->t0 < OV_EXIT_TAP_NS ? now + OV_EXIT_HINT_NS : 0; h->t0 = 0;
-}
-static inline void ov_exit_leave(ov_exit_hold *h) { if (!h->going) { h->t0 = 0; h->hint = 0; } }   // the finger off the half, the menu closed: as it was
-// the state now and how far the hold is (0..1); OV_EXIT_GOING once, when the hold completes (the caller ends the game)
-static inline int ov_exit_tick(ov_exit_hold *h, int64_t now, float *f) {
-    *f = 0;
-    if (h->going) { *f = 1; return OV_EXIT_GOING; }
-    if (h->t0) {
-        int64_t d = now - h->t0; if (d < 0) d = 0;
-        if (d >= OV_EXIT_HOLD_NS) { h->going = 1; h->t0 = 0; *f = 1; return OV_EXIT_GOING; }
-        *f = (float)d / OV_EXIT_HOLD_NS; return OV_EXIT_HOLDING;
-    }
-    if (h->hint && now < h->hint) return OV_EXIT_HINT;
-    h->hint = 0; return OV_EXIT_IDLE;
-}
-int dm_menu_exit(float *f, int *chosen);   // front_android.c: the half's state (OV_EXIT_*), the hold's progress, whether a controller has it chosen (else Resume)
-unsigned dm_menu_exit_ver(void);           // changes with them (the panel is drawn again)
 // the Opacity slider's track in its row (x, y of its left end's centre line, width): the right part of the row, room for the value after it
 static inline void ov_menu_track(const float p[4], int row, float t[3]) { float r[4]; ov_menu_rowrect(p, row, r); t[0] = r[0] + r[2] * 0.40f; t[1] = r[1] + r[3] / 2; t[2] = r[2] * 0.44f; }
 static inline int ov_menu_track_value(float x, const float p[4], int row) {   // the opacity a finger at x sets, whole 5 percents
@@ -349,7 +302,7 @@ static inline int ov_ed_button_at(float x, float y, const float p[4], int first,
 #define OVS_ST 0x40000
 enum { OVS_EMPTY, OVS_TITLE, OVS_ITEM, OVS_NOTE, OVS_BUTTON, OVS_BACK };   // a row: nothing; the title (left) and the page (right); a save (its name, its size);
 typedef struct { int style; char left[80], right[40]; } ov_srow;            // a line of text; a button (the import); Back or Cancel, centred as Resume is
-int dm_save_rows(ov_srow rows[OVM_ROWS_MAX]);   // front_android.c: the picker's rows, 0 when it is not open
+int dm_save_rows(ov_srow rows[OVM_ROWS]);   // front_android.c: the picker's rows, 0 when it is not open
 
 // ---- the text entry's keyboard (front_android.c front_text_input, drawn by gfx_vk_present.c ov_text_panel), in the pause menu's panel rectangle ----
 // Four rows of ten character keys and a row of four wide ones; p is the panel's rectangle (x, y, width, height: the window's for touches, the raster's for drawing).

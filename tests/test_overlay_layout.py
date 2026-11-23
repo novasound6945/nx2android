@@ -18,11 +18,12 @@ class OverlayLayout(unittest.TestCase):
             self.skipTest('a C compiler is needed for the layout geometry check')
         harness = r'''
 #include <assert.h>
+#include <string.h>
 #include "overlay_layout.h"
-static int custom_faces, custom_a, custom_x, hidden_ctl = -1, audio_available, rate_available, res_available;
+#include "menu_exit.h"
+static int custom_faces, custom_a, custom_x, hidden_ctl = -1, audio_available, ui_zh;
+int dm_ui_zh(void) { return ui_zh; }
 int dm_menu_audio_available(void) { return audio_available; }
-int dm_menu_rate_available(void) { return rate_available; }
-int dm_menu_res_available(void) { return res_available; }
 static float row_need;   // gfx_vk_present.c dm_menu_row_need: the width the menu's rows need at its letters' size (0: the panel's own)
 float dm_menu_row_need(float rh) { (void)rh; return row_need; }
 float dm_overlay_scale(void) { return 1; }
@@ -92,29 +93,30 @@ int main(void) {
     assert(ov_drag_pos(1100, 600, 1013, 50) == 506.5f);
     assert(ov_drag_pos(1100, 505, 1013, 50) == 508);
 
-    // the Gamepad tab's rows end with the face buttons' (front_android.c pad_labels); the Game tab's: the frame rate counter, the mode, the frame rate limit under it
-    // (front_android.c limit_apply), the save's export and import, and the audio output's row only where the app has outputs to choose
-    assert(OVM_ROWS == 7 && ov_menu_item(0, OVM_ROWS - 2) == OVM_PAD && ov_menu_item(0, OVM_ROWS - 3) == OVM_RUMBLE && ov_menu_item(1, 5) == OVM_IMPORT && ov_menu_item(1, OVM_ROWS - 2) == OVM_IMPORT);   // no audio outputs: the row is left out (and no Touch input row: five rows a tab)
-    assert(ov_menu_item(1, 1) == OVM_FPS && ov_menu_item(1, 2) == OVM_MODE && ov_menu_item(1, 3) == OVM_LIMIT && ov_menu_item(1, 4) == OVM_EXPORT && ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
-    float fit = ov_menu_scale();
+    assert(ov_menu_item(0, OVM_ROWS - 2) == OVM_PAD && ov_menu_item(1, OVM_ROWS - 2) == -1);
+    assert(ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
     audio_available = 1;
-    assert(OVM_ROWS == 8 && ov_menu_item(1, OVM_ROWS - 2) == OVM_AUDIO && ov_menu_scale() <= fit);
-    rate_available = 1;   // rows follow each other: the frame rate row takes its place, and the panel has a row more
-    assert(OVM_ROWS == 9 && ov_menu_item(1, 2) == OVM_RATE && ov_menu_item(1, 3) == OVM_MODE && ov_menu_item(1, 4) == OVM_LIMIT && ov_menu_item(1, OVM_ROWS - 2) == OVM_AUDIO && ov_menu_item(0, 7) == -1);
-    res_available = 1;
-    assert(OVM_ROWS == 10 && ov_menu_item(1, 2) == OVM_RATE && ov_menu_item(1, 3) == OVM_RES && ov_menu_item(1, 4) == OVM_MODE && ov_menu_item(1, OVM_ROWS - 2) == OVM_AUDIO);
-    assert(ov_menu_scale() <= fit && ov_menu_item(0, OVM_ROWS - 1) == OVM_RESUME);
-    rate_available = 0;
-    assert(OVM_ROWS == 9 && ov_menu_item(1, 2) == OVM_RES && ov_menu_item(1, 3) == OVM_MODE);
-    rate_available = 1;
-    assert(OVM_ROWS == 10 && ov_menu_item(1, 2) == OVM_RATE && ov_menu_item(1, 4) == OVM_MODE && ov_menu_item(1, 5) == OVM_LIMIT && ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
-    assert(OVM_ROWS == OVM_ROWS_MAX && ov_menu_item(1, 6) == OVM_EXPORT && ov_menu_item(1, 7) == OVM_IMPORT && ov_menu_item(1, 8) == OVM_AUDIO);   // every row a game can have: no cloud rows (the launcher's Cloud save page has them)
-    {   // every item has one row in one tab, before Resume (gfx_vk_present.c ov_menu_panel sizes the letters by the items before OVM_RESUME)
-        int seen[OVM_N] = {0};
-        for (int t = 0; t < OVM_TABS; t++) for (int row = 1; row < OVM_ROWS - 1; row++) { int it = ov_menu_item(t, row); if (it >= 0) { assert(it < OVM_RESUME); seen[it]++; } }
-        for (int it = 0; it < OVM_RESUME; it++) assert(seen[it] == (it != OVM_TOUCH));   // (Touch input has no row: front_android.c g_set_touch stays, from env.txt and settings.txt)
+    assert(ov_menu_item(1, OVM_ROWS - 2) == OVM_AUDIO);
+    ui_zh = 0;
+    assert(!strcmp(OVM_TAB_NAMES[0], "Gamepad") && !strcmp(OVM_TAB_NAMES[1], "Game") && !strcmp(OVM_TAB_NAMES[2], "Counter") && !strcmp(OVM_TAB_NAMES[3], "Style"));
+    assert(!strcmp(FPSO_POS_NAMES[0], "Top left") && !strcmp(FPSO_SIZE_NAMES[3], "Extra large"));
+    assert(!strcmp(TR("Resume", "继续游戏"), "Resume"));
+    ui_zh = 1;
+    assert(!strcmp(OVM_TAB_NAMES[0], "手柄") && !strcmp(OVM_TAB_NAMES[1], "游戏") && !strcmp(OVM_TAB_NAMES[2], "计数") && !strcmp(OVM_TAB_NAMES[3], "样式"));
+    assert(!strcmp(FPSO_POS_NAMES[0], "左上") && !strcmp(FPSO_SIZE_NAMES[3], "特大"));
+    assert(!strcmp(TR("Resume", "继续游戏"), "继续游戏"));
+    ui_zh = 0;
+    {   // (this fork) Exit game: the button row's left half (menu_exit.h), Resume the right
+        float W = 1920, H = 1080, p[4], r[4]; ov_menu_rect(W, H, p); ov_menu_rowrect(p, OVM_ROWS - 1, r);
+        float cy = r[1] + r[3] / 2;
+        assert(ov_menu_exit_at(p[0] + p[2] * 0.25f, cy, W, H) && !ov_menu_exit_at(p[0] + p[2] * 0.75f, cy, W, H));
+        ov_menu_rowrect(p, 1, r); assert(!ov_menu_exit_at(p[0] + p[2] * 0.25f, r[1] + r[3] / 2, W, H));   // (another row)
+        ov_exit_hold h = {0}; float f;
+        ov_exit_press(&h, 1000); assert(ov_exit_tick(&h, 1000 + OV_EXIT_HOLD_NS / 2, &f) == OV_EXIT_HOLDING && f > 0.4f && f < 0.6f);
+        ov_exit_release(&h, 1000 + OV_EXIT_HOLD_NS / 2); assert(ov_exit_tick(&h, 1000 + OV_EXIT_HOLD_NS, &f) == OV_EXIT_IDLE);   // let go early: nothing ends
+        ov_exit_press(&h, 5000); ov_exit_release(&h, 5000 + OV_EXIT_TAP_NS / 2); assert(ov_exit_tick(&h, 5000 + OV_EXIT_TAP_NS, &f) == OV_EXIT_HINT);   // a tap: the hint
+        ov_exit_press(&h, 9000); assert(ov_exit_tick(&h, 9000 + OV_EXIT_HOLD_NS, &f) == OV_EXIT_GOING && h.going);   // held to the end
     }
-    assert(OVM_LIMITS == 4 && !(((OVM_LIMITS - 1) << 26) & (1 << 24 | 1 << 25 | 1 << 28)));   // dm_menu_state's bits 26..27: clear of the export count's (24), touch passthrough's (25) and bit 28
     {   // the panel widens for rows that need it (larger letters), as far as 0.96 of the window, and the rows' touches follow it
         float W = 1920, H = 1080, p[4], q[4], u = ov_menu_scale() * H; ov_menu_rect(W, H, p);
         assert(fabsf(p[2] - OV_MENU_W * u) < 0.01f);

@@ -263,7 +263,7 @@ DM_TOUCH_DOCKED	str		profile	start	hle_touch.c	touch in docked mode: "screen" = 
 DM_TOUCH_HAPTICS	int		debug,ios	?	DmGamepad.m	
 DM_TOUCH_LOG	str		debug	?	hle_touch.c front_android.c	DM_TOUCH_LOG=1 also logs each gesture entry (up to 500 lines)
 DM_UDC_SELFTEST	str		debug,ios	?	nvn_mtl.m	
-DM_UI_LANG	str		app	start	overlay_layout.h	zh or en: the overlay's words (pause menu, layout editor, save picker) instead of the device language's
+DM_UI_LANG	str		app	start	front_android.c	overlay UI language: unset follows the device locale (persist.sys.locale / ro.product.locale); any value starting with "z" ("zh", "zh-CN", "zh-TW") gives Chinese, anything else English. The Chinese strings are Simplified, so every zh* locale gets Simplified Chinese
 DM_VK_ALPHA_TEST	bool	1	profile	live	gfx_vk_exec.c	NVN's alpha test in fragment shader variants (pipeline key atest); 0 draws without it, as before
 DM_VK_ASYNC_PARTS	bool	1	profile	live	gfx_vk_exec.c gfx_vk_gpl.inc	with graphics pipeline libraries, a shader part a draw needs and nobody made yet is made on the background pipeline threads and the draw is left out until it is ready (the same draws as DM_VK_ASYNC_PIPE leaves out; nothing when that is 0); 0 = made at the draw, as before
 DM_VK_ASYNC_PIPE	bool	1	profile	live	gfx_vk_exec.c	0 = new pipelines are built on the replay thread, not in the background
