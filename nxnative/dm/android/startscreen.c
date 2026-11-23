@@ -665,24 +665,29 @@ static void draw_cloudpage(stv_canvas *c, const stv_view *v) {
 
 // the app's page: one column of 720 (AppSettings.dc.html), or where that is too tall for the window, two (the switch at the left, the data's card, its buttons and the
 // note at the right; each half of the page's width)
-typedef struct { float x0, w, y0, lab1, lab2, lab2x, labw, note_x, note_y, note_w, sw[4], loc[4], card[4], btn[2][4]; } alay;   // loc: the data's place, under the switch
+typedef struct { float x0, w, y0, lab1, lab2, lab2x, lab3, labw, note_x, note_y, note_w, sw[4], loc[4], card[4], btn[2][4], game[3][4]; } alay;   // loc: the data's place, under the switch;
+                                                                                                                                                // game: the game's rows, under it (lab3 their title)
 static float ap_sh(void) { return 40 + LHN * 18 + 4 + 2 * 1.5f * 14; }
 static float ap_data(void) { return 40 + 3 * LHN * 15 + 2 * 12 + 10 + 56 + 10 + 2 * 1.5f * 13; }   // the data's card, the buttons, the note's two lines
-static float ap_one(void) { return PG_TITLE + LHN * 14 + 10 + 2 * ap_sh() + 12 + 28 + LHN * 14 + 10 + ap_data(); }
-static float ap_two(void) { return PG_TITLE + LHN * 14 + 10 + fmaxf(2 * ap_sh() + 12, ap_data()); }
-static box ap_box(int w, int h) {
+#define AP_GROW 60   // a game's row: its height, 10 apart
+static float ap_game(int n) { return n > 0 ? 28 + LHN * 14 + 10 + n * AP_GROW + (n - 1) * 10 : 0; }   // the game's rows and their title, under the data's place
+static float ap_one(int n) { return PG_TITLE + LHN * 14 + 10 + 2 * ap_sh() + 12 + ap_game(n) + 28 + LHN * 14 + 10 + ap_data(); }
+static float ap_two(int n) { return PG_TITLE + LHN * 14 + 10 + fmaxf(2 * ap_sh() + 12 + ap_game(n), ap_data()); }
+static box ap_box(int w, int h, int n) {   // n: the game's rows
     box b = box_of(w, h);
-    return b.H >= 32 + ap_one() + PG_FOOT ? b : box_need(w, h, 880 + 64, 32 + ap_two() + PG_FOOT);
+    return b.H >= 32 + ap_one(n) + PG_FOOT ? b : box_need(w, h, 880 + 64, 32 + ap_two(n) + PG_FOOT);
 }
-static alay ap_layout(box b) {
-    alay L; memset(&L, 0, sizeof L);
-    int two = b.H < 32 + ap_one() + PG_FOOT; float sh = ap_sh(), ch = 40 + 3 * LHN * 15 + 2 * 12, y, cw, cx;
-    if (!two) { L.w = cw = 720; L.x0 = cx = (b.W - 720) / 2; L.y0 = pg_top(b, ap_one()); L.labw = 720; }
-    else { L.w = fminf(1040, b.W - 64); L.x0 = (b.W - L.w) / 2; cw = L.labw = (L.w - 40) / 2; cx = L.x0 + cw + 40; L.y0 = pg_top(b, ap_two()); }
+static alay ap_layout(box b, int n) {
+    alay L; memset(&L, 0, sizeof L); n = n < 0 ? 0 : n > 3 ? 3 : n;
+    int two = b.H < 32 + ap_one(n) + PG_FOOT; float sh = ap_sh(), ch = 40 + 3 * LHN * 15 + 2 * 12, y, cw, cx;
+    if (!two) { L.w = cw = 720; L.x0 = cx = (b.W - 720) / 2; L.y0 = pg_top(b, ap_one(n)); L.labw = 720; }
+    else { L.w = fminf(1040, b.W - 64); L.x0 = (b.W - L.w) / 2; cw = L.labw = (L.w - 40) / 2; cx = L.x0 + cw + 40; L.y0 = pg_top(b, ap_two(n)); }
     y = L.y0 + PG_TITLE; L.lab1 = y; y += LHN * 14 + 10;
     L.sw[0] = L.x0; L.sw[1] = y; L.sw[2] = cw; L.sw[3] = sh;
     L.loc[0] = L.x0; L.loc[1] = y + sh + 12; L.loc[2] = cw; L.loc[3] = sh;
-    if (!two) { y += 2 * sh + 12 + 28; L.lab2 = y; y += LHN * 14 + 10; } else L.lab2 = L.lab1;
+    { float gy = y + 2 * sh + 12 + 28; L.lab3 = gy; gy += LHN * 14 + 10;   // the game's rows, in the left column (under the data's place)
+      for (int i = 0; i < n; i++) { L.game[i][0] = L.x0; L.game[i][1] = gy + i * (AP_GROW + 10); L.game[i][2] = cw; L.game[i][3] = AP_GROW; } }
+    if (!two) { y += 2 * sh + 12 + ap_game(n) + 28; L.lab2 = y; y += LHN * 14 + 10; } else L.lab2 = L.lab1;
     L.lab2x = cx;
     L.card[0] = cx; L.card[1] = y; L.card[2] = cw; L.card[3] = ch; y += ch + 10;
     float bw = (cw - 10) / 2;   // (the mock-up's 355, 10 apart)
@@ -691,7 +696,7 @@ static alay ap_layout(box b) {
     return L;
 }
 static void draw_apppage(stv_canvas *c, const stv_view *v) {
-    box b = ap_box(c->w, c->h); float s = b.s; const stv_apppage *p = &v->ap; alay L = ap_layout(b);
+    const stv_apppage *p = &v->ap; box b = ap_box(c->w, c->h, p->ngame); float s = b.s; alay L = ap_layout(b, p->ngame);
     background(c, 0, 0, 0, 0, 0, 0, 0);
     page_title(c, p->title, v->name, L.x0, L.w, L.y0, s);
     line(c, p->label[0], L.x0 * s, L.lab1 * s, 0, 0, 14 * s, DIM, LEFT, L.labw * s, 0);
@@ -707,6 +712,13 @@ static void draw_apppage(stv_canvas *c, const stv_view *v) {
     float vw = p->loc_val[0] ? line(c, p->loc_val, (q[0] + q[2] - 24) * s, q[1] * s, q[3] * s, 1, 17 * s, p->loc_off ? DIM2 : ACC, RIGHT, q[2] * 0.4f * s, 0) / s : 0;
     line(c, p->loc, (q[0] + 24) * s, (q[1] + 20) * s, 0, 0, 18 * s, p->loc_off ? DIM2 : INK, LEFT, (q[2] - 48 - vw - 20) * s, 0);
     for (int i = 0; i < 2; i++) line(c, p->loc_desc[i], (q[0] + 24) * s, (q[1] + 20 + LHN * 18 + 4 + i * 21) * s, 21 * s, 0, 14 * s, DIM, LEFT, (q[2] - 48 - vw - 20) * s, 0);
+    if (p->ngame > 0) line(c, p->glabel, L.x0 * s, L.lab3 * s, 0, 0, 14 * s, DIM, LEFT, L.labw * s, 0);
+    for (int i = 0; i < p->ngame && i < 3; i++) {   // a game's row: its name (17), its value at the right (bold, the accent), as the data's place shows where it is
+        const float *g = L.game[i];
+        if (p->sel == 4 + i) edged(c, s, g, 16, 2, ACC, CARD); else rrect(c, g[0] * s, g[1] * s, g[2] * s, g[3] * s, 16 * s, CARD, 1);
+        float vw = line(c, p->gval[i], (g[0] + g[2] - 24) * s, g[1] * s, g[3] * s, 1, 17 * s, ACC, RIGHT, g[2] * 0.45f * s, 0) / s;
+        line(c, p->gname[i], (g[0] + 24) * s, g[1] * s, g[3] * s, 0, 17 * s, INK, LEFT, (g[2] - 48 - vw - 20) * s, 0);
+    }
     line(c, p->label[1], L.lab2x * s, L.lab2 * s, 0, 0, 14 * s, DIM, LEFT, L.labw * s, 0);
     kv_card(c, s, L.card[0], L.card[1], L.card[2], L.card[3], p->nrow > 3 ? 3 : p->nrow, p->key, p->val, p->col, 24);
     for (int i = 0; i < 2; i++) {
@@ -792,14 +804,14 @@ static void draw_linkpage(stv_canvas *c, const stv_view *v, double t) {
     if (p->keys[0]) foot_at(c, p->keys, b, 28, 14);
 }
 int stv_page_hit(const stv_view *v, int w, int h, float x, float y) {
-    box b = v->screen == STV_SCREEN_CLOUD ? cp_box(w, h) : v->screen == STV_SCREEN_APP ? ap_box(w, h) : box_of(w, h);   // (each page's, as it is drawn)
+    box b = v->screen == STV_SCREEN_CLOUD ? cp_box(w, h) : v->screen == STV_SCREEN_APP ? ap_box(w, h, v->ap.ngame) : box_of(w, h);   // (each page's, as it is drawn)
     if (v->screen == STV_SCREEN_LINK) b = box_of(w, h);
-    float X = x / b.s, Y = y / b.s; const float *r[6]; int n = 0;
+    float X = x / b.s, Y = y / b.s; const float *r[8]; int n = 0;
     llay ll; clay cl; alay al; float lr[2][4];
     if (v->screen == STV_SCREEN_LAUNCHER) { ll = ln_layout(b, wide_of(w, h)); for (int i = 0; i < 4; i++) r[n++] = ll.r[i]; }
     else if (v->screen == STV_SCREEN_CLOUD) { cl = cp_layout(&v->cp, b); for (int i = 0; i < 6; i++) r[n++] = cl.r[i]; }
     else if (v->screen == STV_SCREEN_LINK) { int k = lk_buttons(&v->lk, b, lr); for (int i = 0; i < k; i++) r[n++] = lr[i]; }
-    else if (v->screen == STV_SCREEN_APP) { al = ap_layout(b); r[n++] = al.sw; r[n++] = al.btn[0]; r[n++] = al.btn[1]; r[n++] = al.loc; }
+    else if (v->screen == STV_SCREEN_APP) { al = ap_layout(b, v->ap.ngame); r[n++] = al.sw; r[n++] = al.btn[0]; r[n++] = al.btn[1]; r[n++] = al.loc; for (int i = 0; i < v->ap.ngame && i < 3; i++) r[n++] = al.game[i]; }
     for (int i = 0; i < n; i++) if (X >= r[i][0] && X < r[i][0] + r[i][2] && Y >= r[i][1] && Y < r[i][1] + r[i][3]) return i;
     return -1;
 }

@@ -272,6 +272,16 @@ int main(int argc, char **argv) {
     snprintf(ap->loc_val, sizeof ap->loc_val, "SD 카드"); ap->sel = 3; stv_draw(&c, &v, 0); save(&c, argv[4], "15a-app-settings-on-sd");
     snprintf(ap->loc_val, sizeof ap->loc_val, "내부 저장소"); snprintf(ap->loc_desc[1], sizeof ap->loc_desc[1], "SD 카드 없음"); ap->loc_off = 1; stv_draw(&c, &v, 0); save(&c, argv[4], "15e-app-settings-no-sd");
     ap->loc_off = 0; ap->sel = -1;
+    // 15f, 15g. the game's settings (datasync_android.c gopt_view): the frame rate limit alone (a profile without the frame rate and resolution rows), and all three
+    snprintf(ap->glabel, sizeof ap->glabel, "게임 · 다음에 시작할 때부터 적용돼요");
+    snprintf(ap->gname[0], sizeof ap->gname[0], "프레임 제한"); snprintf(ap->gval[0], sizeof ap->gval[0], "자동 · 60 fps");
+    snprintf(ap->gname[1], sizeof ap->gname[1], "프레임 레이트"); snprintf(ap->gval[1], sizeof ap->gval[1], "60 fps");
+    snprintf(ap->gname[2], sizeof ap->gname[2], "해상도"); snprintf(ap->gval[2], sizeof ap->gval[2], "높음");
+    ap->ngame = 1; ap->sel = 4; stv_draw(&c, &v, 0); save(&c, argv[4], "15f-app-settings-game");
+    touch_check(&c, &v, 5, &ap->sel, 5);
+    ap->ngame = 3; ap->sel = 6; stv_draw(&c, &v, 0); save(&c, argv[4], "15g-app-settings-game-three");
+    touch_check(&c, &v, 7, &ap->sel, 7);
+    ap->ngame = 0; ap->sel = -1;
     // 15b-d. the move: asked, under way, done (datasync_android.c move_view's words)
     { dm_cloud_view mq; memset(&mq, 0, sizeof mq); mq.ask = 1; mq.urgent = 1; mq.progress = -1; mq.count_permille = -1; mq.nbtn = 2; mq.sel = 0;
       snprintf(mq.title, sizeof mq.title, "게임 데이터를 SD 카드로 옮길까요?");

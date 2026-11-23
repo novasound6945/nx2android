@@ -73,8 +73,8 @@ DM_MEM_CAP_GB	str		debug	?	hle_nvn.c
 DM_MEM_FLOOR_MB	int	1536	profile	start	gfx_vk_core.c	MB of MemAvailable under which the backend is under memory pressure (idle images and pipelines go, the prewarm stops); 0 = never
 DM_MEM_TRIM_MB	int	800	profile	start	gfx_vk_core.c	MB of MemAvailable under which the backend trims (every empty block, kept pool buffers, idle pipelines, the allocator's free pages); 0 = only on onLowMemory
 DM_MENU_BUTTON	bool	1	porter	start	front_android.c	0 = no menu button on the on-screen gamepad (porter --no-menu-button)
-DM_MENU_RATE	bool		profile	start	front_android.c	the pause menu's Frame rate row (30 / 60), for a build with a frame step page
-DM_MENU_RES	str		profile	start	front_android.c	<low>:<auto>:<high>: the pause menu's Resolution row, the render scales its three steps hand the build's render-scale stub (0.5:1.0:0.9)
+DM_MENU_RATE	bool		profile	start	front_android.c datasync_android.c	the launcher's App settings' Frame rate row (settings.txt rate=: 30 / 60), for a build with a frame step page
+DM_MENU_RES	str		profile	start	front_android.c datasync_android.c	<low>:<auto>:<high>: the launcher's App settings' Resolution row (settings.txt res=), the render scales its three steps hand the build's render-scale stub (0.5:1.0:0.9)
 DM_METAL_HUD	str		debug,ios	?	front_mac.m front_ios.m main.m	Apple's HUD over the game: frame rate, frame and GPU time, memory
 DM_MOTION	bool		debug	start	front_android.c	the device's gyroscope no longer moves player 1's six-axis sensor (`dm_motion_set`, `host/hle_hid.c`; aiming by motion, as Tears of the Kingdom's bow): accelerometer-only shaking still generates the fixed side-to-side motion. On by default when the device has a gyroscope; automatic shaking still ove
 DM_MOTION_LOG	bool		debug	start	front_android.c	logs the mapped motion once a second (`front end: motion (rotation …) acc … G, gyro … rev/s`): lying flat face up reads acc ≈ (0, 0, −1); lying flat, raising the top edge reads gyro x positive and turning left gyro z positive. Each change of the display's rotation logs `front end: display rotation …

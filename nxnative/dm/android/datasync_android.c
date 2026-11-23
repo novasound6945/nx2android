@@ -255,6 +255,8 @@ static struct {
     char name[160], version[128], checked[48];
     stv_step step[STV_NSTEPS];
 } V;   // under S.mu
+// the game's settings on the App page (launcher_gopts.inc): its rows (id: GOPT_*) and their values
+typedef struct { int loaded, n, id[3], limit, rate, res, rate_on, res_on, env_rate; char pin[16]; } gopt_t;
 // the launcher (its code at the end of this file), under S.mu
 typedef struct {
     int on, quick, page, sel[4];              // shown (not start at once, or − pressed); the setting; the page (0 the launcher, 1 Cloud save, 2 App settings, 3 the device link), each page's choice
@@ -266,6 +268,7 @@ typedef struct {
     int vrun, vbad; ds_progress vpr; char amsg[160];        // Check the data again runs, failed; its progress; the App page's last outcome
     int data_rc, data_net, data_off, data_known, has_server, verify_ok, last_act; int64_t checked_t, shader_bytes; uint64_t data_bytes;
     int mvq, mvsel, moving; int64_t mv_done_t;   // the data's place: its question asked (Move / Cancel), its choice; a move runs or ended (the app ends): no Start
+    gopt_t gs;                                   // the App page's game settings (launcher_gopts.inc), read as the page opens
 } lnr_t;
 static lnr_t LN = {.gpipe = {-1, -1}, .data_rc = -1};
 static int lnr_input(const AInputEvent *e);
@@ -280,6 +283,7 @@ void dm_start_step(int step, int state, const char *note) {
     pthread_mutex_lock(&S.mu); V.step[step].state = state; snprintf(V.step[step].note, sizeof V.step[step].note, "%s", note ? note : ""); pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
 }
 static const char *L(const char *ko, const char *en) { return korean() ? ko : en; }
+#include "launcher_gopts.inc"   // the App page's game settings (settings.txt limit=, rate=, res=)
 static uint8_t *asset_all(const char *name, size_t *n) {
     AAssetManager *am = S.act ? S.act->assetManager : NULL; AAsset *a = am ? AAssetManager_open(am, name, AASSET_MODE_STREAMING) : NULL;
     if (!a) return NULL;
@@ -566,6 +570,7 @@ static void build_launcher(stv_view *v, const snap_t *x, const stv_step *steps, 
                                                                                                                : L("이 앱은 데이터 서버가 없어 다시 확인할 수 없어요.", "This app has no data server to check against."));
         else snprintf(p->note, sizeof p->note, "%s", L("데이터 다시 확인은 파일을 하나씩 검사해 망가진 것만 다시 받아요.", "Checking the data again reads every file and downloads only the damaged ones."));
         snprintf(p->keys, sizeof p->keys, "%s", L("↑↓←→ 고르기 · A 선택 · B 돌아가기", "↑↓←→ choose · A select · B back")); p->sel = n->sel[2];
+        gopt_view(p, &n->gs);
         v->anim = n->vrun;
     }
     (void)b;
@@ -1389,7 +1394,7 @@ static void lnr_activate(int page, int sel, int touch) {   // A (or a touch) on 
         int ready = lnr_ready(&LN, &ci);   // (Start and Play without the sync are off until then: nothing happens)
         if (sel == 0 && ready) { LN.want = 1; LN.nosync = 1; act = 1; }
         else if (sel == 1 && !ci.starting) { LN.page = 1; LN.sel[1] = cp_link_of(&ci) == 1 ? 5 : ci.mode >= 0 && ci.mode <= 2 ? ci.mode : 0; LN.last_act = 0; LN.unarm = 0; }
-        else if (sel == 2) { LN.page = 2; LN.sel[2] = 0; LN.amsg[0] = 0; }
+        else if (sel == 2) { LN.page = 2; LN.sel[2] = 0; LN.amsg[0] = 0; gopt_load_locked(&LN.gs); }
         else if (sel == 3 && ready) { LN.want = 1; LOG("launcher: Start"); }
     } else if (page == 1) {
         if (sel <= 2) act = 2;
@@ -1407,6 +1412,7 @@ static void lnr_activate(int page, int sel, int touch) {   // A (or a touch) on 
         else if (sel == 1 && verify_ok_locked(&ci)) { act = 4; LN.vrun = 1; LN.amsg[0] = 0; memset(&LN.vpr, 0, sizeof LN.vpr); }
         else if (sel == 2 && LN.shader_bytes > 0 && V.phase != PH_PREP) act = 5;
         else if (sel == 3 && lnr_ready(&LN, &ci) && V.phase == PH_NONE) { dm_storage_info si; dm_storage_info_get(&si); if (si.has_sd) { LN.mvq = 1; LN.mvsel = 0; LN.amsg[0] = 0; } }
+        else if (sel >= 4) gopt_step_locked(&LN.gs, sel - 4);   // a game setting's next value (launcher_gopts.inc)
     }
     pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
     if (act == 1) { LOG("launcher: Play without the sync"); if (dm_cloud_play_unsynced() < 0) { pthread_mutex_lock(&S.mu); LN.nosync = 0; pthread_mutex_unlock(&S.mu); } }
@@ -1444,18 +1450,20 @@ static void lnr_key(int k) {
         else if (k == K_A && (two || lkk.state == DM_LINK_DONE)) go = two ? s0 : 0;
         else if (k == K_B) go = lkk.state == DM_LINK_DONE ? 0 : 1;
     } else {
-        // the switch (0) over the data's place (3), the data's buttons (1, 2) under or right of them
-        if (k == K_UP) *sel = s0 == 1 || s0 == 2 ? 3 : 0; else if (k == K_DOWN) *sel = s0 == 0 ? 3 : s0 == 3 ? 1 : s0;
-        else if (k == K_LEFT) *sel = s0 == 2 ? 1 : s0 == 1 ? 3 : s0; else if (k == K_RIGHT) *sel = s0 == 1 ? 2 : s0 == 0 || s0 == 3 ? 1 : s0;
+        // the switch (0) over the data's place (3) over the game's rows (4..), the data's buttons (1, 2) under or right of them
+        int ng = LN.gs.loaded ? LN.gs.n : 0, last = ng ? 3 + ng : 3;   // (the left column's last)
+        if (k == K_UP) *sel = s0 == 1 || s0 == 2 ? last : s0 >= 4 ? s0 - 1 : 0;
+        else if (k == K_DOWN) *sel = s0 == 0 ? 3 : s0 == 3 ? (ng ? 4 : 1) : s0 >= 4 ? (s0 < last ? s0 + 1 : 1) : s0;
+        else if (k == K_LEFT) *sel = s0 == 2 ? 1 : s0 == 1 ? 3 : s0; else if (k == K_RIGHT) *sel = s0 == 1 ? 2 : s0 == 0 || s0 >= 3 ? 1 : s0;
         else if (k == K_A) go = s0; else if (k == K_B) { LN.page = 0; LN.sel[0] = 2; }
     }
     pthread_cond_broadcast(&S.cv); pthread_mutex_unlock(&S.mu);
     if (go >= 0) lnr_activate(page, go, 0);
 }
 static int lnr_hit(float x, float y, int *page) {   // a touch on the page shown (its layout: startscreen.c stv_page_hit)
-    pthread_mutex_lock(&S.mu); ANativeWindow *w = S.win; *page = LN.page; pthread_mutex_unlock(&S.mu);
+    pthread_mutex_lock(&S.mu); ANativeWindow *w = S.win; *page = LN.page; int ng = LN.gs.loaded ? LN.gs.n : 0; pthread_mutex_unlock(&S.mu);
     if (!w) return -1;
-    stv_view v; memset(&v, 0, sizeof v); v.screen = *page == 0 ? STV_SCREEN_LAUNCHER : *page == 1 ? STV_SCREEN_CLOUD : *page == 3 ? STV_SCREEN_LINK : STV_SCREEN_APP; v.cp.nrow = 4;
+    stv_view v; memset(&v, 0, sizeof v); v.ap.ngame = ng; v.screen = *page == 0 ? STV_SCREEN_LAUNCHER : *page == 1 ? STV_SCREEN_CLOUD : *page == 3 ? STV_SCREEN_LINK : STV_SCREEN_APP; v.cp.nrow = 4;
     if (*page == 1) { dm_cloud_info ci; dm_cloud_info_get(&ci); v.cp.link = cp_link_of(&ci); }
     if (*page == 3) { dm_cloud_link k; dm_cloud_link_get(&k); lk_fill(&v.lk, &k, "", 0); }
     return stv_page_hit(&v, ANativeWindow_getWidth(w), ANativeWindow_getHeight(w), x, y);

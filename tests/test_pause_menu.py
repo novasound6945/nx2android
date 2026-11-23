@@ -1,4 +1,4 @@
-"""The game's settings.txt keys (limit=, rate=, res=, read at the game's start: game_opts_android.inc), the pause menu's panel
+"""The game's settings.txt keys (limit=, rate=, res=: the launcher's App settings, launcher_gopts.inc, then the game's start), the pause menu's panel
 (upstream's four tabs at this fork's letters, with Exit game) and Exit game's hold, through the production code on the computer.
 
 settings_load, settings_save and limit_apply (game_opts_android.inc) are cut out of front_android.c, fps_pin (which holds the
@@ -47,8 +47,18 @@ int main(int argc, char **argv) {
     settings_load(); limit_apply(1);
     assert(atomic_load(&g_set_limit) == 40 && !strcmp(env("DM_FPS_PIN"), "40") && pin_now() == 1);
 
-    // the next start's settings (what the launcher's App settings will write): the limit to Auto, the frame rate and the resolution's step chosen
-    put(p, "docked=0\nlimit=0\naspect=4:3\nui=phone,a,5000,4000,1200\nrate=30\nres=0\n");
+    // the launcher's App settings, before the next start (launcher_gopts.inc): a profile with the frame rate and resolution rows; env.txt read from the file
+    put(e, "DM_FPS_PIN=60\nDM_MENU_RATE=1\nDM_MENU_RES=0.5:1.0:0.9\nDM_RENDER_SCALE=0.9\n");
+    gopt_t g; gopt_load_locked(&g); stv_apppage ap; memset(&ap, 0, sizeof ap); gopt_view(&ap, &g);
+    assert(g.n == 3 && g.id[0] == GOPT_LIMIT && g.id[1] == GOPT_RATE && g.id[2] == GOPT_RES && g.limit == 40 && g.rate == 0 && g.res == 2);   // (res: the step nearest 0.9, High)
+    assert(ap.ngame == 3 && !strcmp(ap.gval[0], "40 fps") && !strcmp(ap.gval[1], "기본") && !strcmp(ap.gval[2], "높음"));
+    gopt_step_locked(&g, 0); assert(g.limit == 30 && strstr(slurp(p), "limit=30\n"));
+    gopt_step_locked(&g, 0); gopt_view(&ap, &g); assert(g.limit == 0 && !strcmp(ap.gval[0], "자동 · 60 fps"));   // Auto: the profile's pin
+    gopt_step_locked(&g, 1); gopt_step_locked(&g, 2); gopt_view(&ap, &g); assert(!strcmp(ap.gval[1], "30 fps") && !strcmp(ap.gval[2], "낮음"));
+    const char *s = slurp(p);
+    assert(strstr(s, "limit=0\n") && strstr(s, "rate=30\n") && strstr(s, "res=0\n") && !strstr(s, "limit=30") && !strstr(s, "limit=40"));
+    assert(strstr(s, "docked=0\n") && strstr(s, "aspect=4:3\n") && strstr(s, "ui=phone,a,5000,4000,1200\n"));   // every other line kept
+    { gopt_t h; gopt_load_locked(&h); assert(h.limit == 0 && h.rate == 30 && h.res == 0); }   // read back as written
 
     // the game's start after it (front_android.c game_run: settings_load, then limit_apply): the launcher's values hold, and the game's settings_save keeps them
     setenv("DM_MENU_RATE", "1", 1); setenv("DM_MENU_RES", "0.5:1.0:0.9", 1); setenv("DM_RENDER_SCALE", "0.9", 1); setenv("DM_FPS_PIN", "60", 1);
@@ -56,9 +66,14 @@ int main(int argc, char **argv) {
     settings_load(); limit_apply(1);
     assert(atomic_load(&g_set_limit) == 0 && !strcmp(env("DM_FPS_PIN"), "60") && pin_now() == 0);
     assert(atomic_load(&g_set_rate) == 30 && !strcmp(env("DM_FPS_TARGET"), "30") && atomic_load(&g_set_res) == 0 && !strcmp(env("DM_RENDER_SCALE"), "0.5"));
-    settings_save(); const char *s = slurp(p);
+    settings_save(); s = slurp(p);
     assert(strstr(s, "limit=0\n") && strstr(s, "rate=30\n") && strstr(s, "res=0\n") && strstr(s, "aspect=4:3\n") && strstr(s, "ui=phone,a,5000,4000,1200,0\n"));
+    // the frame rate back to the profile's (no rate=): taken out of the file, and the game keeps env.txt's
+    gopt_load_locked(&g); gopt_step_locked(&g, 1); gopt_step_locked(&g, 1); assert(g.rate == 0 && !strstr(slurp(p), "rate="));
 
+    // a profile without the rows: the limit alone
+    put(e, "DM_FPS_PIN=60\n"); gopt_load_locked(&g); assert(g.n == 1 && g.id[0] == GOPT_LIMIT);
+    put(e, "\n"); gopt_load_locked(&g); gopt_view(&ap, &g); assert(!strcmp(ap.gval[0], "자동"));   // no pin: the adaptive rate
     // an older install's settings.txt (no limit=) and env files without DM_FPS_PIN: Auto, the adaptive rate; the variable is there from the start, holding no step
     put(p, "overlay=1\nrumble=1\ndocked=0\nfps=0\nopacity=60\ngrid=0\n"); unsetenv("DM_FPS_PIN"); atomic_store(&g_set_limit, 0);
     settings_load(); limit_apply(1);
@@ -66,6 +81,7 @@ int main(int argc, char **argv) {
     // values the launcher has not: Auto
     put(p, "limit=45\n"); settings_load(); assert(atomic_load(&g_set_limit) == 0);
     put(p, "limit=120\n"); settings_load(); assert(atomic_load(&g_set_limit) == 0);
+    put(p, "limit=7\n"); gopt_load_locked(&g); assert(g.limit == 0);
     return 0;
 }
 '''
@@ -170,8 +186,9 @@ class PauseMenu(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             return result.stdout
 
-    def test_settings(self):
+    def test_settings_and_launcher(self):
         settings = cut(self.front, "// ---- settings (the pause menu's)", 'void dm_lan_android_start(')
+        gopts = (DM / 'android/launcher_gopts.inc').read_text(encoding='utf-8')
         # fps_pin gives what game_mode_sync (the presenting thread, every 30th frame) read from DM_FPS_PIN; both come with the adaptive rate's state they touch
         pin = cut(self.perf, 'static int g_step = 0;', 'static int64_t work_pct(') + cut(self.perf, 'static int fps_pin(void) {', "// The frame's replay and GPU time")
         source = r'''
@@ -183,6 +200,7 @@ class PauseMenu(unittest.TestCase):
 #include <stdlib.h>
 #include <string.h>
 #include "overlay_layout.h"
+#include "startscreen.h"
 ''' + POSIX + r'''
 #define LOG(...) do { printf(__VA_ARGS__); putchar('\n'); } while (0)
 static int opmode;
@@ -193,13 +211,21 @@ int dm_ui_zh(void) { return 0; }
 // dm/host/dm_pacing.c's two switches the governor's policy reads (game_mode_sync), as there
 static int dm_pacing_adaptive(int *explicit_set) { const char *e = getenv("DM_ADAPTIVE_FPS"); if (explicit_set) *explicit_set = e && *e; return !(e && !atoi(e)); }
 static int dm_pacing_pin(void) { const char *e = getenv("DM_FPS_PIN"); int v = e ? atoi(e) : 0; return v == 60 || v == 40 || v == 30 ? v : 0; }
-''' + settings + pin + SETTINGS_MAIN
+// datasync_android.c's neighbours of launcher_gopts.inc: the data's root, its file reads and writes (datasync.h ds_read, ds_write), the screen's language (Korean)
+static struct { char root[512]; } S;
+static char *ds_read(const char *path, size_t *n, size_t max) { FILE *f = fopen(path, "rb"); if (!f) return NULL; char *b = malloc(max + 1); size_t k = fread(b, 1, max, f); fclose(f); b[k] = 0; if (n) *n = k; return b; }
+static int ds_write(const char *path, const void *d, size_t n) { FILE *f = fopen(path, "wb"); if (!f) return -1; fwrite(d, 1, n, f); fclose(f); return 0; }
+static int korean(void) { return 1; }
+static const char *L(const char *ko, const char *en) { return korean() ? ko : en; }
+typedef struct { int loaded, n, id[3], limit, rate, res, rate_on, res_on, env_rate; char pin[16]; } gopt_t;
+''' + gopts + settings + pin + SETTINGS_MAIN
         out = self._run(source, None)
         self.assertIn('[menu] frame rate limit: 40 fps (settings.txt limit=40, over the env files\' DM_FPS_PIN 60)', out)
         self.assertIn('[menu] frame rate limit: auto (DM_FPS_PIN=60, as the env files set it)', out)
         self.assertIn('[menu] frame rate limit: auto (the adaptive rate: the env files set no DM_FPS_PIN)', out)
         self.assertIn('[menu] frame rate: 30 fps (settings.txt rate=30)', out)
         self.assertIn('[menu] resolution: step 0 (settings.txt res=0: DM_RENDER_SCALE=0.5)', out)
+        self.assertIn('launcher: frame rate limit held (settings.txt limit=30', out)
         self.assertIn('limit=45 is not 0 (auto), 60, 40 or 30', out)
 
     def test_menu_panel_drawn(self):
