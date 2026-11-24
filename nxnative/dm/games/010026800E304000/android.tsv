@@ -14,3 +14,7 @@ package	org.nx2a.srwx
 orientation	landscape
 # Invalidate-only barriers keep the pass open, as for SUPER ROBOT WARS T (its android.tsv: menu 21 -> 60 fps on the Retroid Pocket Nova), V and 30
 env	DM_VK_INVAL_KEEP=1
+# Memory pool chunks of 2 GB (gfx_vk_core.c mtl_pool_add), as SUPER ROBOT WARS 30: with the default 254 MB chunks a range lay across a chunk's end about once
+# a frame from the title on ("ranges across two chunks"); with 2048 the 1 GB pool is one piece and there are none. Measured twice each way on the Retroid Pocket
+# Nova in the same dialogue lines: draws, passes and frame work are the same with and without it (2026-11-24).
+env	DM_VK_ZC_CHUNK_MB=2048
