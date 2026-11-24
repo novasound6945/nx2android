@@ -64,7 +64,7 @@ Retroid Pocket 6와 Retroid Pocket Nova(둘 다 Snapdragon 8 Gen 2, Adreno 740, 
 | 슈퍼로봇대전 V | 업데이트 1.0.2 | Retroid Pocket Nova | 시험 중: 오프닝과 대사 60 fps. T와 같은 엔진, 같은 설정 |
 | 슈퍼로봇대전 Y | 업데이트 1.4.1 | Retroid Pocket Nova | 시험 중: 기동과 이름 입력(`--native-keyboard`). 작은 파일 약 24,000개를 묶음 44개로 전송 |
 | 원피스 그랜드 레스토랑 | 업데이트 1.0.4 | Retroid Pocket 6 | 시험 중: 타이틀과 초반 진행. 이름 입력은 `--native-keyboard` |
-| 루이지 맨션 3 | 업데이트 1.4.0 | – | **작업 중**: 프로파일만 있고 기기에서 확인하지 않음 |
+| 루이지 맨션 3 | 업데이트 1.4.0 | Retroid Pocket Nova | **보류**: 게임 시작 약 40~50초 뒤 첫 컷신에서 기기 전체가 멈춤(원인 미확인). 그 과정에서 정수 G-버퍼 출력과 그림자 배열 셰이더 변형은 고침 |
 | 마인크래프트 던전스 | 본편 | Retroid Pocket 6 | **작업 중**: 부팅되고 첫 레벨을 소리와 함께 30 fps로 플레이. 런타임과 도구 쪽 지원(오디오 렌더러 두 개 동시, Unreal pak 버전 8)은 들어 있고, 프로파일은 아직 커밋하지 않음 |
 
 아직 안 되는 것: 마인크래프트 던전스 II는 로고 직후에 멈춥니다([docs/PORTING_NOTES.md](docs/PORTING_NOTES.md#3-open-problem-minecraft-dungeons-ii-stops-after-the-logo)).

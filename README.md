@@ -69,7 +69,7 @@ Tested on the Retroid Pocket 6 and the Retroid Pocket Nova (both Snapdragon 8 Ge
 | Super Robot Wars V | update 1.0.2 | Retroid Pocket Nova | In testing: the opening and dialogue at 60 fps. The same engine and settings as T |
 | Super Robot Wars Y | update 1.4.1 | Retroid Pocket Nova | In testing: starts, name entry with `--native-keyboard`. About 24,000 small files travel as 44 bundles |
 | ONE PIECE: Grand Gourmet | update 1.0.4 | Retroid Pocket 6 | In testing: the title and the first stretch. Name entry with `--native-keyboard` |
-| Luigi's Mansion 3 | update 1.4.0 | – | **Work in progress**: a profile only, not run on a device yet |
+| Luigi's Mansion 3 | update 1.4.0 | Retroid Pocket Nova | **On hold**: the whole device freezes at the first cutscene, 40 to 50 s into the game (cause not found). Integer G-buffer outputs and the shadow array's shader variant were fixed on the way |
 | Minecraft Dungeons | base game | Retroid Pocket 6 | **Work in progress**: boots and plays the first level at 30 fps with sound. The runtime and tool support is here (two audio renderers at once, Unreal pak version 8); its profile is not committed yet |
 
 Not working yet: Minecraft Dungeons II stops right after its logo ([docs/PORTING_NOTES.md](docs/PORTING_NOTES.md#3-open-problem-minecraft-dungeons-ii-stops-after-the-logo)).
