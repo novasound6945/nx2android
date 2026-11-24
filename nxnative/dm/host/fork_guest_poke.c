@@ -1,7 +1,11 @@
 // This fork's: bytes written into a loaded module's image before any guest code runs (DM_GUEST_POKE), to turn on a switch of the game's own that its Switch
 // build leaves off. Called from main.c once the modules are loaded and relocated, beside dm_ue_malloc_install.
 //
-//   DM_GUEST_POKE=<main's build ID, 32 hex>:<module>+<hex offset>=<hex bytes>[,<module>+<hex offset>=<hex bytes>...]     (start-up; a game's android.tsv env row)
+//   DM_GUEST_POKE=<main's build ID, 32 hex>:<module>+<hex offset>[><hex offset>]=<hex bytes>[,...]     (start-up; a game's android.tsv env row)
+//
+// With ><offset> the place is not in the module: the module's word at +<hex offset> is a pointer the game sets when it starts (an object it allocates), and the
+// bytes go <offset> past where it points, once it points somewhere. Unreal Engine's console variables of the TAutoConsoleVariable kind keep their value so:
+// the static object's third word (+0x10) points to the two copies of the value (the game thread's and the render thread's).
 //
 // The build ID must be the running main's, so a row written for one build never lands in another. A place the game's own start-up writes over afterwards (a
 // static constructor, an init function) is written again, and the log says so: the places are looked at every 250 ms for the first 60 s.
@@ -18,14 +22,20 @@
 #include <unistd.h>
 
 enum { NPOKE = 8, POKE_MAX = 16 };
-static struct { uint8_t *at; uint8_t b[POKE_MAX]; int n; char what[48]; } g_poke[NPOKE]; static int g_npoke;
+static struct { uint8_t *at; uint8_t b[POKE_MAX]; int n, deref, said; uint64_t off2; char what[64]; } g_poke[NPOKE]; static int g_npoke;
+static uint8_t *poke_at(int i) {   // where poke i's bytes go now: NULL while its pointer is not set yet
+    if (!g_poke[i].deref) return g_poke[i].at;
+    uint8_t *p; memcpy(&p, g_poke[i].at, sizeof p); return p ? p + g_poke[i].off2 : NULL;
+}
 
 static void *poke_watch(void *arg) {
     (void)arg; int said = 0;
     for (int t = 0; t < 240; t++) { usleep(250000);
-        for (int i = 0; i < g_npoke; i++) if (memcmp(g_poke[i].at, g_poke[i].b, (size_t)g_poke[i].n)) {
-            memcpy(g_poke[i].at, g_poke[i].b, (size_t)g_poke[i].n);
-            if (said++ < 8) LOG("guest poke: %s was written over by the game %.1f s in: written again", g_poke[i].what, (t + 1) * 0.25); } }
+        for (int i = 0; i < g_npoke; i++) { uint8_t *at = poke_at(i); if (!at || !memcmp(at, g_poke[i].b, (size_t)g_poke[i].n)) continue;
+            int first = g_poke[i].deref && !g_poke[i].said; g_poke[i].said = 1;
+            if (first) LOG("guest poke: %s: its pointer is set %.1f s in: %02x%s -> %02x%s", g_poke[i].what, (t + 1) * 0.25, at[0], g_poke[i].n > 1 ? ".." : "", g_poke[i].b[0], g_poke[i].n > 1 ? ".." : "");
+            memcpy(at, g_poke[i].b, (size_t)g_poke[i].n);
+            if (!first && said++ < 8) LOG("guest poke: %s was written over by the game %.1f s in: written again", g_poke[i].what, (t + 1) * 0.25); } }
     return NULL;
 }
 void dm_fork_guest_poke(void);
@@ -35,11 +45,15 @@ void dm_fork_guest_poke(void) {
     if (!colon || colon - e != 32 || strncmp(e, build, 32)) { LOG("[RED] guest poke: DM_GUEST_POKE is for main %.32s, this main is %s: nothing written", e, build); return; }
     for (const char *p = colon + 1; *p && g_npoke < NPOKE;) {
         const char *plus = strchr(p, '+'), *eq = plus ? strchr(plus, '=') : NULL; if (!plus || !eq || plus - p >= 16) break;
-        char name[16] = ""; memcpy(name, p, (size_t)(plus - p)); char *end; uint64_t off = strtoull(plus + 1, &end, 16);
+        char name[16] = ""; memcpy(name, p, (size_t)(plus - p)); char *end; uint64_t off = strtoull(plus + 1, &end, 16), off2 = 0; int deref = 0;
+        if (*end == '>') { deref = 1; off2 = strtoull(end + 1, &end, 16); }
         module_t *m = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, name)) m = &g_mod[i];
         int n = 0; uint8_t b[POKE_MAX]; const char *h = eq + 1;
         while (n < POKE_MAX && h[0] && h[1] && h[0] != ',' && h[1] != ',') { char x[3] = {h[0], h[1], 0}; b[n++] = (uint8_t)strtoul(x, NULL, 16); h += 2; }
-        if (!m || end != eq || !n || off + (uint64_t)n > m->size) { LOG("[RED] guest poke: %.*s is not <module>+<offset>=<bytes> inside a loaded module: left out", (int)(h - p), p); }
+        if (!m || end != eq || !n || off + (uint64_t)(deref ? 8 : n) > m->size) { LOG("[RED] guest poke: %.*s is not <module>+<offset>[><offset>]=<bytes> inside a loaded module: left out", (int)(h - p), p); }
+        else if (deref) { snprintf(g_poke[g_npoke].what, sizeof g_poke[g_npoke].what, "[%s+%#llx]+%#llx (%d bytes)", name, (unsigned long long)off, (unsigned long long)off2, n);
+               g_poke[g_npoke].at = m->base + off; g_poke[g_npoke].deref = 1; g_poke[g_npoke].off2 = off2; memcpy(g_poke[g_npoke].b, b, (size_t)n); g_poke[g_npoke].n = n;
+               LOG("guest poke: %s: written once the game has set the pointer", g_poke[g_npoke].what); g_npoke++; }
         else { snprintf(g_poke[g_npoke].what, sizeof g_poke[g_npoke].what, "%s+%#llx (%d bytes)", name, (unsigned long long)off, n);
                g_poke[g_npoke].at = m->base + off; memcpy(g_poke[g_npoke].b, b, (size_t)n); g_poke[g_npoke].n = n;
                LOG("guest poke: %s: %02x%s -> %02x%s", g_poke[g_npoke].what, m->base[off], n > 1 ? ".." : "", b[0], n > 1 ? ".." : "");
