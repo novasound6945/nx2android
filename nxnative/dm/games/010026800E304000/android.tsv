@@ -6,7 +6,7 @@
 # Checked on the Retroid Pocket Nova (Adreno 740, Turnip T30, 2026-11-24, 1.0.1-1 / -2): title, new game, the six DLC mounted (Addcont 100 / 322 / 323 / 327 / 328 / 329), the
 # opening movie, the chapter 0 dialogue, the first map (60 fps, 185-198 draws and 6 passes a frame, frame work p50 11-12 ms) and battles there (the game sets present interval 2,
 # 30 fps: 405-590 draws a frame, frame work p50 13-17 ms). The opening movie's end waited for good until host commit 423001e6 (H.264 end of stream, dm/host/hle_movie.c md_avc_eos).
-# Not set: DM_VK_ZC_CHUNK_MB=2048. It ends the "ranges across two chunks of a memory pool" warning (about one a frame from the title on) and changed nothing measured: the chapter 0
+# DM_VK_ZC_CHUNK_MB=2048 (below). It ends the "ranges across two chunks of a memory pool" warning (about one a frame from the title on) and changed nothing measured: the chapter 0
 # temple, run twice each way, 158 draws / 3 passes / p50 7.3-8.4 ms on its caption line and 150 draws / 149 passes / p50 13.4-14.2 ms on 「그래…」 with and without it
 # (that line ends a pass at every draw either way; an earlier single run that blamed the setting compared different lines).
 status	experimental
@@ -14,7 +14,9 @@ package	org.nx2a.srwx
 orientation	landscape
 # Invalidate-only barriers keep the pass open, as for SUPER ROBOT WARS T (its android.tsv: menu 21 -> 60 fps on the Retroid Pocket Nova), V and 30
 env	DM_VK_INVAL_KEEP=1
-# Memory pool chunks of 2 GB (gfx_vk_core.c mtl_pool_add), as SUPER ROBOT WARS 30: with the default 254 MB chunks a range lay across a chunk's end about once
+# Memory pool chunks of 2 GB (gfx_vk_core.c mtl_pool_add), as SUPER ROBOT WARS 30: with this fork's 254 MB chunks of before upstream #492 a range lay across a chunk's end about once
 # a frame from the title on ("ranges across two chunks"); with 2048 the 1 GB pool is one piece and there are none. Measured twice each way on the Retroid Pocket
 # Nova in the same dialogue lines: draws, passes and frame work are the same with and without it (2026-11-24).
+# Since #492 the chunk is probed (256 MB on the Nova's gralloc): without the row the 1 GB pool came in 4 chunks and no range lay across one at the title, its demo
+# and the load screen (merge 3bdcf2be, 2026-11-24); not checked on a map yet, so the row stays.
 env	DM_VK_ZC_CHUNK_MB=2048

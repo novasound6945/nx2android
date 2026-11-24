@@ -12,6 +12,13 @@
 | App package | `org.nx2a.srw30` |
 | Vulkan driver | Turnip: the port packs Mesa's Turnip driver when the porter finds it (`vulkan_driver turnip`) |
 
+The profile sets these for you (`android.tsv`); a player changes the pause menu ones in the game, and the env rows in the data pack's `env.txt`:
+
+| Row | What it does |
+|---|---|
+| `DM_VK_ZC_CHUNK_MB=2048` | the chunk size in MB that a memory pool over it is cut into (unset: 256 MB, or the largest of 128 / 64 / 32 MB that this gralloc takes when it refuses 256 MB, … |
+| `DM_VK_INVAL_KEEP=1` | an invalidate-only barrier keeps the render pass open (SUPER ROBOT WARS T) |
+
 Read the profile's porting log in the comment header of [`android.tsv`](android.tsv). Back to the [games list](../../../../README.md#games).
 <!-- end of the game facts -->
 

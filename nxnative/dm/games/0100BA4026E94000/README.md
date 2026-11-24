@@ -11,6 +11,13 @@
 | Tested build and device | v65536 Lenovo Legion Y700 TB322FC (Snapdragon 8 Elite, Adreno 830, Android 16) |
 | App package | `org.nx2a.castlevaniabelmontscurse` |
 
+The profile sets these for you (`android.tsv`); a player changes the pause menu ones in the game, and the env rows in the data pack's `env.txt`:
+
+| Row | What it does |
+|---|---|
+| `DM_VK_INVAL_KEEP=1` | an invalidate-only barrier keeps the render pass open (SUPER ROBOT WARS T) |
+| `DM_FPS_PIN=60` | pin the governor at 60, 40 or 30 fps; 0 = no pin |
+
 Read the profile's porting log in the comment header of [`android.tsv`](android.tsv). Back to the [games list](../../../../README.md#games).
 <!-- end of the game facts -->
 

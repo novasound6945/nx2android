@@ -22,7 +22,7 @@ vulkan_driver	turnip
 readme_name	Super Robot Wars 30
 readme_image	docs/images/super-robot-wars-30.jpg
 readme_tag	v0.5.0
-# Memory pool chunks of 2 GB, not 254 MB (gfx_vk_core.c mtl_pool_add): the game's 1.5 GB pool went up as 7 chunks and a 1.5 MB range bound every frame
+# Memory pool chunks of 2 GB (gfx_vk_core.c mtl_pool_add). With this fork's 254 MB chunks of before upstream #492 the game's 1.5 GB pool went up as 7 chunks and a 1.5 MB range bound every frame
 # (0x5f3fb000 into the pool) lay across the end of the 6th, so it had no buffer ("ranges across two chunks": 8,192 in about 150 s on the Retroid Pocket Nova,
 # Adreno 740 with Turnip, v1048576, 2026-11-23). With DM_VK_ZC_CHUNK_MB=2048 the pool is one piece and 0 ranges are across; the Adreno 740 takes it.
 env	DM_VK_ZC_CHUNK_MB=2048
