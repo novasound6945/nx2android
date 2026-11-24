@@ -80,6 +80,7 @@ typedef struct {
     pthread_mutex_t dmu, wmu; pthread_cond_t wcv; pthread_t wk;
     int job; const uint8_t *jp; int jn, jslot, jgot; int64_t jpts, jpts_out; int jflush;
     mavc *avc; int avc_drain;                    // H.264 (hle_movie_avc.c); avc_drain: the end-of-stream packet came with pictures still queued, they leave one per free slot
+    int avc_last;                                // 1 + the output slot of the last H.264 picture queued (0: none): its copy goes out with the end-of-stream flag (md_avc_eos)
     vpx_codec_ctx_t vpx; int vpx_on, red_dec, red_img;
     // Vorbis: the identification and setup headers from Configure's MediaData ("csd-0", "csd-1", as with Android's MediaCodec), the decoder (opened at the first packet), channels / rate, Ogg page sequence
     uint8_t *vhdr[2]; int vhdr_n[2]; stb_vorbis *vb; int ch, rate; uint32_t ogg_seq; int64_t ogg_gran; int red_vb;
@@ -565,19 +566,32 @@ static void md_job(mdec_t *d, int job) {
     while (d->job != MDJ_NONE) pthread_cond_wait(&d->wcv, &d->wmu);
     pthread_mutex_unlock(&d->wmu);
 }
+// The H.264 end-of-stream output (d->mu held): its own output after the last picture, carrying a copy of that picture. The last picture used to carry the flag itself, as
+// the output after it: SUPER ROBOT WARS X's movie player (CRI Sofdec2 over this decoder, its .usm movies) releases an end-of-stream output without reading it, so the movie's
+// last picture never reached it (2,121 packets, 2,120 pictures read), and it waited for that picture for good: a black screen after the opening movie until B skipped it.
+// A client that reads the end-of-stream output (MediaCodec's is empty) still finds the picture it found there before; with no picture to copy it is an output without one
+static void md_avc_eos(mdec_t *d, int s) {
+    int l = d->avc_last - 1, ok = l >= 0 && d->out[l].frm && d->out[l].cap;
+    if (ok && l != s) {
+        if (d->out[s].cap < d->out[l].cap) { free(d->out[s].frm); d->out[s].frm = malloc(d->out[l].cap); d->out[s].cap = d->out[s].frm ? d->out[l].cap : 0; }
+        if (d->out[s].frm) memcpy(d->out[s].frm, d->out[l].frm, d->out[l].cap); else ok = 0;
+    }
+    d->out[s].pic = ok; d->out[s].pts = ok ? d->out[l].pts : 0; d->out[s].flags = 4; d->avc_last = 0;
+}
 // while packets are queued and an output slot is free, decode the head packet, until the queue is empty or every slot is taken; signal the input / output events by the result
 static void md_pump(mdec_t *d) {
     pthread_mutex_lock(&d->dmu);
     for (;;) {
         pthread_mutex_lock(&d->mu);
-        if (d->avc_drain) {   // H.264 end of stream: the pictures still queued leave one per free slot; the last carries the end-of-stream flag
+        if (d->avc_drain) {   // H.264 end of stream: the pictures still queued leave one per free slot without the flag, then one more output carries the end-of-stream flag
             int s = -1; for (int k = 0; k < d->nout; k++) if (!d->out[k].used) { s = k; break; }
             if (s < 0) { pthread_mutex_unlock(&d->mu); break; }
             d->out[s].used = 1; pthread_mutex_unlock(&d->mu);
-            d->jslot = s; d->jflush = 1; md_job(d, MDJ_TAKE); int got = d->jgot, left = d->avc ? mavc_queued(d->avc) : 0;
+            d->jslot = s; d->jflush = 1; md_job(d, MDJ_TAKE); int got = d->jgot;
             pthread_mutex_lock(&d->mu);
-            d->out[s].pic = got; d->out[s].pts = got ? d->jpts_out : 0; d->out[s].flags = left ? 0 : 4; d->out[s].seq = ++d->oseq; d->outq[d->noutq++] = s;
-            if (!left) d->avc_drain = 0;
+            if (got) { d->out[s].pic = 1; d->out[s].pts = d->jpts_out; d->out[s].flags = 0; d->avc_last = s + 1; }
+            else { md_avc_eos(d, s); d->avc_drain = 0; }   // none left: the end-of-stream output
+            d->out[s].seq = ++d->oseq; d->outq[d->noutq++] = s;
             pthread_mutex_unlock(&d->mu);
             md_event(d, 1);
             continue;
@@ -596,11 +610,12 @@ static void md_pump(mdec_t *d) {
         // `depth` pictures, a black flash before the movie's last frames
         if ((pk.size > 0 && (MD_VPX(d) || MD_AUDIO(d) || avc)) || (avc && eos)) {
             d->jp = d->in[pk.in] + pk.off; d->jn = pk.size; d->jslot = slot; d->jpts = pk.pts; d->jflush = avc && eos; md_job(d, MDJ_DECODE); got = d->jgot; }
-        int more = avc && eos && d->avc && mavc_queued(d->avc) > 0;   // H.264 pictures still queued: they follow this output, the last of them carries the end-of-stream flag
+        int more = avc && eos && got;   // H.264: this output keeps its picture without the flag; the pictures still queued follow it, then the end-of-stream output (md_avc_eos)
         pthread_mutex_lock(&d->mu);
         d->infree[d->ninfree++] = pk.in;
         int ready = got || eos;   // an end-of-stream packet without a picture still yields an output to carry the flag back
-        if (ready) { d->out[slot].pic = got; d->out[slot].pts = got && (avc || d->type == MD_TYPE_AAC) ? d->jpts_out : pk.pts; d->out[slot].flags = more ? pk.flags & ~4u : pk.flags; d->out[slot].seq = ++d->oseq; d->outq[d->noutq++] = slot; }
+        if (ready) { d->out[slot].pic = got; d->out[slot].pts = got && (avc || d->type == MD_TYPE_AAC) ? d->jpts_out : pk.pts; d->out[slot].flags = more ? pk.flags & ~4u : pk.flags; d->out[slot].seq = ++d->oseq; d->outq[d->noutq++] = slot;
+                     if (avc && got) d->avc_last = slot + 1; }
         else d->out[slot].used = 0;
         if (more) d->avc_drain = 1;
         int ineos = d->in_eos;
@@ -740,7 +755,7 @@ static void md_reset(mdec_t *d, int close) {
     // control thread flushes to loop an activity preview, and sends them after the flush (SendInputBufferForDecode claims them back). Those are withheld for a while (h_movie_AcqIn)
     uint64_t now = now_ns();
     for (int i = 0; i < MD_NIN; i++) { d->infree[i] = i; d->instale[i] = d->inown[i] ? now : 0; d->inown[i] = 0; }
-    d->ninfree = MD_NIN; d->noutq = 0; d->npend = 0; d->avc_drain = 0; d->in_eos = 0; d->pace.held = 0;
+    d->ninfree = MD_NIN; d->noutq = 0; d->npend = 0; d->avc_drain = 0; d->avc_last = 0; d->in_eos = 0; d->pace.held = 0;
     // a flush keeps each slot's last picture: the same game reads an output it acquired before the flush right after it (a black frame in the loop otherwise)
     for (int i = 0; i < MD_NOUT; i++) { d->out[i].used = 0; if (close) d->out[i].pic = 0; }
     pthread_mutex_unlock(&d->mu);
@@ -856,7 +871,7 @@ static void md_tail(mdec_t *d) {
     d->out[s].used = 1; pthread_mutex_unlock(&d->mu);
     d->jslot = s; d->jflush = 1; md_job(d, MDJ_TAIL); int got = d->jgot, more = md_held(d);
     pthread_mutex_lock(&d->mu);
-    if (got) { d->out[s].pic = 1; d->out[s].pts = d->jpts_out; d->out[s].flags = 0; d->out[s].seq = ++d->oseq; d->outq[d->noutq++] = s; } else d->out[s].used = 0;
+    if (got) { d->out[s].pic = 1; d->out[s].pts = d->jpts_out; d->out[s].flags = 0; d->out[s].seq = ++d->oseq; d->outq[d->noutq++] = s; if (d->type == MD_TYPE_AVC) d->avc_last = s + 1; } else d->out[s].used = 0;
     pthread_mutex_unlock(&d->mu); pthread_mutex_unlock(&d->dmu);
     if (!got) return;
     static int once[2]; if (!once[d->type == MD_TYPE_AVC]++) LOG("[movie] %s: no packet for %llu ms, what the decoder still held goes out (first case)", d->type == MD_TYPE_AVC ? "H.264" : "AAC", (unsigned long long)(idle / 1000000));
