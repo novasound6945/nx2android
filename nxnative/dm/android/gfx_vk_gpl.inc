@@ -3,7 +3,8 @@
 // its first minutes, 510 [longframe]s up to 150 ms), or, built in the background, its draws were left out until it was ready (a deferred renderer: whole objects
 // flashed grey). With VK_EXT_graphics_pipeline_library a pipeline is four parts: vertex input (gpl_vi), pre-rasterization shaders (gpl_pr), fragment shader (gpl_fs)
 // and fragment output (gpl_fo). The two shader parts are what costs: they are made for every shader of the bundle before the game starts (vk_gpl_prepare, the
-// preparation screen of datasync_android.c, kept by the pipeline cache with a reuse mark), with the states they would otherwise depend on left dynamic (extended
+// preparation screen of datasync_android.c, kept by the pipeline cache with a reuse mark; a bundle of more than DM_VK_GPL_PREP_MAX vertex + fragment shaders: only
+// those the device's records name, vk_gpl.h gpl_prep_subset), with the states they would otherwise depend on left dynamic (extended
 // dynamic state; gpl_dyn sets them at the bind). The two others hold no shader and are made at the draw. A draw whose pipeline does not exist yet links the four
 // at once without link-time optimization (fast linking: no compile), and the whole pipeline (build_pipeline, as before) is compiled in the background (gpl_opt_*)
 // and takes over once ready. A part the preparation could not know (integer-texel views, a vertex shader's outputs added for its fragment shader, the fragment
@@ -18,6 +19,7 @@
 VkPipelineLayout vk_pipeline_layout_lib(VkDescriptorSetLayout sets[5], int nsets);
 uint64_t vk_bundle_hash(uint32_t *nshaders);
 int vk_shader_keys(uint32_t stage, uint64_t *out, int max);
+int vk_shader_stage(uint64_t key);
 void vk_pipeline_cache_save(void);
 
 typedef struct { uint32_t topo, restart, nattr, nbind; struct { uint32_t loc, binding, fmt, off; } attr[16]; struct { uint32_t binding, stride, rate, divisor; } bind[17]; } gvikey;
@@ -32,7 +34,7 @@ static pthread_mutex_t g_glib_mu = PTHREAD_MUTEX_INITIALIZER;   // the parts' ta
 // bg_part / parts_bg / bg_queued / bg_qfull: the shader parts made on the background pipeline threads for draws left out (DM_VK_ASYNC_PARTS, gpl_parts_async), their jobs and full queues
 static struct { gpl_stat link, link_only, part, opt, bg_part; uint64_t links, parts[2], parts_at, parts_int, link_fail, part_fail, queued, qfull, opt_fail; uint64_t ns_part, ns_link, n_old, ns_old;
                 uint64_t parts_bg[2], bg_queued, bg_qfull;
-                uint64_t prep_at, prep_at_skip, ns_prep_at, ns_prep_all, prep_int, ns_prep_int, int_writers, prep_seen; } g_gst;   // (under g_glib_mu)
+                uint64_t prep_at, prep_at_skip, ns_prep_at, ns_prep_all, prep_int, ns_prep_int, int_writers, prep_seen, prep_pipe; } g_gst;   // (under g_glib_mu)
 
 // DM_VK_GPL_LTO=1 (read once at startup: the parts must all be made the same way): the parts keep their link-time optimization information and a draw links them
 // with link-time optimization, a pipeline as good as the whole one, never the fast link's (diagnosis: the fast-linked pipelines' colour flashes on Turnip)
@@ -231,9 +233,9 @@ static int gpl_eligible(const pkey *k) {
     return V.gpl && !k->raster_discard && !k->alt && !k->debug_mode && !k->gs_split &&   // (gs_split: two geometry passes, gfx_vk_exec_xfb.inc, whole pipelines only)
            !(S.sh[0] && S.sh[0]->xfb) && !(S.sh[2] && S.sh[2]->xfb);
 }
-// the draw's shader parts' keys and shaders (S.sh: the replay thread's)
-static void gpl_draw_keys(const pkey *k, gprkey *out_pk, gfskey *out_fk, vkshader_t **out_vs, vkshader_t **out_fs, vkshader_t **out_gs) {
-    vkshader_t *vs = S.sh[0], *fs = S.sh[1], *gs = S.sh[2] ? vk_shader_gs_topo(S.sh[2], (VkPrimitiveTopology)k->topo) : NULL;
+// a pipeline's shader parts' keys: a draw's (gpl_draw_keys, S.sh: the replay thread's shaders) or a recorded pipeline's (the preparation: gpl_pipe_make)
+static void gpl_keys_of(const pkey *k, vkshader_t *vs, vkshader_t *fs, vkshader_t *gs_in, gprkey *out_pk, gfskey *out_fk, vkshader_t **out_gs) {
+    vkshader_t *gs = gs_in ? vk_shader_gs_topo(gs_in, (VkPrimitiveTopology)k->topo) : NULL;
     uint32_t xo0 = (gs ? gs->in_locs : fs ? fs->in_locs : 0) & ~vs->out_locs, xo2 = gs ? (fs ? fs->in_locs : 0) & ~gs->out_locs : 0;   // as build_pipeline
     gprkey pk = gpl_pr_key(vs, gs, k->um[0], k->im[0], xo0, k->um[2], k->im[2], xo2, gpl_rast_key(V.gpl_eds3, k->depth_clamp, k->mode, k->clip_neg1, V.has_depth_clip_ctl));
     pk.vi0 = vi_flip_of(k, vs);   // (the preparation's parts have none: a draw that needs a flip makes its part)
@@ -242,7 +244,10 @@ static void gpl_draw_keys(const pkey *k, gprkey *out_pk, gfskey *out_fk, vkshade
     // the draw's multisample state, as the whole pipeline's fragment shader does, not only the per-sample shaders (gpl_fs_ms). Valid either way (VUID-...-06633/06635:
     // the same state as the output part's); those parts are made at their first draw (one shader each), the preparation's stay for single-sampled draws
     { const char *e = getenv("DM_VK_GPL_FSMS"); if (fs && e && atoi(e) && !fk.ms && (k->samples > 1 || k->a2c)) fk.ms = k->samples | k->a2c << 8; }
-    *out_pk = pk; *out_fk = fk; *out_vs = vs; *out_fs = fs; *out_gs = gs;
+    *out_pk = pk; *out_fk = fk; *out_gs = gs;
+}
+static void gpl_draw_keys(const pkey *k, gprkey *out_pk, gfskey *out_fk, vkshader_t **out_vs, vkshader_t **out_fs, vkshader_t **out_gs) {
+    *out_vs = S.sh[0]; *out_fs = S.sh[1]; gpl_keys_of(k, S.sh[0], S.sh[1], S.sh[2], out_pk, out_fk, out_gs);
 }
 // the four parts of a draw's pipeline (shader parts from the preparation, or made now), linked without link-time optimization. NULL when one could not be made (logged)
 static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout) {
@@ -402,14 +407,66 @@ void vk_gpl_report(void) {   // gfx_vk_present.c, every 600 presents
 // (for those that write integers: vkshader_t int_writer) the integer output one without the alpha test. The pipeline cache keeps the driver's compiles (saved every 15 s, so an app
 // stopped midway keeps what it made: the next start makes the rest and the made ones come from the cache); DM_ROOT/vk_gpl.id marks a finished preparation of this
 // bundle on this driver with these keys (vk_gpl.h gpl_id). With the mark, a start makes the parts again from the cache on two threads below the game's (the warm-up),
-// and a draw that comes first makes its part at once (a cache hit). DM_VK_GPL_PREP_THREADS=n (start-up): the preparation's threads (default: the cores but one, 2-8)
+// and a draw that comes first makes its part at once (a cache hit). DM_VK_GPL_PREP_THREADS=n (start-up): the preparation's threads (default: the cores but one, 2-8).
+// DM_VK_GPL_PREP_MAX=n (start-up, default GPL_PREP_MAX_DEF; 0: always the whole bundle): a bundle of more vertex + fragment shaders is prepared as a subset (g_gsub, below)
 static uint64_t *g_gk[2]; static int g_gkn[2], g_gnr; static _Atomic int g_gi_next, g_gi_done, g_gi_made; static gpl_stat g_gprep;
-static int g_gtotal(void) { return g_gsn + g_gkn[0] * g_gnr + 3 * g_gkn[1]; }   // the listed parts (gpl_seen_open), pre-rasterization parts, fragment parts, their GREATER alpha test variants, their integer output variants (the last two: a shader without one is skipped)
-static int g_gint0(void) { return g_gsn + g_gkn[0] * g_gnr + 2 * g_gkn[1]; }    // the first of the integer output variants (a mark from before them: the preparation of those alone)
+// Subset preparation (vk_gpl.h gpl_prep_subset: more vertex + fragment shaders than DM_VK_GPL_PREP_MAX): g_gk holds only the shaders the device's records name, and
+// the parts of the pipelines the last runs built (g_gp: DM_ROOT/vk_pipelines.bin, read here as well as by the prewarm) are made first, each as its draw takes them
+// (views, outputs added, flips and variants as recorded: gpl_keys_of). The other shaders are never read: their parts are made at their first draw (gpl_link, or
+// in the background with DM_VK_ASYNC_PARTS), and that draw's whole pipeline, built in the background, is recorded in vk_pipelines.bin for the next start's list
+static pkey *g_gp; static int g_gpn, g_gsub;
+static int g_gtotal(void) { return g_gsn + g_gpn + g_gkn[0] * g_gnr + 3 * g_gkn[1]; }   // the listed parts (gpl_seen_open), the recorded pipelines' (subset only), pre-rasterization parts, fragment parts, their GREATER alpha test variants, their integer output variants (the last two: a shader without one is skipped)
+static int g_gint0(void) { return g_gsn + g_gpn + g_gkn[0] * g_gnr + 2 * g_gkn[1]; }    // the first of the integer output variants (a mark from before them: the preparation of those alone)
+static int gpl_keys_keep(uint64_t *k, int n, int stage) {   // the bundle's shaders of that stage among k (sorted, once each)
+    n = gpl_keys_uniq(k, n); int o = 0;
+    for (int i = 0; i < n; i++) if (vk_shader_stage(k[i]) == stage) k[o++] = k[i];
+    return o;
+}
 static void gpl_keys_load(void) {
     if (g_gk[0]) return;
     uint32_t n = 0; vk_bundle_hash(&n); g_gnr = gpl_rast_variants(V.gpl_eds3, V.has_depth_clip_ctl);
     for (int s = 0; s < 2; s++) { g_gk[s] = malloc(sizeof(uint64_t) * (n ? n : 1)); g_gkn[s] = g_gk[s] ? vk_shader_keys((uint32_t)s, g_gk[s], (int)n) : 0; }
+    const char *e = getenv("DM_VK_GPL_PREP_MAX"); long max = e ? atol(e) : GPL_PREP_MAX_DEF;
+    if (!gpl_prep_subset((uint32_t)(g_gkn[0] + g_gkn[1]), max)) return;
+    int nvs = g_gkn[0], nfs = g_gkn[1]; g_gsub = 1;
+    const char *root = getenv("DM_ROOT"); char path[1100]; snprintf(path, sizeof path, "%s/vk_pipelines.bin", root ? root : ".");
+    uint32_t fh[2] = {0}; long np = 0; FILE *f = fopen(path, "rb");   // (prewarm_start's file and header)
+    if (f && fread(fh, sizeof fh, 1, f) == 1 && fh[0] == PIPE_MAGIC && fh[1] == (uint32_t)sizeof(pkey)) {
+        fseek(f, 0, SEEK_END); np = (ftell(f) - (long)sizeof fh) / (long)sizeof(pkey); fseek(f, sizeof fh, SEEK_SET);
+        if (np > 0 && (g_gp = malloc((size_t)np * sizeof *g_gp))) np = (long)fread(g_gp, sizeof *g_gp, (size_t)np, f); else np = 0; }
+    if (f) fclose(f);
+    for (long i = 0; i < np; i++) { const pkey *k = &g_gp[i];   // the pipelines a draw links (gpl_eligible; transform feedback: gpl_pipe_make, from the shaders)
+        if (!k->raster_discard && !k->alt && !k->debug_mode && !k->gs_split && k->key[0]) g_gp[g_gpn++] = *k; }
+    uint64_t *v = malloc(sizeof(uint64_t) * (size_t)(g_gpn + g_gsn + 1)), *fr = malloc(sizeof(uint64_t) * (size_t)(g_gpn + g_gsn + 1)); int nv = 0, nf = 0;
+    if (v && fr) {
+        for (int i = 0; i < g_gpn; i++) { v[nv++] = g_gp[i].key[0]; if (g_gp[i].key[1]) fr[nf++] = g_gp[i].key[1]; }
+        for (int i = 0; i < g_gsn; i++) { if (g_gs[i].fs) { if (g_gs[i].k.f.fs) fr[nf++] = g_gs[i].k.f.fs; } else if (!g_gs[i].k.pr.gs) v[nv++] = g_gs[i].k.pr.vs; }
+        nv = gpl_keys_keep(v, nv, 0); nf = gpl_keys_keep(fr, nf, 1); }
+    else { g_gpn = 0; nv = nf = 0; }   // (no room for the list: nothing prepared, every part made at its draw)
+    free(g_gk[0]); free(g_gk[1]); g_gk[0] = v; g_gk[1] = fr; g_gkn[0] = v ? nv : 0; g_gkn[1] = fr ? nf : 0;
+    VKLOG("GPL: %d vertex + %d fragment shaders, more than DM_VK_GPL_PREP_MAX %ld: only those this device's records name are prepared, %d vertex + %d fragment shaders "
+          "and the parts of %d pipelines the last runs built (%s) and %d the last runs made at draws (vk_gpl_seen.bin); the others' parts are made at their first draw",
+          nvs, nfs, max, g_gkn[0], g_gkn[1], g_gpn, np ? "vk_pipelines.bin" : "vk_pipelines.bin: none", g_gsn);
+}
+static void gpl_pipe_make(const pkey *k, uint64_t *made) {   // a recorded pipeline's two shader parts, as its draw takes them (subset preparation)
+    *made = 0;
+    vkshader_t *vs = vk_shader(k->key[0], 0), *fs = k->key[1] ? vk_shader(k->key[1], 1) : NULL, *gs = k->key[2] ? vk_shader(k->key[2], 2) : NULL;
+    if (!vs || (k->key[1] && !fs) || (k->key[2] && !gs) || vs->xfb || (gs && gs->xfb)) return;   // (transform feedback: whole pipelines only, as gpl_eligible)
+    gprkey pk; gfskey fk; vkshader_t *gt; gpl_keys_of(k, vs, fs, gs, &pk, &fk, &gt);
+    uint64_t m0 = 0, m1 = 0; gpl_part(0, &pk, vs, gt, &m0); gpl_part(1, &fk, fs, NULL, &m1); *made = m0 + m1;
+}
+// MemAvailable under DM_MEM_FLOOR_MB (default 1536; 0: never; read at most every 0.5 s) stops the preparation and the warm-up where they are, as the prewarm stops:
+// the parts not made are made at their first draw. The preparation still writes its mark, so the next start does not prepare again only to stop there again
+static _Atomic int g_gstop; static _Atomic uint64_t g_gmem_t;
+static int gpl_mem_room(void) {
+    if (atomic_load(&g_gstop)) return 0;
+    long long floor_mb = vk_mem_floor_mb(); if (!floor_mb) return 1;
+    uint64_t now = tick(), t = atomic_load(&g_gmem_t);
+    if (now - t < 500000000ull || !atomic_compare_exchange_strong(&g_gmem_t, &t, now)) return 1;
+    long long a = vk_mem_avail_mb(); if (a < 0 || a >= floor_mb) return 1;
+    if (!atomic_exchange(&g_gstop, 1)) VKLOG("[RED] GPL: shader parts stopped at %d of %d: MemAvailable %lld MB is under %lld MB (DM_MEM_FLOOR_MB); the others are made at their first draw",
+                                             atomic_load(&g_gi_done), g_gtotal(), a, floor_mb);
+    return 0;
 }
 static void gpl_part_i(int i) {
     uint64_t made = 0;
@@ -417,6 +474,10 @@ static void gpl_part_i(int i) {
         if (made) { atomic_fetch_add(&g_gi_made, 1); pthread_mutex_lock(&g_glib_mu); g_gst.prep_seen++; gpl_stat_add(&g_gprep, made); g_gst.ns_prep_all += made; pthread_mutex_unlock(&g_glib_mu); }
         return; }
     i -= g_gsn;
+    if (i < g_gpn) { gpl_pipe_make(&g_gp[i], &made);
+        if (made) { atomic_fetch_add(&g_gi_made, 1); pthread_mutex_lock(&g_glib_mu); g_gst.prep_pipe++; gpl_stat_add(&g_gprep, made); g_gst.ns_prep_all += made; pthread_mutex_unlock(&g_glib_mu); }
+        return; }
+    i -= g_gpn;
     if (i < g_gkn[0] * g_gnr) { vkshader_t *vs = vk_shader(g_gk[0][i / g_gnr], 0); if (!vs) return;
         gprkey pk = gpl_pr_key(vs, NULL, 0, 0, 0, 0, 0, 0, gpl_rast_key(V.gpl_eds3, 0, 2, (uint32_t)(i % g_gnr), V.has_depth_clip_ctl)); gpl_part(0, &pk, vs, NULL, &made); }
     else { int j = i - g_gkn[0] * g_gnr, blk = j / g_gkn[1], at = blk == 1, iv = blk == 2; vkshader_t *fs = vk_shader(g_gk[1][j % g_gkn[1]], 1); if (!fs) return;
@@ -431,7 +492,7 @@ static void gpl_part_i(int i) {
 }
 static void *gpl_prep_thread(void *arg) {
     pthread_setname_np(pthread_self(), arg ? "vk gpl warm" : "vk gpl prep"); if (arg) setpriority(PRIO_PROCESS, 0, 10);
-    for (;;) { int i = atomic_fetch_add(&g_gi_next, 1); if (i >= g_gtotal()) break; gpl_part_i(i); atomic_fetch_add(&g_gi_done, 1); }
+    for (;;) { if (!gpl_mem_room()) break; int i = atomic_fetch_add(&g_gi_next, 1); if (i >= g_gtotal()) break; gpl_part_i(i); atomic_fetch_add(&g_gi_done, 1); }
     return NULL;
 }
 static void gpl_log_done(const char *what, uint64_t ns, int nt) {
@@ -444,6 +505,10 @@ static void gpl_log_done(const char *what, uint64_t ns, int nt) {
           what, (unsigned long long)at, (unsigned long long)ats, nat / 1e9, nall / 1e9, share * 100, share * ns / 1e9, ns / 1e9);
     if (g_gsn) { pthread_mutex_lock(&g_glib_mu); uint64_t ps = g_gst.prep_seen; pthread_mutex_unlock(&g_glib_mu);
                  VKLOG("GPL: %s: %d parts the last runs made at draws (vk_gpl_seen.bin): %llu made now (the others from this run's tables or failed)", what, g_gsn, (unsigned long long)ps); }
+    if (g_gsub) { pthread_mutex_lock(&g_glib_mu); uint64_t pp = g_gst.prep_pipe; pthread_mutex_unlock(&g_glib_mu);
+                  VKLOG("GPL: %s: only the shaders this device's records name (more than DM_VK_GPL_PREP_MAX): %d pipelines the last runs built (vk_pipelines.bin), %llu of them with a part made now%s",
+                        what, g_gpn, (unsigned long long)pp, atomic_load(&g_gstop) ? "; [RED] stopped early for memory (DM_MEM_FLOOR_MB)" : ""); }
+    else if (atomic_load(&g_gstop)) VKLOG("[RED] GPL: %s: stopped early for memory (DM_MEM_FLOOR_MB) at %d of %d parts", what, atomic_load(&g_gi_done), g_gtotal());
     if (iw) VKLOG("GPL: %s: %llu fragment shaders write integers: their integer output parts %llu made, %.1f s summed over threads (%.0f%%)", what, (unsigned long long)iw, (unsigned long long)ni,
                   nsi / 1e9, nall ? 100.0 * (double)nsi / (double)nall : 0);
 }
@@ -483,7 +548,7 @@ int vk_gpl_prepare(void (*note)(void *u, int done, int total), void *u) {
         for (int i = 0; i < nt; i++) if (!pthread_create(&t[ntr], NULL, gpl_prep_thread, NULL)) ntr++;
         if (!ntr) gpl_prep_thread(NULL);
         uint64_t saved = t1;
-        for (;;) { int d = atomic_load(&g_gi_done) - i0; if (note) note(u, d, total); if (d >= total) break;
+        for (;;) { int d = atomic_load(&g_gi_done) - i0; if (note) note(u, d, total); if (d >= total || atomic_load(&g_gstop)) break;
             usleep(100000); if (tick() - saved > 15000000000ull) { vk_pipeline_cache_save(); saved = tick(); } }
         for (int i = 0; i < ntr; i++) pthread_join(t[i], NULL);
         pthread_mutex_lock(&g_glib_mu); uint64_t iw = g_gst.int_writers, ni = g_gst.prep_int, fail = g_gst.part_fail; pthread_mutex_unlock(&g_glib_mu);
@@ -492,7 +557,7 @@ int vk_gpl_prepare(void (*note)(void *u, int done, int total), void *u) {
         VKLOG("GPL: a mark from before the integer output parts: %llu of %d fragment shaders write integers, %llu parts made in %.1f s on %d threads (pipeline libraries failed %llu)",
               (unsigned long long)iw, g_gkn[1], (unsigned long long)ni, (tick() - t1) / 1e9, ntr ? ntr : 1, (unsigned long long)fail);
         pthread_mutex_lock(&g_glib_mu); g_gst.int_writers = g_gst.prep_int = g_gst.ns_prep_int = g_gst.ns_prep_all = g_gst.prep_seen = 0; memset(&g_gprep, 0, sizeof g_gprep); pthread_mutex_unlock(&g_glib_mu);   // (the warm-up's own)
-        atomic_store(&g_gi_next, 0); atomic_store(&g_gi_done, 0); atomic_store(&g_gi_made, 0);
+        atomic_store(&g_gi_next, 0); atomic_store(&g_gi_done, 0); atomic_store(&g_gi_made, 0); atomic_store(&g_gstop, 0);
         if (ni) { pthread_t w; if (!pthread_create(&w, NULL, gpl_warm_main, NULL)) pthread_detach(w); return 1; }
     }
     if (had && gpl_id_up_to_date(&want, &have)) {
@@ -506,7 +571,7 @@ int vk_gpl_prepare(void (*note)(void *u, int done, int total), void *u) {
     for (int i = 0; i < nt; i++) if (!pthread_create(&t[ntr], NULL, gpl_prep_thread, NULL)) ntr++;
     if (!ntr) gpl_prep_thread(NULL);
     int total = g_gtotal(); uint64_t saved = tick();
-    for (;;) { int d = atomic_load(&g_gi_done); if (note) note(u, d, total); if (d >= total) break;
+    for (;;) { int d = atomic_load(&g_gi_done); if (note) note(u, d, total); if (d >= total || atomic_load(&g_gstop)) break;   // (stopped for memory: the threads end after their part)
         usleep(100000); if (tick() - saved > 15000000000ull) { vk_pipeline_cache_save(); saved = tick(); } }
     for (int i = 0; i < ntr; i++) pthread_join(t[i], NULL);
     vk_pipeline_cache_save(); want.complete = 1;
