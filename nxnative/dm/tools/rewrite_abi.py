@@ -47,6 +47,10 @@ COMMITS = {
     '937f81a6605325fd74ca78d19c62cb7a302be112': ('same', 'upstream main\'s commit of 41cef539 (#423): the fall-through stub for a give-up branch; the tables\' format is unchanged, the stub a branch goes to differs'),
     '6367e2292d26ffa32530fd4555601f8e3116e225': ('same', 'upstream merge of main into the EA shader branch: against its first parent it brings 937f81a6\'s fall-through stub (#423)'),
     '74704d0f33d91f3e92e4ce8d8aae0352936e8aa2': ('same', 'the spin analysis drops decoded instructions of heads already passed (#488): memory only, the same sites and tables'),
+    'f650e948c9b036955776ac98ba6e173640cefe09': ('same', 'a 32-bit zero-extension (and #0xffffffff) into a jump table index counts as a copy of it (Layton\'s Mystery Journey DX): which sites are rewritten'),
+    '0f47d18ffd5108f5a368fd76871441c20969f664': ('same', 'upstream merge of #413 (Layton\'s Mystery Journey DX+): against its first parent it brings f650e948\'s jump table rule'),
+    '6916feeef58275951e835b6db7150b87ba37b2bc': ('same', 'ADR and halfword jump tables follow the checked index through copies, 32- and 64-bit bounds (#481): which sites are rewritten'),
+    'd1e119dc635c6ed3d6bdc8594bd1c74259f8f769': ('same', 'upstream merge of #481: against its first parent it brings 6916feee'),
 }
 
 
