@@ -63,6 +63,7 @@ Retroid Pocket 6와 Retroid Pocket Nova(둘 다 Snapdragon 8 Gen 2, Adreno 740, 
 | 슈퍼로봇대전 T | 업데이트 1.0.5 | Retroid Pocket Nova | 시험 중: 타이틀, 게임 시작, 맵과 메뉴 60 fps, 한국어. 드로마다 끊기던 렌더 패스를 `DM_VK_INVAL_KEEP=1`로 이어 붙임(메뉴 21 → 60 fps) |
 | 슈퍼로봇대전 V | 업데이트 1.0.2 | Retroid Pocket Nova | 시험 중: 오프닝과 대사 60 fps. T와 같은 엔진, 같은 설정 |
 | 슈퍼로봇대전 Y | 업데이트 1.4.1 | Retroid Pocket Nova | 시험 중: 기동과 이름 입력(`--native-keyboard`). 작은 파일 약 24,000개를 묶음 44개로 전송 |
+| 슈퍼로봇대전 X | 업데이트 1.0.1 | Retroid Pocket Nova | 시험 중: 타이틀, 이름 입력(`--native-keyboard`), 오프닝 영상, 첫 맵 60 fps, 전투 30 fps(스위치와 같음), 한국어. T·V와 같은 엔진. 오프닝 영상이 끝난 뒤 검은 화면에서 멈추던 것은 호스트의 H.264 스트림 끝 처리를 고쳐 해결 |
 | 원피스 그랜드 레스토랑 | 업데이트 1.0.4 | Retroid Pocket 6 | 시험 중: 타이틀과 초반 진행. 이름 입력은 `--native-keyboard` |
 | 루이지 맨션 3 | 업데이트 1.4.0 | Retroid Pocket Nova | **보류**: 게임 시작 약 40~50초 뒤 첫 컷신에서 기기 전체가 멈춤(원인 미확인). 그 과정에서 정수 G-버퍼 출력과 그림자 배열 셰이더 변형은 고침 |
 | 마인크래프트 던전스 | 본편 | Retroid Pocket 6 | **작업 중**: 부팅되고 첫 레벨을 소리와 함께 30 fps로 플레이. 런타임과 도구 쪽 지원(오디오 렌더러 두 개 동시, Unreal pak 버전 8)은 들어 있고, 프로파일은 아직 커밋하지 않음 |
