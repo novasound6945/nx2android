@@ -151,6 +151,7 @@ static void exec_ops(const uint8_t *p) {
               uint64_t f = mtl_last_fence() + 1;
               if (split && !work) f = mtl_last_fence();
               else if (split >= 2 && work) { f = mtl_sub_commit(); vk_sub_resume(); }
+              { int nvn_seq_active(void); uint64_t now_ns(void); if (nvn_seq_active()) VKLOG("[seq] %.3f fencesync %p -> host fence %llu (GPU work of its submission before it: %u ops)", now_ns() / 1e6, (void *)s, (unsigned long long)f, work); }
               if (!sync_replay_fence(s, f)) { static int n; if (n++ < 4) VKLOG("fence on sync %p skipped: the game has finalized or freed it (nvn_obj.h sync_replay_fence)", (void *)s); }
               break; }
             if (!sync_replay_fence(s, mtl_last_fence() + 1)) { static int n; if (n++ < 4) VKLOG("fence on sync %p skipped: the game has finalized or freed it (nvn_obj.h sync_replay_fence)", (void *)s); }

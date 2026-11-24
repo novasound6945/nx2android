@@ -741,6 +741,7 @@ static uint64_t g_frame;
 // DM_NVN_SEQ=N (live, a DM_CTL env line): the next N frames' submissions, fences, acquires, sync waits and presents in order, with thread and time
 // (how Xenoblade Chronicles 3's render thread was found waiting in SyncWait on the acquire sync for its whole frame's GPU work)
 static int seq_on(void) { static uint64_t until; const char *e = getenv("DM_NVN_SEQ"); if (e && atoi(e)) { until = g_frame + (uint64_t)atoi(e); setenv("DM_NVN_SEQ", "0", 1); } return g_frame < until; }
+int nvn_seq_active(void); int nvn_seq_active(void) { return seq_on(); }   // (this fork's: the Vulkan side's lines of the same trace, gfx_vk_core.c and gfx_vk_exec_walker.inc)
 #define SEQ(...) do { if (seq_on()) { char sb_[256]; snprintf(sb_, sizeof sb_, __VA_ARGS__); LOG("[seq] f%llu t%lx %.3f %s", (unsigned long long)g_frame, (unsigned long)(uintptr_t)pthread_self(), now_ns() / 1e6, sb_); } } while (0)
 NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = nvn_fence_now(); SEQ("fence %p", (void *)s); }
 // A sync object that was never fenced waits until timeout, as on a real device; a fenced one is released only after the GPU has actually completed up to that fence value
@@ -756,9 +757,9 @@ NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     // TIMEOUT for the not-yet-fenced object made Final Fantasy Resonance abort through nn::diag at start-up: wait for the queued jobs first.
     if (!o->fenced && nvn_async()) nvn_jobs_wait_queued(timeout);
     if (!o->fenced) { SEQ("syncwait %p unfenced", (void *)s); return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED; }
-    if (nvn_fence_wait(o->fence, 0)) { SEQ("syncwait %p kind %u already", (void *)s, o->fenced); return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; }
+    if (nvn_fence_wait(o->fence, 0)) { SEQ("syncwait %p kind %u fence %llu already", (void *)s, o->fenced, (unsigned long long)o->fence); return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; }
     uint64_t t0 = now_ns(); int r = nvn_fence_wait(o->fence, timeout);
-    SEQ("syncwait %p kind %u timeout %llu waited %.2f ms -> %d", (void *)s, o->fenced, (unsigned long long)timeout, (now_ns() - t0) / 1e6, r);
+    SEQ("syncwait %p kind %u fence %llu timeout %llu waited %.2f ms -> %d", (void *)s, o->fenced, (unsigned long long)o->fence, (unsigned long long)timeout, (now_ns() - t0) / 1e6, r);
     return r ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
 }
 NVN(nvnEventBuilderSetDefaults, void, NVNeventBuilder *b) { memset(b, 0, sizeof(ev_builder_t)); }

@@ -2075,6 +2075,7 @@ static void *completion_main(void *a) {
         pthread_mutex_lock(&g_cmu); g_ch = c->next; if (!g_ch) g_ct = NULL; pthread_mutex_unlock(&g_cmu);
         if (g_prereset > 0 && c->rslot >= 0) { vksub_t *s = &g_slot[c->rslot];   // its command buffers reset here (slot_recycle); the slot is not taken before g_done passes this fence
             if (s->fence == c->fence) { for (int i = 0; i < s->nmain_alloc; i++) vkResetCommandBuffer(s->mains[i], 0); for (int i = 0; i < s->nup_alloc; i++) vkResetCommandBuffer(s->ups[i], 0); } }
+        { int nvn_seq_active(void); uint64_t now_ns(void); if (nvn_seq_active()) VKLOG("[seq] %.3f GPU done host fence %llu", now_ns() / 1e6, (unsigned long long)c->fence); }   // (this fork's: DM_NVN_SEQ)
         pthread_mutex_lock(&g_done_mu); if (c->fence > g_done) __atomic_store_n(&g_done, c->fence, __ATOMIC_RELEASE); pthread_cond_broadcast(&g_done_cv); pthread_mutex_unlock(&g_done_mu);
         __atomic_store_n(&g_done_ns, pool_ns(), __ATOMIC_RELAXED);
         free(c->ops); free(c);
@@ -2141,6 +2142,7 @@ uint64_t mtl_sub_commit(void) {
     struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0); pthread_mutex_lock(&g_vk_queue_mu); VkResult r = vkQueueSubmit(V.q, 1, &si, fe); pthread_mutex_unlock(&g_vk_queue_mu); clock_gettime(CLOCK_MONOTONIC, &t1); g_ns_submit += (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000000ll + (t1.tv_nsec - t0.tv_nsec));
     if (r) vk_device_lost("vkQueueSubmit", r);
     s->fence = f;
+    { int nvn_seq_active(void); uint64_t now_ns(void); if (nvn_seq_active()) VKLOG("[seq] %.3f commit host fence %llu (%u draws)", now_ns() / 1e6, (unsigned long long)f, g_sub_draws); }   // (this fork's: DM_NVN_SEQ)
     sub_note(f, (uint32_t)ncb);
     cpend *c = calloc(1, sizeof *c); c->fence = f; c->frame = __atomic_load_n(&g_cur_frame, __ATOMIC_RELAXED); c->n = s->npost; c->rslot = g_cur; c->slot = s->no_ts ? -1 : g_cur; s->no_ts = 0;
     c->npass = g_npass[g_cur]; memcpy(c->pmeta, g_pmeta[g_cur], sizeof(pass_meta) * (size_t)c->npass); c->noq = s->noq;
