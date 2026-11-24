@@ -573,36 +573,71 @@ static void gpl_ann_link(uint64_t vs, int vs_made, const gprkey *pk, uint64_t fs
 // by the driver's own thread). The preparation of everything in memory died at 18% of this bundle (5.3 GB); the bake's memory does not grow with the bundle.
 // A bake that was stopped goes on: the parts already in the database come out of it. At the end the database takes the baked name (nx2a.foz), and the folder
 // DM_ROOT/mesa goes into the data pack as it is. DM_VK_GPL_PROGRAM_FDZ=0: no fragment depth parts. The game can be started after it, as after any preparation
-void vk_shader_drop(vkshader_t *s); long long vk_mesa_bake_done(void); long long vk_mesa_cache_bytes(void);
+#include <fcntl.h>
+void vk_shader_drop(vkshader_t *s); long long vk_mesa_bake_done(void); long long vk_mesa_cache_bytes(void); long long vk_mem_avail_mb(void);
 static int compute_bake_one(uint64_t key);   // gfx_vk_exec_xfb.inc
-static uint64_t *g_bk[3]; static int g_bkn[3], g_bk_fdz; static _Atomic int g_bk_next, g_bk_done; static _Atomic uint64_t g_bk_parts, g_bk_fail, g_bk_ns;
+static uint64_t *g_bk[3]; static int g_bkn[3], g_bk_fdz, g_bk_total; static _Atomic int g_bk_next, g_bk_done, g_bk_pause, g_bk_slots;
+static _Atomic uint64_t g_bk_parts, g_bk_fail, g_bk_skipped, g_bk_ns, g_bk_ns_sh;
+// A shader the driver dies on would end every bake at the same place. DM_ROOT/mesa/bake.cur has one 16-byte slot a baking thread: the shader it is at (its key,
+// its stage + 1), zeros between shaders (a write of 16 bytes: it reaches the file's pages at once, so it is there after the app's death). A bake that starts adds
+// the shaders it finds there to bake.died, and a shader listed there twice is left out (once: it may have been another thread's shader that killed the app, or
+// the system for want of memory; the bake waits while the system has under 400 MB to spare for that reason). A shader left out is compiled when the game draws with it
+static int g_bk_cur = -1; static uint64_t *g_bk_bad; static int g_bk_nbad; static __thread int t_bk_slot = -1;
 static int gpl_u64cmp(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
+static void bake_mark(uint64_t key, int stage) {
+    if (g_bk_cur < 0 || t_bk_slot < 0) return;
+    uint64_t r[2] = {key, key ? (uint64_t)(stage + 1) : 0}; if (pwrite(g_bk_cur, r, sizeof r, (off_t)t_bk_slot * 16) != (ssize_t)sizeof r) { /* (no record of this shader) */ }
+}
+static int bake_bad(uint64_t key) { return g_bk_nbad && bsearch(&key, g_bk_bad, (size_t)g_bk_nbad, sizeof key, gpl_u64cmp) != NULL; }
+static void bake_died_load(void) {
+    const char *root = getenv("DM_ROOT"); char cur[1100], died[1100]; if (!root) return;
+    snprintf(cur, sizeof cur, "%s/mesa/bake.cur", root); snprintf(died, sizeof died, "%s/mesa/bake.died", root);
+    FILE *f = fopen(cur, "rb"); uint64_t r[2]; int added = 0;
+    if (f) { FILE *d = fopen(died, "a");
+        while (fread(r, sizeof r, 1, f) == 1) if (r[1] && d) { fprintf(d, "%016llx\n", (unsigned long long)r[0]); added++; }
+        if (d) fclose(d);
+        fclose(f); }
+    uint64_t *k = NULL; int n = 0, cap = 0; char line[64];
+    if ((f = fopen(died, "r"))) { while (fgets(line, sizeof line, f)) { if (n == cap) { cap = cap ? cap * 2 : 64; k = realloc(k, sizeof *k * (size_t)cap); } k[n++] = strtoull(line, NULL, 16); } fclose(f); }
+    if (n) qsort(k, (size_t)n, sizeof *k, gpl_u64cmp);
+    for (int i = 0; i + 1 < n; i++) if (k[i] == k[i + 1] && (!g_bk_nbad || k[g_bk_nbad - 1] != k[i])) k[g_bk_nbad++] = k[i];   // (listed twice: left out)
+    g_bk_bad = k;
+    if (added || g_bk_nbad) VKLOG("GPL bake: the last bake ended with %d shaders in the making (now listed in bake.died); %d shaders were in the making at two ends and are left out", added, g_bk_nbad);
+    g_bk_cur = open(cur, O_RDWR | O_CREAT | O_TRUNC, 0660);
+}
+// one shader's parts. The index runs over the vertex shaders, the fragment shaders (the plain part, and the integer output part of one that writes integers), the
+// compute shaders and then the fragment shaders again for their fragment depth parts: a bake that is stopped has made the parts every draw can use first
 static void gpl_bake_i(int i) {
-    uint64_t t0 = tick(); int n = 0, bad = 0;
-    if (i < g_bkn[0]) { vkshader_t *vs = vk_shader(g_bk[0][i], 0); if (!vs) { atomic_fetch_add(&g_bk_fail, 1); return; }
-        if (!vs->xfb) for (int v = 0; v < g_gnr; v++) {   // (transform feedback: whole pipelines only, gpl_eligible)
-            gprkey pk = gpl_pr_key(vs, NULL, 0, 0, 0, 0, 0, 0, gpl_rast_key(V.gpl_eds3, 0, 2, (uint32_t)v, V.has_depth_clip_ctl));
-            VkPipeline p = gpl_pr_make(&pk, vs, NULL); if (p) { vkDestroyPipeline(V.dev, p, NULL); n++; } else bad++; }
-        vk_shader_drop(vs); }
-    else if (i < g_bkn[0] + g_bkn[1]) { vkshader_t *fs = vk_shader(g_bk[1][i - g_bkn[0]], 1); if (!fs) { atomic_fetch_add(&g_bk_fail, 1); return; }
-        uint32_t fl = fs->fout_locs & 0xff;
-        for (int v = 0; v < 3; v++) { if (v == 1 && !(g_bk_fdz && !fs->depth_repl)) continue; if (v == 2 && !(fs->int_writer && fl && int_out_on())) continue;
-            gfskey fk = gpl_fs_key(fs, 0, 0, v == 1 ? 1 : v == 2 ? fl << 8 : 0, 1, 0);
-            VkPipeline p = gpl_fs_make(&fk, fs); if (p) { vkDestroyPipeline(V.dev, p, NULL); n++; } else bad++; }
-        vk_shader_drop(fs); }
-    else { int r = compute_bake_one(g_bk[2][i - g_bkn[0] - g_bkn[1]]); if (r > 0) n++; else bad++; }
-    atomic_fetch_add(&g_bk_parts, (uint64_t)n); atomic_fetch_add(&g_bk_fail, (uint64_t)bad); atomic_fetch_add(&g_bk_ns, tick() - t0);
+    int nv = g_bkn[0], nf = g_bkn[1], nc = g_bkn[2], stage, second = 0, n = 0, bad = 0; uint64_t key, t0 = tick(), tsh = 0;
+    if (i < nv) { stage = 0; key = g_bk[0][i]; } else if (i < nv + nf) { stage = 1; key = g_bk[1][i - nv]; }
+    else if (i < nv + nf + nc) { stage = 5; key = g_bk[2][i - nv - nf]; } else { stage = 1; second = 1; key = g_bk[1][i - nv - nf - nc]; }
+    if (bake_bad(key)) { atomic_fetch_add(&g_bk_skipped, 1); return; }
+    bake_mark(key, stage);
+    if (stage == 5) { int r = compute_bake_one(key); if (r > 0) n++; else bad++; }
+    else { vkshader_t *sh = vk_shader(key, stage); tsh = tick() - t0;
+        if (!sh) bad++;
+        else if (stage == 0) { if (!sh->xfb) for (int v = 0; v < g_gnr; v++) {   // (transform feedback: whole pipelines only, gpl_eligible)
+                gprkey pk = gpl_pr_key(sh, NULL, 0, 0, 0, 0, 0, 0, gpl_rast_key(V.gpl_eds3, 0, 2, (uint32_t)v, V.has_depth_clip_ctl));
+                VkPipeline p = gpl_pr_make(&pk, sh, NULL); if (p) { vkDestroyPipeline(V.dev, p, NULL); n++; } else bad++; } }
+        else { uint32_t fl = sh->fout_locs & 0xff;
+            for (int v = 0; v < 3; v++) { if ((v == 1) != second) continue; if (v == 1 && sh->depth_repl) continue; if (v == 2 && !(sh->int_writer && fl && int_out_on())) continue;
+                gfskey fk = gpl_fs_key(sh, 0, 0, v == 1 ? 1 : v == 2 ? fl << 8 : 0, 1, 0);
+                VkPipeline p = gpl_fs_make(&fk, sh); if (p) { vkDestroyPipeline(V.dev, p, NULL); n++; } else bad++; } }
+        if (sh) vk_shader_drop(sh); }
+    bake_mark(0, 0);
+    atomic_fetch_add(&g_bk_parts, (uint64_t)n); atomic_fetch_add(&g_bk_fail, (uint64_t)bad); atomic_fetch_add(&g_bk_ns, tick() - t0); atomic_fetch_add(&g_bk_ns_sh, tsh);
 }
 static void *gpl_bake_thread(void *arg) {
-    (void)arg; pthread_setname_np(pthread_self(), "vk gpl bake"); int total = g_bkn[0] + g_bkn[1] + g_bkn[2], k = 0;
+    (void)arg; pthread_setname_np(pthread_self(), "vk gpl bake"); int k = 0; t_bk_slot = atomic_fetch_add(&g_bk_slots, 1);
     VkPipelineCacheCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, NULL, VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT, 0, NULL};   // (this thread's alone)
-    for (;;) { int i = atomic_fetch_add(&g_bk_next, 1); if (i >= total) break;
+    for (;;) { while (atomic_load(&g_bk_pause)) usleep(200000);
+        int i = atomic_fetch_add(&g_bk_next, 1); if (i >= g_bk_total) break;
         if (!(k++ & 255)) { if (t_bake_cache) vkDestroyPipelineCache(V.dev, t_bake_cache, NULL); t_bake_cache = VK_NULL_HANDLE; if (vkCreatePipelineCache(V.dev, &pi, NULL, &t_bake_cache)) t_bake_cache = VK_NULL_HANDLE; }
         gpl_bake_i(i); atomic_fetch_add(&g_bk_done, 1); }
     if (t_bake_cache) { vkDestroyPipelineCache(V.dev, t_bake_cache, NULL); t_bake_cache = VK_NULL_HANDLE; }
     return NULL;
 }
-static void gpl_bake(void (*note)(void *u, int done, int total), void *u, int nt) {
+static void gpl_bake(void (*note)(void *u, int done, int total), void *u) {
     uint32_t n = 0; uint64_t bundle = vk_bundle_hash(&n); if (!n) return;
     g_gnr = gpl_rast_variants(V.gpl_eds3, V.has_depth_clip_ctl);
     for (int s = 0; s < 3; s++) { g_bk[s] = malloc(sizeof(uint64_t) * n); g_bkn[s] = g_bk[s] ? vk_shader_keys(s == 2 ? 5u : (uint32_t)s, g_bk[s], (int)n) : 0;
@@ -610,28 +645,36 @@ static void gpl_bake(void (*note)(void *u, int done, int total), void *u, int nt
         for (int i = 0; i < g_bkn[s]; i++) if (!m || g_bk[s][i] != g_bk[s][m - 1]) g_bk[s][m++] = g_bk[s][i];
         g_bkn[s] = m; }
     { const char *e = getenv("DM_VK_GPL_PROGRAM_FDZ"); g_bk_fdz = !(e && !atoi(e)); }
-    int total = g_bkn[0] + g_bkn[1] + g_bkn[2]; uint64_t t0 = tick(), said = t0; pthread_t t[16]; int ntr = 0;
-    VKLOG("GPL bake: %d vertex (x%d), %d fragment (plain%s, integer output where it writes integers) and %d compute shaders into the driver's cache on disk, on %d threads",
-          g_bkn[0], g_gnr, g_bkn[1], g_bk_fdz ? ", fragment depth" : "", g_bkn[2], nt);
+    g_bk_total = g_bkn[0] + g_bkn[1] + g_bkn[2] + (g_bk_fdz ? g_bkn[1] : 0);
+    // every core: nothing else runs yet. DM_VK_GPL_PREP_THREADS: another count
+    long nc = sysconf(_SC_NPROCESSORS_ONLN); int nt = nc > 8 ? 8 : nc < 1 ? 1 : (int)nc; { const char *e = getenv("DM_VK_GPL_PREP_THREADS"); if (e && atoi(e) > 0) nt = atoi(e) > 16 ? 16 : atoi(e); }
+    bake_died_load();
+    int total = g_bk_total; uint64_t t0 = tick(), said = t0, memt = t0; pthread_t t[16]; int ntr = 0;
+    VKLOG("GPL bake: %d vertex (x%d), %d fragment (plain, integer output where it writes integers%s) and %d compute shaders into the driver's cache on disk, on %d threads",
+          g_bkn[0], g_gnr, g_bkn[1], g_bk_fdz ? "; then their fragment depth parts" : "", g_bkn[2], nt);
     g_gpl_bake = 1;
     for (int i = 0; i < nt; i++) if (!pthread_create(&t[ntr], NULL, gpl_bake_thread, NULL)) ntr++;
     if (!ntr) gpl_bake_thread(NULL);
     for (;;) { int d = atomic_load(&g_bk_done); if (note) note(u, d, total); if (d >= total) break;
         usleep(100000);
+        if (tick() - memt > 1000000000ull) { memt = tick(); long long av = vk_mem_avail_mb(); int was = atomic_load(&g_bk_pause);   // (the system's memory to spare: under 400 MB the bake waits, over 600 MB it goes on)
+            if (av >= 0 && av < 400 && !was) { atomic_store(&g_bk_pause, 1); VKLOG("[RED] GPL bake: the system has %lld MB to spare: waiting", av); }
+            else if (was && (av < 0 || av > 600)) { atomic_store(&g_bk_pause, 0); VKLOG("GPL bake: the system has %lld MB to spare again: going on", av); } }
         if (tick() - said > 20000000000ull) { said = tick(); double sec = (said - t0) / 1e9; uint64_t parts = atomic_load(&g_bk_parts);
-            VKLOG("GPL bake: %d of %d shaders, %llu parts in %.0f s (%.0f a second, %.1f ms each summed over threads), %llu failed; on disk %.1f MB; about %.0f s to go",
-                  d, total, (unsigned long long)parts, sec, parts / sec, parts ? atomic_load(&g_bk_ns) / 1e6 / (double)parts : 0.0, (unsigned long long)atomic_load(&g_bk_fail),
-                  vk_mesa_cache_bytes() / 1048576.0, d ? sec * (total - d) / d : 0.0); } }
+            VKLOG("GPL bake: %d of %d shaders, %llu parts in %.0f s (%.0f a second; %.1f ms each summed over threads, %.0f%% of it the shader's own making), %llu failed, %llu left out; on disk %.1f MB, the system has %lld MB to spare; about %.0f s to go",
+                  d, total, (unsigned long long)parts, sec, parts / sec, parts ? atomic_load(&g_bk_ns) / 1e6 / (double)parts : 0.0, atomic_load(&g_bk_ns) ? 100.0 * (double)atomic_load(&g_bk_ns_sh) / (double)atomic_load(&g_bk_ns) : 0.0,
+                  (unsigned long long)atomic_load(&g_bk_fail), (unsigned long long)atomic_load(&g_bk_skipped), vk_mesa_cache_bytes() / 1048576.0, vk_mem_avail_mb(), d ? sec * (total - d) / d : 0.0); } }
     for (int i = 0; i < ntr; i++) pthread_join(t[i], NULL);
     g_gpl_bake = 0;
+    if (g_bk_cur >= 0) { close(g_bk_cur); g_bk_cur = -1; }
     double sec = (tick() - t0) / 1e9; uint64_t parts = atomic_load(&g_bk_parts); long long bytes = vk_mesa_bake_done();
-    VKLOG("GPL bake done: %llu parts of %d shaders in %.0f s on %d threads (%.1f ms each summed over threads), %llu failed; %.1f MB baked. DM_ROOT/mesa is the data pack's; take DM_VK_GPL_BAKE out of env.txt",
-          (unsigned long long)parts, total, sec, ntr ? ntr : 1, parts ? atomic_load(&g_bk_ns) / 1e6 / (double)parts : 0.0, (unsigned long long)atomic_load(&g_bk_fail), bytes / 1048576.0);
+    VKLOG("GPL bake done: %llu parts of %d shaders in %.0f s on %d threads (%.1f ms each summed over threads), %llu failed, %llu left out; %.1f MB baked. DM_ROOT/mesa is the data pack's; take DM_VK_GPL_BAKE out of env.txt",
+          (unsigned long long)parts, total, sec, ntr ? ntr : 1, parts ? atomic_load(&g_bk_ns) / 1e6 / (double)parts : 0.0, (unsigned long long)atomic_load(&g_bk_fail), (unsigned long long)atomic_load(&g_bk_skipped), bytes / 1048576.0);
     { const char *root = getenv("DM_ROOT"); char path[1100]; snprintf(path, sizeof path, "%s/mesa/bake.txt", root ? root : "."); FILE *f = fopen(path, "w");   // (what the pack's folder holds, for whoever reads it)
-      if (f) { fprintf(f, "bundle=%016llx\nshaders=%u\nparts=%llu\nfailed=%llu\nbytes=%lld\nseconds=%.0f\ndriver=%s\n", (unsigned long long)bundle, n, (unsigned long long)parts,
-                       (unsigned long long)atomic_load(&g_bk_fail), bytes, sec, V.props.deviceName); fclose(f); } }
+      if (f) { fprintf(f, "bundle=%016llx\nshaders=%u\nparts=%llu\nfailed=%llu\nleft_out=%llu\nbytes=%lld\nseconds=%.0f\nthreads=%d\ndriver=%s\n", (unsigned long long)bundle, n, (unsigned long long)parts,
+                       (unsigned long long)atomic_load(&g_bk_fail), (unsigned long long)atomic_load(&g_bk_skipped), bytes, sec, ntr ? ntr : 1, V.props.deviceName); fclose(f); } }
     for (int s = 0; s < 3; s++) { free(g_bk[s]); g_bk[s] = NULL; g_bkn[s] = 0; }
-    atomic_store(&g_bk_next, 0); atomic_store(&g_bk_done, 0);
+    free(g_bk_bad); g_bk_bad = NULL; g_bk_nbad = 0; atomic_store(&g_bk_next, 0); atomic_store(&g_bk_done, 0);
 }
 // The front end (datasync_android.c dm_prep_begin), on a thread of its own before the game: 1 when the parts were made now (note: progress, from this thread every
 // 100 ms), 0 when there is nothing to do (no bundle: an OpenGL ES game; DM_VK_GPL=0; no libraries on this device; made before: the warm-up is started)
@@ -650,7 +693,7 @@ int vk_gpl_prepare(void (*note)(void *u, int done, int total), void *u) {
     gpl_keys_load();
     long nc = sysconf(_SC_NPROCESSORS_ONLN); int nt = nc > 1 ? (int)nc - 1 : 1; if (nt < 2) nt = 2; if (nt > 8) nt = 8;
     if ((e = getenv("DM_VK_GPL_PREP_THREADS")) && atoi(e) > 0) nt = atoi(e) > 16 ? 16 : atoi(e);
-    if ((e = getenv("DM_VK_GPL_BAKE")) && atoi(e)) gpl_bake(note, u, nt);   // (then as any start)
+    if ((e = getenv("DM_VK_GPL_BAKE")) && atoi(e)) gpl_bake(note, u);   // (then as any start)
     if (had && gpl_id_up_to_date(&want, &have) && have.int_ver != GPL_INT_VER && g_gkn[1]) {
         // a mark from before the integer output parts: those alone, on the preparation's threads and screen (a bundle without integer writers: its shaders read, nothing made)
         uint64_t t1 = tick(); int i0 = g_gint0(), total = g_gtotal() - i0; atomic_store(&g_gi_next, i0); atomic_store(&g_gi_done, i0);
