@@ -35,6 +35,7 @@
   <a href="#games-brought-up-in-this-fork">Games · 게임</a> &nbsp;·&nbsp;
   <a href="#shader-preparation-at-the-first-launch">Shader preparation · 셰이더 준비</a> &nbsp;·&nbsp;
   <a href="#the-games-data-from-your-own-server">Data from your server · 내 서버에서 데이터 받기</a> &nbsp;·&nbsp;
+  <a href="#the-start-screen-and-cloud-saves">Start screen, cloud saves · 시작 화면·클라우드 세이브</a> &nbsp;·&nbsp;
   <a href="#what-else-this-fork-changes">The rest · 그 밖의 변경</a> &nbsp;·&nbsp;
   <a href="docs/PORTING_NOTES.md">Porting notes · 포팅 노트</a>
 </p>
@@ -62,9 +63,29 @@ Tested on the Retroid Pocket 6 and the Retroid Pocket Nova (both Snapdragon 8 Ge
 | Dark Souls: Remastered | update 1.0.3 | Retroid Pocket Nova | 60 fps held (30 on Switch) at the game's real speed; 4:3 screens; no colour flashes on new pipelines. `DM_FPS_TARGET=30` in `env.txt` keeps the game's own 30 |
 | Fire Emblem Engage | update 2.0.0 | Retroid Pocket Nova | **Playable**, 60 fps (30 on Switch): chapters 1 and 2, maps, battles and battle scenes, in Korean. Its 206,899 files travel as 89 bundles |
 | Tales of Eternia Remastered | update 2.1.0 | Retroid Pocket 6 | **Playable**, 60 fps held |
+| Trails in the Sky the 1st (Asian release) | update 1.0.3 | Retroid Pocket Nova | **Playable**, 60 fps in the field. Grey blocks that flickered over the terrain are gone with the G-buffer pass cut every 256 draws. Korean name entry with `--native-keyboard` |
+| A-Train: All Aboard! Tourism | update 1.0.1 | Retroid Pocket Nova | **Playable**, 60 fps. A Unity game: the stack region is 2 GB as on the Switch (it crashed while the map scrolled), and docked touch coordinates are corrected |
+| Super Robot Wars T | update 1.0.5 | Retroid Pocket Nova | In testing: title, new game, maps and menus at 60 fps, in Korean. Its render passes, ended at every draw, are kept open with `DM_VK_INVAL_KEEP=1` (menus 21 → 60 fps) |
+| Super Robot Wars V | update 1.0.2 | Retroid Pocket Nova | In testing: the opening and dialogue at 60 fps. The same engine and settings as T |
+| Super Robot Wars Y | update 1.4.1 | Retroid Pocket Nova | In testing: starts, name entry with `--native-keyboard`. About 24,000 small files travel as 44 bundles |
+| ONE PIECE: Grand Gourmet | update 1.0.4 | Retroid Pocket 6 | In testing: the title and the first stretch. Name entry with `--native-keyboard` |
+| Luigi's Mansion 3 | update 1.4.0 | – | **Work in progress**: a profile only, not run on a device yet |
 | Minecraft Dungeons | base game | Retroid Pocket 6 | **Work in progress**: boots and plays the first level at 30 fps with sound. The runtime and tool support is here (two audio renderers at once, Unreal pak version 8); its profile is not committed yet |
 
 Not working yet: Minecraft Dungeons II stops right after its logo ([docs/PORTING_NOTES.md](docs/PORTING_NOTES.md#3-open-problem-minecraft-dungeons-ii-stops-after-the-logo)).
+
+### Upstream profiles checked on these devices
+
+Games whose profiles are in upstream's `main`, run on this fork's two devices with settings added. Upstream tests mostly on Adreno 830 devices, so an Adreno 740 needs a few things of its own.
+
+| Game | Version | Device | Result and what was added |
+|---|---|---|---|
+| Super Robot Wars 30 | update 1.3.4 (upstream tested 1.2.3) | Retroid Pocket Nova | Title, maps at 60 fps, battles at 30 (as on the Switch), in Korean. `DM_VK_INVAL_KEEP=1` (battles fell to 24 fps), `DM_VK_ZC_CHUNK_MB=2048` (the 1.5 GB memory pool in one piece) |
+| Castlevania: Belmont's Curse | update 1.1.4 (upstream tested 1.1.0) | Retroid Pocket Nova | The intro movie, the dock and the first stretch of the sewer at 60 fps. `DM_VK_INVAL_KEEP=1`, `DM_FPS_PIN=60` (the game renders the next scene behind the movie, the rate stepped down to 40 fps and never came back) |
+| Super Mario Bros. Wonder | base game 1.0.0 | Retroid Pocket Nova | The first course and the castle cutscene at 60 fps |
+| Super Mario 3D World + Bowser's Fury | update 1.2.2 | Retroid Pocket 6 | **Playable** (checked on an earlier build) |
+
+An update a profile does not register is ported from a profile derived from the registered version (the porter warns). Super Robot Wars 30 and Castlevania above were made that way.
 
 ### Games from upstream
 
@@ -98,12 +119,26 @@ The address and the `user:password` are inside the APK, masked but not encrypted
 
 How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ("The data from a web server").
 
+## The start screen and cloud saves
+
+An app ported with `--data-url` opens on a **start screen**, not on the game. The data check, the download and the shader preparation run behind it, and **Start** can be pressed only once they are done.
+
+- **The download goes on in the background.** Leave for the home screen or turn the screen off and a notification keeps downloading; it can be paused or cancelled there.
+- **Where the data lives.** When internal storage is short the app chooses its folder on the SD card; App settings can move it.
+- **App settings.** "Start at once" (no start screen), a check of the downloaded files, and the game's settings: the frame rate limit (Auto / 60 / 40 / 30), the frame rate and the resolution. They are kept in the game's `settings.txt` and **take effect when the game starts**. These rows used to be in the pause menu and moved here so that the menu stays upstream's.
+- **Cloud saves.** The save goes to a server of your own and another device picks it up. A device is linked once, with a QR code or a code on the start screen, and the other ports on that device need no link of their own. The save is uploaded when the game leaves the screen or ends (and every 10 minutes while it stays on). The server's address comes into the APK from `savecloud.txt` on the porting computer; without that file the port has no cloud saves. The server itself is not in this repository; the requests the app makes are described in the comments of `nxnative/dm/android/savecloud_android.c`.
+- **The pause menu is upstream's** (four tabs: Gamepad / Game / Counter / Style). This fork adds one thing to it: **Exit game**, which ends the game only when held.
+
+The start screen, the download, the cloud saves and Exit game are this fork's code. Upstream's files carry one-line calls, and the code itself is in `nxnative/dm/android/fork_hooks_android.inc`, `fork_draw_android.inc`, `datasync_android.c`, `startscreen.c` and `savecloud_android.c`.
+
 ## What else this fork changes
 
 - **Sound.** Several audio renderers at once (Minecraft Dungeons opens one for movies and one for the game). `audren:u` served by the host, with a real mixer, for SDK 1.x games (Disgaea 5).
 - **Movies.** Frames go straight to the Vulkan image, and the colour conversion uses NEON: a 1080p60 VP9 opening that changed on 72 to 80% of display frames now does on 95 to 96%.
 - **Graphics.** With pipeline libraries only the vertex stage's uniform buffers are dynamic (colour flashes in Dark Souls: Remastered, lost devices in Fire Emblem Engage on Turnip). NVN's alpha test as a fragment shader variant; real occlusion queries for conditional rendering; the layer's crop honoured at present; a per-game list of shaders whose alpha-test discard is removed (`DM_VK_FS_NOKILL`); a texture binding given another's texture (`DM_VK_BIND_ALIAS`, Link's Awakening's blur switch).
-- **Running.** Docked and handheld switched while the game runs (`DM_CTL` `opmode`), with the controller events a game waits for. `DM_GPU_TURBO` gives the GPU's clock back when the app goes to the background. A frame rate limit in the pause menu.
+- **Running.** Docked and handheld switched while the game runs (`DM_CTL` `opmode`), with the controller events a game waits for. `DM_GPU_TURBO` gives the GPU's clock back when the app goes to the background. A frame rate limit (`DM_FPS_PIN`, in the start screen's App settings). A fix for the thread suspension of Unity games (crashes during garbage collection).
+- **Performance settings.** Barriers that carry no ordering keep the render pass open (`DM_VK_INVAL_KEEP`). The chunk size large memory pools are split into (`DM_VK_ZC_CHUNK_MB`: a buffer across a chunk's end is not bound).
+- **Releases.** The host of an APK replaced without the dump (`porter apk-update`), an app renamed (`--package`) that takes over the old package's data and saves.
 - **Tools.** Unreal paks of version 8 and version 1 shader archives (UE 4.22); Disgaea's shader containers; a pak folder with IoStore shader libraries no longer mistaken for inline shaders.
 - **Diagnostics.** A thread dump of a stalled game, per-renderer audio dumps, per-pass statistics over seconds, uniform buffer logs and traps for an effect that lasts one second.
 
