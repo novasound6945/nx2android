@@ -119,13 +119,15 @@ class AvcColor(unittest.TestCase):
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>   /* (this fork's movie_avc.c times its conversion: clock_gettime) */
 #ifdef __aarch64__
 #include <arm_neon.h>
 #endif
 typedef struct { int h, standard, range, layout; } AMediaFormat;
 typedef void AMediaCodec;
 typedef struct mavc mavc;
-#define LOG(...) ((void)0)
+static void log_sink(const char *f, ...) { (void)f; }   /* (this fork's DM_MOVIE_TRACE lines: their values count as used) */
+#define LOG(...) log_sink(__VA_ARGS__)
 #define die(...) abort()
 #define AMEDIAFORMAT_KEY_WIDTH "width"
 #define AMEDIAFORMAT_KEY_HEIGHT "height"

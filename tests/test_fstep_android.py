@@ -36,6 +36,11 @@ static int g_hold = 1;
 static double g_gpu_ms = -1.0;
 static uint8_t g_fake_fps_state[0x40];
 static uint8_t *dm_fps_state = g_fake_fps_state;
+// (this fork) the float frame step inside fstep_tick (FSTEP_FLOAT): off here, as for a game whose fixups table has no key
+static int dm_fps_float;
+static nvn_fstepf g_ff;
+static int g_hz = 60;
+static uint64_t dm_present_period_peek(uint64_t period) { return period; }
 
 static void log_noop(const char *fmt, ...) { (void)fmt; }
 #define LOG(...) log_noop(__VA_ARGS__)
