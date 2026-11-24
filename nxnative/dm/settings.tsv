@@ -52,6 +52,7 @@ DM_GL_CAPTURE	str		debug,ios	?	hle_gl.m
 DM_GL_LOG	str		debug,ios	?	hle_gl.m	
 DM_GL_STUBS	str		debug,ios	?	hle_gl.m	
 DM_GPU_TURBO	str		profile	live	perf_android.c	"auto" or 1: ask the GPU for its high clocks while the game is GPU-bound; "need": only while the game is held below its target; unset or 0 = no
+DM_GUEST_PEEK	str		debug	start	fork_guest_poke.c	this fork's: <main's build ID>:<module>+<hex offset>[><hex offset>]?<bytes>[,...]: the places DM_GUEST_POKE names, only read: each place's bytes are logged when first readable and whenever they have changed (every 250 ms, up to 40 lines a place)
 DM_GUEST_POKE	str		profile	start	fork_guest_poke.c	this fork's: `<main's build ID>:<module>+<hex offset>=<hex bytes>[,...]`, bytes written into a loaded module before the game runs (and again if its start-up writes over them): a switch of the game's own that its Switch build leaves off
 DM_GUEST_SPAWN_TEST	int		debug	?	hle_guestthread.c	
 DM_HLECOUNT	str		debug	start	hle_count.c	count every HLE call and write a TSV (category, name, count) at exit; the `ctl.txt` line `hlecount <file>` writes the counts so far, so two dumps around one action show the calls it made
@@ -256,6 +257,8 @@ DM_TEST_KILL_AT	str		debug	?	hle_fs.c
 DM_TEST_LEAK_GPU	str		debug,ios	?	nvn_mtl.m	
 DM_TEST_LINK_STALL	str		debug,ios	?	nvn_mtl.m	
 DM_TEST_PRESENT_LAG	str		debug	?	hle_nvn.c	
+DM_THREAD_DUMPS	str		debug	start	hle_nvn.c	this fork's: <present>[#n]: from that present on, n (8) dumps of every guest thread's wait and backtrace, 7.3 ms apart: which threads wait, and for what, at different moments of a frame
+DM_UE_DYNRES	str		profile	start	fork_ue_dynres.inc	this fork's: <main's build ID>:<min>,<max>,<throttle>:<lo>-<hi>: an Unreal Engine game's own dynamic resolution steered by the host: the hex offsets in main of the value pointers of r.DynamicRes.MinScreenPercentage, MaxScreenPercentage and ThrottlingMaxScreenPercentage, and the screen percentages to move between (steps of 5: down when the frames' GPU p90 over 30 presents passes 92% of the frame time, up after four such windows under 82% and not within 600 presents of a drop)
 DM_TEST_SWKBD_HOLD_MS	int		debug	?	hle_swkbd.c	
 DM_TEST_SWKBD_LAG_MS	int		debug	?	hle_swkbd.c	test: slow down "keyboard handed back → the game's thread gets the result" to verify that auto-accept does not jump the gun // front end path cleanup (dm_cursor.c): auto-accept after the name is typed on the naming page
 DM_TEST_UP_LEAK	str		debug,ios	?	nvn_mtl.m	test switch DM_TEST_UP_LEAK=1: do not retire the old block, as before the fix (for comparison, to measure the leak)
@@ -388,6 +391,7 @@ DM_VK_SHOTS	bool		debug	live	gfx_vk_present.c	save each of the next N presented 
 DM_VK_SHOTS_FAST	str		debug	?	gfx_vk_present.c	
 DM_VK_SHOT_DIR	str		debug	?	gfx_vk_present.c	
 DM_VK_SKIP_OPS	str		debug	live	gfx_vk_exec.c	bisection aids: skip command kinds; 1 no draw calls, 2 no vertex buffers, 4 no descriptor sets
+DM_VK_SLOTS	int	6	profile	start	gfx_vk_core.c	this fork's: the submission slots the ring takes (6 to 32). A slot is taken again only once the GPU has finished the submission it held, so the replay runs at most that many submissions ahead of the GPU: a game that submits more than about half that many times a frame (Unreal Engine 5: 8) has each frame's replay wait for the GPU to finish the frame before
 DM_VK_SLOT0_FILL	bool		debug	?	gfx_vk_exec.c	
 DM_VK_SPV_ALT	bool		debug	?	gfx_vk_exec.c	pipelines made while `ALT` is on use `<dir>/<key>.spv` in place of the bundle's code where the file exists (same bindings), so two compilations of a shader compare in one run (e.g. the translator's GLSL through `glslc`, or a patched module)
 DM_VK_SPV_CAPS	int		debug	?	gfx_vk_shader.c	
@@ -407,6 +411,7 @@ DM_VK_TRACE_FRAME	str		debug	live	gfx_vk_exec.c	trace every pass of the next sub
 DM_VK_TRACE_FRAME_IN	int		debug	?	gfx_vk_exec.c	
 DM_VK_TRACE_FRAME_SPEC	str		debug	?	gfx_vk_exec.c	
 DM_VK_TRACE_PASS	int		debug	live	gfx_vk_exec.c	`-2` lists one submission's passes; `n` logs every draw of pass n once (targets, depth target, textures, pipeline state); the `-2` list also shows each barrier's NVN bits and where each pass was ended from (an offset in `libdmhost.so`), each dispatch's storage buffers (`s<n> <address>+<size>`, for a
+DM_VK_TS_SCALE	float		debug	start	gfx_vk_core.c	this fork's: the factor GPU timestamps are multiplied by (1 = the driver's unit as it is). Unset: measured against the CPU's clock over the first seconds (the bundled Turnip's timestamps ran at 0.631 of real time on the Retroid Pocket Nova)
 DM_VK_TRACE_SIZE	str		debug	live	gfx_vk_exec.c	trace the (n+1)th pass whose first colour target has that size (and formats): pass numbers move by tens from frame to frame
 DM_VK_TRACE_VS	str		debug	?	gfx_vk_exec.c	
 DM_VK_UBD_HEAP	hex		debug	live	gfx_vk_exec.c	a deferred uniform update keeps no copy in ordinary memory, and the shadows read its bytes back from the submission's scratch buffer, as before (`gfx_vk_core.c` `vk_sub_update`). Scratch is mapped GPU memory, not cached on Adreno: those reads were 17 to 33% of the replay thread on Breath of the Wild

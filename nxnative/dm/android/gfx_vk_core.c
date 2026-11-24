@@ -1248,7 +1248,13 @@ static void vk_pools_sync_(VkCommandBuffer cb) {
 struct vksub; static void pools_copy_back(const struct vksub *s);
 
 // ---------------- submission slots ----------------
-#define NSLOT 6
+#define NSLOT 32   // the most slots there are; the ring takes g_nslot of them
+// This fork's: DM_VK_SLOTS=<6 to 32> (start-up; a game's android.tsv env row), the slots the ring takes, 6 unless set. A slot is taken again only once the GPU has
+// finished the submission it held, so the replay runs at most that many submissions ahead of the GPU. FINAL FANTASY RESONANCE (Unreal Engine 5.6) submits 8 times
+// a frame: with 6 slots the first submission of a frame took the slot of the one right after the frame before's last large one, so its replay began only when the
+// GPU had finished that frame, and the frame took the GPU's time plus the replay's (18.1 + 2.3 ms in its heaviest field on the Retroid Pocket Nova, the GPU idle
+// meanwhile). With two frames' worth of slots the replay of a frame overlaps the GPU's work on the one before.
+static int g_nslot = 6;
 #define MAIN_CBS 32   // (allocated as used: DM_VK_PASS_SPLIT cuts inside passes as well)
 // GPU time: a timestamp at the start and end of each submission's main command buffer (one queue: their sum is the time the GPU was busy)
 static VkQueryPool g_tsq; uint64_t g_gpu_ns;
@@ -1360,7 +1366,7 @@ enum { FPASSQ = 512 }; static int g_fpass;   // passes of the frame so far
 void vk_pass_frame(void) { g_fpass = 0; }   // a present: the next pass is the frame's first
 static pass_meta g_pmeta[NSLOT][PASSQ]; static int g_npass[NSLOT];
 static double g_pacc[FPASSQ]; static uint32_t g_pcnt[FPASSQ]; static pass_meta g_plast[FPASSQ]; static int g_pmax;   // by the pass's place in its frame (the completion thread adds)
-static int pass_times_on(void) { if (g_pq_on < 0) { const char *e = getenv("DM_VK_PASS_TIMES"); g_pq_on = e && atoi(e); } return g_pq_on && g_pq; }
+static int pass_times_on(void) { if (g_pq_on < 0) { const char *e = getenv("DM_VK_PASS_TIMES"); g_pq_on = e ? atoi(e) : 0; } return g_pq_on && g_pq; }   // (2: the report also lists every pass in frame order)
 void vk_pass_ts(int end, uint32_t w, uint32_t h, uint32_t fmt, uint32_t draws) {
     if (!pass_times_on() || g_cur < 0) return; int *n = &g_npass[g_cur]; if (*n >= PASSQ) return;
     vkCmdWriteTimestamp(g_slot_main_cb(), end ? VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_pq, (uint32_t)(g_cur * PASSQ * 2 + *n * 2 + end));
@@ -1377,13 +1383,22 @@ void vk_pass_report(void) {   // the most expensive passes since the last report
         else o += snprintf(b + o, sizeof b - (size_t)o, " #%d %.2f ms (%ux%u fmt %u, %u draws over %u px wide);", k, g_pacc[k] / g_pcnt[k], g_plast[k].w, g_plast[k].h, g_plast[k].fmt, g_plast[k].draws & 0xffff, g_plast[k].draws >> 16); }
     { extern uint64_t g_nvn_discards[2]; static uint64_t pd0, pd1; o += snprintf(b + o, sizeof b - (size_t)o, " discards since: colour %llu, depth %llu", (unsigned long long)(g_nvn_discards[0] - pd0), (unsigned long long)(g_nvn_discards[1] - pd1)); pd0 = g_nvn_discards[0]; pd1 = g_nvn_discards[1]; }
     VKLOG("%s", b);
+    if (g_pq_on >= 2) {   // every pass and dispatch in frame order (this fork's): where in the frame the GPU time goes
+        o = 0;
+        for (int i = 0; i < m; i++) { if (!g_pcnt[i]) continue;
+            if (!o) o = snprintf(b, sizeof b, "passes in frame order:");
+            if (g_plast[i].fmt == PT_DISPATCH) o += snprintf(b + o, sizeof b - (size_t)o, " #%d %.3f d%ux%ux%u;", i, g_pacc[i] / g_pcnt[i], g_plast[i].w, g_plast[i].h, g_plast[i].draws);
+            else o += snprintf(b + o, sizeof b - (size_t)o, " #%d %.3f %ux%u f%u n%u;", i, g_pacc[i] / g_pcnt[i], g_plast[i].w, g_plast[i].h, g_plast[i].fmt, g_plast[i].draws & 0xffff);
+            if (o > (int)sizeof b - 80) { VKLOG("%s", b); o = 0; } }
+        if (o) VKLOG("%s", b);
+    }
     memset(g_pacc, 0, sizeof g_pacc); memset(g_pcnt, 0, sizeof g_pcnt); g_pmax = 0;
 }
 // one submission at a time: the game's (hle_nvn.c holds its own lock around them) and the backend's own (texel readback, present)
 static pthread_mutex_t g_sub_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_fence;   // fence of the last commit
 static VkSemaphore g_timeline;   // submission f signals the value f (V.has_timeline), else g_fring[f % NFRING]
-#define NFRING 16   // more than the submissions in flight (NSLOT: mtl_sub_begin's slot_recycle waits for the slot's last one)
+#define NFRING 64   // more than the submissions in flight (at most NSLOT: mtl_sub_begin's slot_recycle waits for the slot's last one)
 static VkFence g_fring[NFRING];
 static pthread_mutex_t g_done_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_done_cv = PTHREAD_COND_INITIALIZER;
 static uint64_t g_done, g_done_ns;   // g_done_ns: when the completion thread last passed a submission (vk_device_lost)
@@ -1426,7 +1441,8 @@ static void slots_init(void) {
     else if (V.has_hqr) vkResetQueryPool(V.dev, g_oq, 0, NSLOT * OQ);
     VKLOG("occlusion queries: %s, %s, reset %s", g_oq ? "pool made" : "none", V.has_oq_precise ? "precise" : "not precise (only zero / not zero)", V.has_hqr ? "on the host" : "in each submission while wanted");
     { const char *e = getenv("DM_VK_PASS_TIMES"); if (e && atoi(e)) { VkQueryPoolCreateInfo pq = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_TIMESTAMP, NSLOT * PASSQ * 2}; if (vkCreateQueryPool(V.dev, &pq, NULL, &g_pq)) g_pq = VK_NULL_HANDLE; } }
-    for (int i = 0; i < NSLOT; i++) {
+    { const char *e = getenv("DM_VK_SLOTS"); int n = e ? atoi(e) : 0; if (n >= 6 && n <= NSLOT) { g_nslot = n; VKLOG("submission slots: %d (DM_VK_SLOTS)", n); } else if (e && *e) VKLOG("[RED] DM_VK_SLOTS=%s: 6 to %d; left at %d", e, NSLOT, g_nslot); }
+    for (int i = 0; i < g_nslot; i++) {
         // not TRANSIENT, and reset by command buffer (see slot_recycle)
         VkCommandPoolCreateInfo ci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, NULL, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, V.qf};
         VKCHK(vkCreateCommandPool(V.dev, &ci, NULL, &g_slot[i].pool));
@@ -1677,7 +1693,7 @@ static void begin_segment(int continuing) {
     // of a pool: its buffer, its images and their views; under synchronous replay nothing holds that thread back) joined the list the recycle frees as soon as the
     // slot's last submission is done, NSLOT submissions ago, while the newer ones the GPU had not finished could still read that memory. Meanwhile df_add waits
     // for every submission so far, as between two submissions
-    static int next; int idx = next; next = (next + 1) % NSLOT; vksub_t *s = &g_slot[idx];
+    static int next; int idx = next; next = (next + 1) % g_nslot; vksub_t *s = &g_slot[idx];
     pthread_mutex_lock(&g_df_mu); g_recycling = idx; pthread_mutex_unlock(&g_df_mu);
     slot_recycle(s);
     pthread_mutex_lock(&g_df_mu); g_recycling = -1; g_cur = idx; g_sub_thread = pthread_self(); pthread_mutex_unlock(&g_df_mu);
@@ -2019,6 +2035,27 @@ static void completion_wait(uint64_t f) {
             fflush(stderr); fsync(fileno(stderr)); }
     }
 }
+// This fork's: the GPU clock's unit, measured. A driver reports its timestamps' unit (timestampPeriod) from the counter's nominal rate; the bundled Turnip takes
+// 19.2 MHz, and on the Retroid Pocket Nova (Adreno 740) its timestamps ran at 0.631 of real time (102.2 s of them over 162.0 s, FINAL FANTASY RESONANCE's field):
+// every GPU time in the log read 37% short, and so did the counter timestamps the game reads (an engine's dynamic resolution then sees headroom it does not have).
+// The submissions' end timestamps against the CPU's clock, over windows of 3 to 10 s: two windows in a row that agree within 2% set the scale (within 2% of 1 it
+// stays 1: the measurement's own error). DM_VK_TS_SCALE=<factor> sets it instead (1 = the driver's unit as it is).
+static double g_ts_k = 1.0;
+static double ts_period(void) { return (double)V.props.limits.timestampPeriod * g_ts_k; }   // ns per timestamp tick
+static void ts_calibrate(uint64_t tend) {
+    static int fixed = -1; if (fixed < 0) { const char *e = getenv("DM_VK_TS_SCALE"); double v = e ? strtod(e, NULL) : 0; fixed = v > 0; if (fixed) { g_ts_k = v; VKLOG("GPU clock: timestamps scaled by %.3f (DM_VK_TS_SCALE)", v); } }
+    if (fixed) return;
+    static uint64_t t0, c0; static double prev;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); uint64_t c = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+    if (!t0 || tend <= t0 || c - c0 > 10000000000ull) { t0 = tend; c0 = c; prev = 0; return; }
+    if (c - c0 < 3000000000ull) return;
+    double k = (double)(c - c0) / ((double)(tend - t0) * (double)V.props.limits.timestampPeriod);
+    t0 = tend; c0 = c;
+    if (!(k > 0.4 && k < 2.5)) { prev = 0; return; }
+    if (prev > 0 && k > prev * 0.98 && k < prev * 1.02) { double nk = (k + prev) / 2; if (nk > 0.98 && nk < 1.02) nk = 1;
+        if (nk > g_ts_k * 1.01 || nk < g_ts_k * 0.99) { static int n; if (n++ < 6) VKLOG("GPU clock: the driver's timestamps run at %.3f of real time (measured over two windows): GPU times and the game's counter timestamps are scaled by %.3f", 1 / nk, nk); g_ts_k = nk; } }
+    prev = k;
+}
 static void *completion_main(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "dm-vk-complete");
     for (;;) {
@@ -2028,14 +2065,14 @@ static void *completion_main(void *a) {
         completion_wait(c->fence);
         if (g_shadow_pools && c->rslot >= 0) pools_copy_back(&g_slot[c->rslot]);
         if (g_tsq && c->slot >= 0) { uint64_t t[2]; if (vkGetQueryPoolResults(V.dev, g_tsq, 2 * (uint32_t)c->slot, 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] > t[0])
-            { uint64_t ns = (uint64_t)((double)(t[1] - t[0]) * V.props.limits.timestampPeriod); g_gpu_ns += ns; int k = (int)(c->frame % 64);
-              { int nvn_seq_active(void); uint64_t now_ns(void); static uint64_t last_end; if (nvn_seq_active()) VKLOG("[seq] %.3f GPU ran host fence %llu for %.2f ms; its start %.2f ms after the end of the one before (the GPU's own clock)", now_ns() / 1e6, (unsigned long long)c->fence, ns / 1e6, last_end && t[0] > last_end ? (double)(t[0] - last_end) * V.props.limits.timestampPeriod / 1e6 : 0.0); last_end = t[1]; }   // (this fork's: DM_NVN_SEQ)
+            { ts_calibrate(t[1]); uint64_t ns = (uint64_t)((double)(t[1] - t[0]) * ts_period()); g_gpu_ns += ns; int k = (int)(c->frame % 64);
+              { int nvn_seq_active(void); uint64_t now_ns(void); static uint64_t last_end; if (nvn_seq_active()) VKLOG("[seq] %.3f GPU ran host fence %llu for %.2f ms; its start %.2f ms after the end of the one before (the GPU's own clock)", now_ns() / 1e6, (unsigned long long)c->fence, ns / 1e6, last_end && t[0] > last_end ? (double)(t[0] - last_end) * ts_period() / 1e6 : 0.0); last_end = t[1]; }   // (this fork's: DM_NVN_SEQ)
               if (g_frame_gpu_of[k] != c->frame + 1) { g_frame_gpu[k] = 0; g_frame_gpu_of[k] = c->frame + 1; } g_frame_gpu[k] += ns; } }
         if (g_pq && pass_times_on() && c->slot >= 0) {   // this submission's passes
             int np = c->npass; uint64_t t[PASSQ * 2];
             if (c->frame != g_sf_frame) { pass_spike_flush(); g_sf_frame = c->frame; }
             if (np && vkGetQueryPoolResults(V.dev, g_pq, (uint32_t)(c->slot * PASSQ * 2), (uint32_t)np * 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
-                for (int i = 0; i < np; i++) if (t[2 * i + 1] > t[2 * i]) { pass_spike_add((double)(t[2 * i + 1] - t[2 * i]) * V.props.limits.timestampPeriod / 1e6, &c->pmeta[i]); int f = (int)c->pmeta[i].fidx; g_pacc[f] += (double)(t[2 * i + 1] - t[2 * i]) * V.props.limits.timestampPeriod / 1e6; g_pcnt[f]++; g_plast[f] = c->pmeta[i]; if (f + 1 > g_pmax) g_pmax = f + 1; }
+                for (int i = 0; i < np; i++) if (t[2 * i + 1] > t[2 * i]) { pass_spike_add((double)(t[2 * i + 1] - t[2 * i]) * ts_period() / 1e6, &c->pmeta[i]); int f = (int)c->pmeta[i].fidx; g_pacc[f] += (double)(t[2 * i + 1] - t[2 * i]) * ts_period() / 1e6; g_pcnt[f]++; g_plast[f] = c->pmeta[i]; if (f + 1 > g_pmax) g_pmax = f + 1; }
         }
         // occlusion queries: each one's result with its availability (a dropped submission, c->slot -1: none of them counts, the counter is unknown until the next reset)
         static uint64_t oqr[OQ][2]; int oq_got = 0;
@@ -2048,7 +2085,7 @@ static void *completion_main(void *a) {
         // wrap (a driver with fewer valid timestamp bits) and slow drift; a report then never lands past the guest clock.
         static uint64_t g_ts_o; static int g_ts_set; uint64_t ts_end = now;
         if (tend) {
-            uint64_t qe = (uint64_t)((double)tend * V.props.limits.timestampPeriod * 12 / 625);   // GPU ticks → NVN ticks, the guest's 625/12 ns unit
+            uint64_t qe = (uint64_t)((double)tend * ts_period() * 12 / 625);   // GPU ticks → NVN ticks, the guest's 625/12 ns unit
             if (!g_ts_set || g_ts_o + qe > now || now - (g_ts_o + qe) > 1920000ull) { g_ts_o = now - qe; g_ts_set = 1; }   // 100 ms in NVN ticks
             ts_end = g_ts_o + qe;
         }
@@ -2068,7 +2105,7 @@ static void *completion_main(void *a) {
             // frame that took 33 ms and raised the resolution. A report without a usable query takes the submission's end on the same map.
             uint64_t ts = ts_end, tq = 0;
             if (o->q >= 0 && tend && vkGetQueryPoolResults(V.dev, g_cq, (uint32_t)o->q, 1, 8, &tq, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && tq && tq <= tend)
-                ts = g_ts_o + (uint64_t)((double)tq * V.props.limits.timestampPeriod * 12 / 625);
+                ts = g_ts_o + (uint64_t)((double)tq * ts_period() * 12 / 625);
             // render_cond: a timestamp report's counter field is 0, as on the GPU (gfx_vk_exec.c render_cond evaluates conditions on it)
             uint64_t rec[2] = {o->type == 0 || o->type == 0x10 ? (DM_GAME_RENDER_COND ? 0 : ts) : o->type == NVN_COUNTER_TYPE_SAMPLES_PASSED ? (1u << 20) : 0, ts}; memcpy((void *)(uintptr_t)o->addr, rec, sizeof rec);
         }

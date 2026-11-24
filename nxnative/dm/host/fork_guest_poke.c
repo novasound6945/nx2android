@@ -40,8 +40,42 @@ static void *poke_watch(void *arg) {
             else if (said++ < 24) LOG("guest poke: %s was written over by the game %.1f s in (it held %s): written again", g_poke[i].what, sec, was); } }
     return NULL;
 }
+// DM_GUEST_PEEK=<main's build ID>:<module>+<hex offset>[><hex offset>]?<bytes>[,...] (start-up, a diagnosis): the same places, only read. Each place's bytes are
+// logged when first readable and whenever they have changed (looked at every 250 ms, up to 40 lines a place): what the game sets a switch to, and when.
+enum { NPEEK = 24 };
+static struct { uint8_t *at; int n, deref, have, said; uint64_t off2; uint8_t last[POKE_MAX]; char what[64]; } g_peek[NPEEK]; static int g_npeek;
+static void *peek_watch(void *arg) {
+    (void)arg;
+    for (int t = 0;; t++) { usleep(250000);
+        for (int i = 0; i < g_npeek; i++) { uint8_t *at = g_peek[i].at; if (g_peek[i].deref) { uint8_t *p; memcpy(&p, at, sizeof p); at = p ? p + g_peek[i].off2 : NULL; }
+            if (!at || (g_peek[i].have && !memcmp(at, g_peek[i].last, (size_t)g_peek[i].n)) || g_peek[i].said >= 40) continue;
+            memcpy(g_peek[i].last, at, (size_t)g_peek[i].n); g_peek[i].have = 1; g_peek[i].said++;
+            char hx[POKE_MAX * 2 + 1] = ""; for (int k = 0; k < g_peek[i].n; k++) snprintf(hx + k * 2, 3, "%02x", g_peek[i].last[k]);
+            float f = 0; int32_t v = 0; if (g_peek[i].n >= 4) { memcpy(&f, g_peek[i].last, 4); memcpy(&v, g_peek[i].last, 4); }
+            LOG("guest peek: %s = %s (as float %g, as int %d) %.1f s in", g_peek[i].what, hx, (double)f, v, (t + 1) * 0.25); } }
+    return NULL;
+}
+static void guest_peek(void) {
+    const char *e = getenv("DM_GUEST_PEEK"); if (!e || !*e) return;
+    const char *colon = strchr(e, ':'), *build = dm_main_build();
+    if (!colon || colon - e != 32 || strncmp(e, build, 32)) { LOG("[RED] guest peek: DM_GUEST_PEEK is for main %.32s, this main is %s: nothing read", e, build); return; }
+    for (const char *p = colon + 1; *p && g_npeek < NPEEK;) {
+        const char *plus = strchr(p, '+'), *q = plus ? strchr(plus, '?') : NULL; if (!plus || !q || plus - p >= 16) break;
+        char name[16] = ""; memcpy(name, p, (size_t)(plus - p)); char *end; uint64_t off = strtoull(plus + 1, &end, 16), off2 = 0; int deref = 0;
+        if (*end == '>') { deref = 1; off2 = strtoull(end + 1, &end, 16); }
+        module_t *m = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, name)) m = &g_mod[i];
+        char *end2; long n = strtol(q + 1, &end2, 10);
+        if (!m || end != q || n < 1 || n > POKE_MAX || off + (uint64_t)(deref ? 8 : n) > m->size) { LOG("[RED] guest peek: %.*s is not <module>+<offset>[><offset>]?<bytes> inside a loaded module: left out", (int)(end2 - p), p); }
+        else { if (deref) snprintf(g_peek[g_npeek].what, sizeof g_peek[g_npeek].what, "[%s+%#llx]+%#llx", name, (unsigned long long)off, (unsigned long long)off2);
+               else snprintf(g_peek[g_npeek].what, sizeof g_peek[g_npeek].what, "%s+%#llx", name, (unsigned long long)off);
+               g_peek[g_npeek].at = m->base + off; g_peek[g_npeek].deref = deref; g_peek[g_npeek].off2 = off2; g_peek[g_npeek].n = (int)n; g_npeek++; }
+        p = *end2 == ',' ? end2 + 1 : end2; if (*end2 && *end2 != ',') break;
+    }
+    if (g_npeek) { pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED); pthread_create(&t, &a, peek_watch, NULL); pthread_attr_destroy(&a); }
+}
 void dm_fork_guest_poke(void);
 void dm_fork_guest_poke(void) {
+    guest_peek();
     const char *e = getenv("DM_GUEST_POKE"); if (!e || !*e) return;
     const char *colon = strchr(e, ':'), *build = dm_main_build();
     if (!colon || colon - e != 32 || strncmp(e, build, 32)) { LOG("[RED] guest poke: DM_GUEST_POKE is for main %.32s, this main is %s: nothing written", e, build); return; }
