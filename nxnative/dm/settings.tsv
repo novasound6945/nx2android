@@ -27,7 +27,7 @@ DM_DBG_AU_FRAMES	int		debug	?	hle_audio.c	diagnostic: on the Mac, make the sound
 DM_DETAIL_DIST	bool		profile	start	gfx_vk_shader.c	the build's culling shader reads a factor from DETAIL_SLOT; the host keeps it at 1x (the pause menu row was removed)
 DM_DETCLOCK	str		debug	?	hle_nvn.c hle_os.c	
 DM_DETCLOCK_PACE	bool		debug	?	hle_nvn.c	
-DM_DYN_SCALE	float		debug	live	hle_nvn.c	the host's dynamic resolution through the render-scale stub: every 30 frames held at the cap, GPU p90 over 85% of the frame time lowers the scale 0.05, under 70% raises it; 0 = off (scale 1.0). Tears of the Kingdom's pond: 1.0 -> 0.6 saved only 2.6 ms of GPU p90
+DM_DYN_SCALE	str		profile	live	hle_nvn.c	the host's dynamic resolution: a level for a profile's env row, `low` (lowest scale 0.85 against 90% of the frame time), `medium` (0.70, 85%) or `high` (0.50, 80%), or a number, the lowest scale (0.5 to 0.95, 85% budget); 0 or unset = off. In a game with a render-scale stub: every 30 frames held at the cap, GPU p90 over the budget lowers the scale 0.05, under 70% of it raises it (Tears of the Kingdom's pond: 1.0 -> 0.6 saved only 2.6 ms of GPU p90). In a game without one (no state page) it steers the engine's own dynamic resolution: the GPU clock the game reads (nvnDeviceGetTimestampInNanoseconds, GetCurrentTimestampInNanoseconds) runs k times as fast, k between 1 and 1 / (lowest scale)², raised 15% while GPU p90 is over the budget and lowered under 70% of it, the budget taken at 30 fps under a 30 fps ceiling (hle_nvn.c engine_dyn_tick). Only for engines whose resolution controller reads NVN counter timestamps (Pokémon Scarlet / Violet); a game that paces frames on them would be thrown off
 DM_ENV_FILE_KEYS	str		app,ios	start	main.m	the iOS launcher: the keys an env file set (Launcher.swift keeps them)
 DM_FD_LOG	int		debug	?	hle_fdstat.c	
 DM_FIXED_TIME	str		debug	?	hle_time.c main.c	
@@ -65,7 +65,7 @@ DM_LANG	str	en-US	porter	?	hle_oe.c main.m	the system language the game sees (en
 DM_LAN_TRACE	str		debug	start	hle_ldn.c hle_socket.c	with `DM_LAN=1`: every `nn::socket` call (addresses, flags, result, errno) and every `nn::ldn` / `nn::nifm` query with its result, as `[lan]` lines
 DM_LINK_VTICK	str		debug,ios	?	nvn_mtl.m	
 DM_LOADHASH	str		debug	?	loader.c	
-DM_LOG_FPS	bool		debug	start	gfx_vk_present.c	the descriptor caches' statistics with the frame rate lines
+DM_LOG_FPS	bool	0	debug	start	gfx_vk_present.c	1 = every 600 presents a line on the replay's descriptor caches: memo hits kept and missed by cause, stage sets found by their bindings (rmemo), constant buffer paths and misses, texture views
 DM_LONGFRAME	str		debug	?	hle_nvn.c	
 DM_MEMSTAT	str		debug,ios	?	memstat.m	
 DM_MEMSTAT_DUMP	int		debug,ios	?	memstat.m	
@@ -153,10 +153,12 @@ DM_NVN_TEXCPU	str		debug,ios	?	nvn_mtl.m
 DM_NVN_TEXDUMP	str		debug,ios	?	nvn_mtl.m	
 DM_NVN_TEXINFO	str		debug	?	hle_nvn.c nvn_mtl.m	
 DM_NVN_TEXRAW	str		debug,ios	?	nvn_mtl.m	
+DM_NVN_TEXSIZE_CALLER	str		debug	live	hle_nvn.c	WxH: log the game's call chain (direct caller and up to 4 frame-pointer frames above) of each distinct nvnTextureBuilderSetSize2D at that size, to find which engine system creates a render target; re-read every 4096 calls
 DM_NVN_TEXSNAP	str		debug,ios	?	nvn_mtl.m	
 DM_NVN_TREG_ID	int		debug,ios	?	nvn_mtl.m	
 DM_NVN_TSV	str		debug	?	hle_nvn.c	
 DM_NVN_TSV_CALLS	int		debug	?	hle_nvn.c	0 = write only the @ timing rows (pulling files from a real device has a size limit, and the call-count rows take about 2/3)
+DM_NVN_TS_CALLER	str		debug	live	hle_nvn.c	0x0: the same call chain for nvnDeviceGetTimestampInNanoseconds, to find which code measures GPU time (a frame-rate or dynamic-resolution controller); re-read every 4096 calls
 DM_NVN_UB	str		debug,ios	?	nvn_mtl.m	
 DM_NVN_UBP_CHECK	str		debug,ios	?	nvn_mtl.m	
 DM_NVN_UB_COPY_THREAD	str		debug	?	nvn_rec.h	
@@ -170,6 +172,7 @@ DM_NVN_VBUF_CACHE	str		debug,ios	?	nvn_mtl.m
 DM_NVN_VCONV_CHECK	bool		debug,ios	?	nvn_mtl.m	
 DM_NVN_VCONV_CPU	str		debug,ios	?	nvn_mtl.m	
 DM_NVN_VCONV_RANGE	bool		debug,ios	?	nvn_mtl.m	
+DM_NVN_VIEWPORT_CALLER	str		debug	live	hle_nvn.c	WxH: the same call chain for nvnCommandBufferSetViewports at that width and height, to find which pass draws at a (dynamically scaled) size; re-read every 4096 calls
 DM_NVN_VLOG	str		debug	?	hle_nvn.c	
 DM_NVN_XV	str		debug,ios	?	nvn_mtl.m	
 DM_NVN_ZBLOCK	str		debug,ios	?	nvn_mtl.m	DM_NVN_ZBLOCK=<folder>: also the raw storage of the first such texture of each format and size (up to 16), zb_<serial>.bin (unmapped pages as 0)
@@ -179,6 +182,7 @@ DM_OODLE_JOB	str		debug	?	hle_oodle.c
 DM_OODLE_JOB_BNSH	bool		debug	?	hle_oodle.c	
 DM_OODLE_SERVE	str		debug	?	hle_oodle.c	
 DM_OPMODE	int		app	start	hle_oe.c	the operation mode at launch: 0 handheld, 1 docked. Default: the profile (op_mode); the pause menu overrides it
+DM_OVERLAY_SPLIT	bool	0	debug	start	overlay_layout.h	1 = on a window narrower than 3:2 the picture across the top and the on-screen gamepad in the band under it. When the display's density is known, a window wider than tall uses the band only where its face buttons stay at least 8 mm wide at that density (a window taller than wide takes it anyway: the gamepad over the picture would meet in the middle). An external display showing the picture disables the band.
 DM_PAD_LABEL	bool		debug	start	front_android.c	a physical controller's face buttons go to the game by their label (an Xbox controller's A is the game's A) instead of by their position (the Switch's: the bottom button is B, the right one A). The game's prompts name the button (A to confirm, B to go back), which an Xbox controller's labels match a
 DM_PAD_MERGE	bool		debug	?	front_android.c front_mac.m	
 DM_PAD_XBOX	bool		debug	start	front_android.c	a physical controller's face buttons go to the game by their label (an Xbox controller's A is the game's A) instead of by their position (the Switch's: the bottom button is B, the right one A). The game's prompts name the button (A to confirm, B to go back), which an Xbox controller's labels match a
@@ -270,7 +274,7 @@ DM_VK_ASYNC_PIPE	bool	1	profile	live	gfx_vk_exec.c	0 = new pipelines are built o
 DM_VK_BC_DRAW	int	0	profile	start	gfx_vk_tex.c	BC texture stand-in mode for drivers without BC: 0 = off
 DM_VK_BIND_ALIAS	str		profile	live	gfx_vk_exec.c	<shader key>:<binding>=<binding>[:...]: a shader's texture binding reads another binding's texture
 DM_VK_BIND_DUMP	str		debug	start	gfx_vk_exec.c	writes the storage of the texture that binding of that pixel shader really resolved to (at most 8 files) to `$DM_ROOT/bind_<fs>_b<binding>_<w>x<h>_f<format>_s<serial>.bin` (the current folder when `DM_ROOT` is unset); slots alone are polluted by stale entries of earlier draws
-DM_VK_C2_FAST	bool	1	profile	live	gfx_vk_exec.c	a c2 driver segment found again by the hash of its slots (docs/ARCHITECTURE.md, Descriptor cache hashing); 0 builds it each time
+DM_VK_C2_FAST	bool	1	debug	live	gfx_vk_exec.c	c2 driver segments found by the hash of their slots instead of built and hashed for every draw whose bindings changed (drv_shared; docs/ARCHITECTURE.md, Descriptor cache hashing); 0 = built every time (A/B)
 DM_VK_CAPTURE	str		debug,ios	?	hle_vk.m	
 DM_VK_CB_DRAWS	int	128	profile	live	gfx_vk_exec.c	split the frame into command buffers every N draws (128), only before passes with a new depth image; `0` = never
 DM_VK_COMPUTE_WARM_MAX	int		debug	?	gfx_vk_exec.c	
@@ -300,6 +304,7 @@ DM_VK_IMG_BLOCKS	bool		debug	start	gfx_vk_core.c	small images take a slot of a s
 DM_VK_INT_OUT	bool		debug	start	gfx_vk_exec.c	0: float outputs into UINT / SINT colour targets are left float (no integer output variant)
 DM_VK_INVAL_KEEP	bool		profile	live	gfx_vk_exec.c	an invalidate-only barrier keeps the render pass open (SUPER ROBOT WARS T)
 DM_VK_LIN_BACK	bool		debug	live	gfx_vk_exec.c	what the GPU draws into a linear render target (NVN `LINEAR_RENDER_TARGET`) stays in the Vulkan image, as before (default: copied back to the texture's pool memory after the pass, so the CPU can read it; Super Mario Odyssey's ground fog reads its wave surface this way)
+DM_VK_LIN_COPY_BACK	bool	0	profile	start	gfx_vk_exec_copies.inc	1 = a texture copy into a LINEAR texture in CPU-visible memory also copies the region back to its storage, so the CPU reads what the GPU copied (gfx_vk_exec_copies.inc t2t_lin_back; Pokémon Violet encodes its enrollment portrait to BC1 on the CPU from such a capture)
 DM_VK_LIST_AT	str		debug	live	gfx_vk_exec.c	DM_VK_LIST_AT=<present>[#n]: the pass list of every submission over n (2) presents from there; now[#n] starts at the current present (once a run)
 DM_VK_LIST_N	int		debug	?	gfx_vk_exec.c	
 DM_VK_LOG	str		debug,ios	?	hle_vk.m	
@@ -406,6 +411,7 @@ DM_VK_UBD_TRAP_N	int		debug	live	gfx_vk_core.c gfx_vk_exec.c	bindings logged per
 DM_VK_UBD_TRAP_TRACE	str		debug	live	gfx_vk_exec.c	WxH: DM_VK_TRACE_SIZE armed by the trap
 DM_VK_UBD_TRAP_X0	str		debug	?	gfx_vk_exec.c	
 DM_VK_UBD_WATCH	str		debug	?	gfx_vk_exec.c	
+DM_VK_UBO_COMPONENT	bool	0	profile	start	gfx_vk_shader.c	1 = fragment shaders' uniform buffer loads that pick a vector component at a non-constant index load the whole vector and take the component with OpVectorExtractDynamic (gfx_vk_ubo_comp.c). Turnip (Mesa) as vulkan.ad07xx.so on the Odin 2 (Adreno 740) did not give each invocation its own component: Pokémon Violet's lighting shader drew hair white in 8-row waves
 DM_VK_UBO_DIFF	str		debug	?	gfx_vk_exec.c	
 DM_VK_UBO_DUMP	int		debug	?	gfx_vk_exec.c	
 DM_VK_UBO_HASH	str		debug	?	gfx_vk_exec.c	
@@ -439,17 +445,17 @@ DM_VK_X_NOGS	bool		debug	live	gfx_vk_exec.c	leave out draws with a geometry shad
 DM_VK_X_NOKEEP	bool		debug	?	gfx_vk_exec.c	
 DM_VK_X_NOPRERESET	bool		debug	start	gfx_vk_core.c	a submission slot's command buffers are reset as they are begun again, on the replay thread, instead of on the completion thread when its submission is done
 DM_VK_X_NOSETC	bool		debug	live	gfx_vk_exec.c	flicker experiments: no descriptor-set reuse; no driver-segment reuse; deferred uniform updates land at each cut; no pass kept for repeated targets; no uniform-shadow reuse
-DM_VK_X_NOSETMEMO	bool		debug	?	gfx_vk_exec.c	
+DM_VK_X_NOSETMEMO	bool		debug	live	gfx_vk_exec.c	1 = stage sets always collected: no memo of the last set, none found by their bindings (rmemo), for an A/B of those caches
 DM_VK_X_NOSHC	bool		debug	?	gfx_vk_exec.c	
 DM_VK_X_NOTARGET	bool		debug	start	gfx_vk_exec.c	skip draws with no colour or depth target set, as before (A/B); default 1 runs them in an attachment-less pass the size of viewport 0
 DM_VK_X_PIPE_SERIAL	int		debug	?	gfx_vk_exec.c	
 DM_VK_X_RDKEEP	hex		debug	live	gfx_vk_exec.c	runs of rasterizer-discard draws (vertex shaders that write memory) stay in the pass of the draws around them instead of a pass of their own: Xenoblade Chronicles 3 then draws thin black slivers over cliffs and grass in a few percent of frames
-DM_VK_X_SETVERIFY	bool		debug	?	gfx_vk_exec.c	
+DM_VK_X_SETVERIFY	bool		debug	live	gfx_vk_exec.c	1 = one memo hit in 64 is collected anyway and compared, and c2 segments found by hash are built again and compared: a [RED] line on any difference (docs/ARCHITECTURE.md, Descriptor cache hashing)
 DM_VK_X_SHADOWLIT	bool		debug	start	gfx_vk_tex.c	every depth compare passes (no shadows; A/B)
 DM_VK_X_SKIPFS	hex		debug	live	gfx_vk_exec.c	Skip draws with one of up to 16 fragment shader keys for pass/shader bisection. Diagnostic only: this deliberately removes rendering. `=0` clears the list.
 DM_VK_X_SKIPGS	hex		debug	live	gfx_vk_exec.c	Skip draws with one of up to 8 geometry shader keys (the bundle's key, before its topology variant), as `DM_VK_X_SKIPFS`. Diagnostic only: this deliberately removes rendering.
 DM_VK_X_SKIPVS	hex		debug	live	gfx_vk_exec.c	leave out the draws whose vertex shader key (hex, as the traces print it; up to 8) is listed: bisect which shaders an artifact needs, a group at a time (it found XC3's slivers from 40 candidates in 4 rounds)
-DM_VK_ZC_CHUNK_MB	int		profile	start	gfx_vk_core.c	the size in MB of the chunks a memory pool over 256 MB is mapped in (Trails in the Sky the 1st: 512)
+DM_VK_ZC_CHUNK_MB	int		profile	start	gfx_vk_core.c	the chunk size in MB that a memory pool over it is cut into (unset: 256 MB, or the largest of 128 / 64 / 32 MB that this gralloc takes when it refuses 256 MB, as an OPPO Pad's does for exactly 256)
 DM_VK_ZEROCOPY_LAZY	int		debug	start	gfx_vk_core.c	which zero-copy pools get their buffer only when the GPU first uses them (vk_pool_of, pool_back: a slab's slot or a kept buffer as at creation; until then the game's own cached, swappable pages): `0` none; `1` also the chunks of pools over 256 MB (`ZC_CHUNK`; Pokopia on the Thor, 4.96 GB of pools of
 DM_VK_ZEROCOPY_MAX_MB	int	0	profile	?	gfx_vk_core.c	pools above this many MB are not mapped zero-copy; 0 = no limit
 DM_VSYNC_HZ	float		debug	?	hle_sdk16.c	
