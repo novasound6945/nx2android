@@ -176,6 +176,12 @@ static VkPipeline gpl_part(int fs_part, const void *key, vkshader_t *a, vkshader
 // to 2. Each one's key is recorded here; the next start makes them first: on the preparation's screen, or at the head of the warm-up (from the pipeline cache,
 // before the game meets them). A key the preparation makes anyway (gpl_pr_std / gpl_fs_std: a draw that came before the warm-up) is not recorded. The header
 // holds the keys' version and sizes, the extended dynamic state 3 states and the bundle's hash: another bundle, device or key layout starts the list again
+// A bundle of more vertex and fragment shaders than DM_VK_GPL_PREP_MAX (gpl_keys_load) is not prepared whole: FINAL FANTASY RESONANCE (Unreal Engine 5.6, 9,253 vertex
+// and 61,305 fragment shaders, 193,168 parts) died in the preparation on a Retroid Pocket Nova at 18% (each shader keeps its SPIR-V for its variants, 1.4 GB at 16,384
+// shaders; 5.3 GB PSS, vkCreateShaderModule out of memory), and at its 39 parts a second the whole would have taken 80 minutes. For such a bundle the preparation and
+// the warm-up make the listed parts only (below), every part made at a draw is listed (the ones gpl_pr_std / gpl_fs_std leave out for a small bundle too), and the
+// parts of a shader are made when the game sets it in a program (vk_gpl_announce, further down), which is before it draws with it
+static int g_gpl_big;
 #define GSEEN_MAGIC 0x31534747u   // "GGS1"
 typedef struct { uint32_t magic, key_ver, pr_size, fs_size, eds3, pad; uint64_t bundle; } gseen_hdr;
 typedef struct { uint32_t fs, pad; union { gprkey pr; gfskey f; } k; } gseen_rec;   // fs: a fragment part (k.f), else a pre-rasterization one (k.pr)
@@ -244,6 +250,7 @@ static void gpl_draw_keys(const pkey *k, gprkey *out_pk, gfskey *out_fk, vkshade
     { const char *e = getenv("DM_VK_GPL_FSMS"); if (fs && e && atoi(e) && !fk.ms && (k->samples > 1 || k->a2c)) fk.ms = k->samples | k->a2c << 8; }
     *out_pk = pk; *out_fk = fk; *out_vs = vs; *out_fs = fs; *out_gs = gs;
 }
+static void gpl_ann_link(uint64_t vs, int vs_made, const gprkey *pk, uint64_t fsk, int fs_made, const gfskey *fk, const vkshader_t *fs);
 // the four parts of a draw's pipeline (shader parts from the preparation, or made now), linked without link-time optimization. NULL when one could not be made (logged)
 static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout) {
     uint64_t t0 = tick();
@@ -266,8 +273,9 @@ static VkPipeline gpl_link(const pkey *k, VkPipelineLayout layout) {
     g_gst.ns_link += t2 - t1; g_gst.ns_part += t1 - t0;
     if (mpr) { g_gst.parts[0]++; gpl_stat_add(&g_gst.part, mpr); } if (mfs) { g_gst.parts[1]++; gpl_stat_add(&g_gst.part, mfs); if (fk.fd >> 4 & 15) g_gst.parts_at++; if (fk.fd >> 8) g_gst.parts_int++; }
     uint64_t nl = g_gst.links; pthread_mutex_unlock(&g_glib_mu);
-    if (mpr && lib[1] && !gpl_pr_std(&pk)) gpl_seen_note(0, &pk);
-    if (mfs && lib[2] && !gpl_fs_std(&fk, fs)) gpl_seen_note(1, &fk);
+    if (mpr && lib[1] && (g_gpl_big || !gpl_pr_std(&pk))) gpl_seen_note(0, &pk);
+    if (mfs && lib[2] && (g_gpl_big || !gpl_fs_std(&fk, fs))) gpl_seen_note(1, &fk);
+    if (g_gpl_big) gpl_ann_link(pk.vs, mpr != 0, &pk, fk.fs, mfs != 0, &fk, fs);
     if (mpr || mfs) { static int n; if (n++ < 40) VKLOG("GPL: shader part made at a draw: %s%s %.2f ms (vertex %016llx views %#llx/%#llx outputs added %#x geometry %016llx; fragment %016llx views %#llx/%#llx variant %#x ms %#x)",
                                                      mpr ? "pre-rasterization" : "", mfs ? (mpr ? " + fragment" : "fragment") : "", (mpr + mfs) / 1e6, (unsigned long long)pk.vs, (unsigned long long)pk.um0, (unsigned long long)pk.im0, pk.xo0,
                                                      (unsigned long long)pk.gs, (unsigned long long)fk.fs, (unsigned long long)fk.um, (unsigned long long)fk.im, fk.fd, fk.ms); }
@@ -301,8 +309,8 @@ static void gpl_pjob_run(struct gpl_pjob *j) {   // (a background pipeline threa
     if (j->parts & GPL_PART_FS) nvn_hm_del(&g_gfs_pend, &j->fk);
     if (mpr) { g_gst.parts_bg[0]++; gpl_stat_add(&g_gst.bg_part, mpr); } if (mfs) { g_gst.parts_bg[1]++; gpl_stat_add(&g_gst.bg_part, mfs); }
     pthread_mutex_unlock(&g_glib_mu);
-    if (mpr && ppr && !gpl_pr_std(&j->pk)) gpl_seen_note(0, &j->pk);
-    if (mfs && pfs && !gpl_fs_std(&j->fk, j->fs)) gpl_seen_note(1, &j->fk);
+    if (mpr && ppr && (g_gpl_big || !gpl_pr_std(&j->pk))) gpl_seen_note(0, &j->pk);
+    if (mfs && pfs && (g_gpl_big || !gpl_fs_std(&j->fk, j->fs))) gpl_seen_note(1, &j->fk);
     if (mpr || mfs) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 40) VKLOG("GPL: shader part made in the background for a draw left out: %s%s %.2f ms (vertex %016llx views %#llx/%#llx outputs added %#x flips %#x; fragment %016llx views %#llx/%#llx variant %#x ms %#x)",
             mpr ? "pre-rasterization" : "", mfs ? (mpr ? " + fragment" : "fragment") : "", (mpr + mfs) / 1e6, (unsigned long long)j->pk.vs, (unsigned long long)j->pk.um0, (unsigned long long)j->pk.im0,
             j->pk.xo0, j->pk.vi0, (unsigned long long)j->fk.fs, (unsigned long long)j->fk.um, (unsigned long long)j->fk.im, j->fk.fd, j->fk.ms); }
@@ -410,6 +418,12 @@ static void gpl_keys_load(void) {
     if (g_gk[0]) return;
     uint32_t n = 0; vk_bundle_hash(&n); g_gnr = gpl_rast_variants(V.gpl_eds3, V.has_depth_clip_ctl);
     for (int s = 0; s < 2; s++) { g_gk[s] = malloc(sizeof(uint64_t) * (n ? n : 1)); g_gkn[s] = g_gk[s] ? vk_shader_keys((uint32_t)s, g_gk[s], (int)n) : 0; }
+    // DM_VK_GPL_PREP_MAX=n (start-up; default 30000, 0: no limit): a bundle of more vertex and fragment shaders than n is not prepared whole (g_gpl_big, above)
+    const char *e = getenv("DM_VK_GPL_PREP_MAX"); long mx = e ? atol(e) : 30000;
+    if (mx > 0 && g_gkn[0] + g_gkn[1] > mx) {
+        VKLOG("GPL: %d vertex + %d fragment shaders, over %ld (DM_VK_GPL_PREP_MAX): not prepared whole; the %d parts earlier runs listed are made now, a shader's parts when the game sets it in a program",
+              g_gkn[0], g_gkn[1], mx, g_gsn);
+        g_gpl_big = 1; g_gkn[0] = g_gkn[1] = 0; }
 }
 static void gpl_part_i(int i) {
     uint64_t made = 0;
@@ -458,6 +472,88 @@ static void gpl_id_now(gpl_id *id) {
     memset(id, 0, sizeof *id); id->magic = GPL_ID_MAGIC; id->key_ver = GPL_KEY_VER; id->int_ver = GPL_INT_VER; id->vendor = V.props.vendorID; id->device = V.props.deviceID; id->driver = V.props.driverVersion;
     id->eds3 = (uint32_t)V.gpl_eds3; id->sg_pin = V.sg_pin_stages ? V.sg_pin.requiredSubgroupSize : 0; memcpy(id->uuid, V.props.pipelineCacheUUID, 16);
     uint32_t n = 0; id->bundle = vk_bundle_hash(&n); id->nshaders = n;
+}
+// ---- a big bundle's parts, made when the game sets the shader in a program (gfx_vk_shader.c shader_set, from nvnProgramSetShaders on the game's thread) ----
+// The game builds its programs before it draws with them (Unreal Engine: as it loads a level's materials), so the standard parts of the program's vertex and fragment
+// shader (the preparation's variants: gpl_part_i) are made on threads of their own from that moment, and the draw links them (0.1 ms) where it would have compiled a
+// pipeline (hundreds of ms: left out with DM_VK_ASYNC_PIPE, or the frame held without). A part still being made when its draw comes is in g_gpr_pend / g_gfs_pend, as a
+// background part of gpl_parts_async is, so the draw waits for it and no second compile starts. The log says how long before its first link each part was announced
+// (gpl_ann_miss: the parts a draw had to make, with the age of their announcement) and counts them (vk_gpl_report)
+enum { GANN_Q = 16384 };
+static struct { uint64_t key; int stage; } g_gaq[GANN_Q]; static unsigned g_gaq_h, g_gaq_t; static int g_gan_on;
+static pthread_mutex_t g_gaq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_gaq_cv = PTHREAD_COND_INITIALIZER;
+static nvn_hmap g_gann = {.klen = sizeof(uint64_t)};   // key → the time it was announced (ns, as a pointer value), under g_gaq_mu
+static _Atomic uint64_t g_gan_n, g_gan_made, g_gan_ns, g_gan_drop, g_gan_late, g_gan_never, g_gan_variant;
+static _Atomic uint64_t g_gan_lead[5], g_gan_hit;   // (gpl_ann_link)
+static void compute_ann_make(uint64_t key);   // gfx_vk_exec_xfb.inc: a compute shader's pipeline (no integer-texel variant), as compute_warm makes a small bundle's
+static void gpl_ann_make(uint64_t key, int stage) {
+    uint64_t made = 0, t0 = tick(); int n = 0;
+    if (stage == 5) { compute_ann_make(key); return; }
+    if (stage == 0) { vkshader_t *vs = vk_shader(key, 0); if (!vs) return;
+        for (int v = 0; v < g_gnr; v++) { gprkey pk = gpl_pr_key(vs, NULL, 0, 0, 0, 0, 0, 0, gpl_rast_key(V.gpl_eds3, 0, 2, (uint32_t)v, V.has_depth_clip_ctl));
+            pthread_mutex_lock(&g_glib_mu); int busy = nvn_hm_get(&g_gpr, &pk) || nvn_hm_get(&g_gpr_pend, &pk) || nvn_hm_get(&g_gpr_bad, &pk); if (!busy) nvn_hm_put(&g_gpr_pend, &pk, (void *)1); pthread_mutex_unlock(&g_glib_mu);
+            if (busy) continue;
+            VkPipeline p = gpl_part(0, &pk, vs, NULL, &made); n += made != 0;
+            pthread_mutex_lock(&g_glib_mu); nvn_hm_del(&g_gpr_pend, &pk); pthread_mutex_unlock(&g_glib_mu);
+            if (made && p) gpl_seen_note(0, &pk); } }
+    else { vkshader_t *fs = vk_shader(key, 1); if (!fs) return; uint32_t fl = fs->fout_locs & 0xff;
+        // the plain part; the fragment depth one (pipeline key fdz: a draw on depth a depth-replacing shader wrote in the last presents, which in a game whose sprites
+        // write their depth is every depth-tested draw: FINAL FANTASY RESONANCE made 50 such variants in five minutes against 128 in all); the integer output one, as the
+        // preparation's. DM_VK_GPL_PROGRAM_FDZ=0 (start-up): no fragment depth part ahead
+        static int fdz_on = -1; if (fdz_on < 0) { const char *e = getenv("DM_VK_GPL_PROGRAM_FDZ"); fdz_on = !(e && !atoi(e)); }
+        for (int v = 0; v < 3; v++) { if (v == 1 && !(fdz_on && g_fdz && !fs->depth_repl)) continue; if (v == 2 && !(fs->int_writer && fl && int_out_on())) continue;
+            gfskey fk = gpl_fs_key(fs, 0, 0, v == 1 ? 1 : v == 2 ? fl << 8 : 0, 1, 0);
+            pthread_mutex_lock(&g_glib_mu); int busy = nvn_hm_get(&g_gfs, &fk) || nvn_hm_get(&g_gfs_pend, &fk) || nvn_hm_get(&g_gfs_bad, &fk); if (!busy) nvn_hm_put(&g_gfs_pend, &fk, (void *)1); pthread_mutex_unlock(&g_glib_mu);
+            if (busy) continue;
+            VkPipeline p = gpl_part(1, &fk, fs, NULL, &made); n += made != 0;
+            pthread_mutex_lock(&g_glib_mu); nvn_hm_del(&g_gfs_pend, &fk); pthread_mutex_unlock(&g_glib_mu);
+            if (made && p) gpl_seen_note(1, &fk); } }
+    if (n) { atomic_fetch_add(&g_gan_made, (uint64_t)n); atomic_fetch_add(&g_gan_ns, tick() - t0); }
+}
+static void *gpl_ann_thread(void *arg) {
+    (void)arg; pthread_setname_np(pthread_self(), "vk gpl program"); setpriority(PRIO_PROCESS, 0, 5);   // below the game's threads, above the warm-up's
+    for (;;) {
+        pthread_mutex_lock(&g_gaq_mu); while (g_gaq_h == g_gaq_t) pthread_cond_wait(&g_gaq_cv, &g_gaq_mu);
+        uint64_t key = g_gaq[g_gaq_h % GANN_Q].key; int stage = g_gaq[g_gaq_h % GANN_Q].stage; g_gaq_h++; pthread_mutex_unlock(&g_gaq_mu);
+        gpl_ann_make(key, stage);
+    }
+    return NULL;
+}
+void vk_gpl_announce(uint64_t key, int stage);
+void vk_gpl_announce(uint64_t key, int stage) {   // (the game's thread: only queued here)
+    if (!g_gpl_big || !V.gpl || !(stage == 0 || stage == 1 || stage == 5)) return;
+    pthread_mutex_lock(&g_gaq_mu);
+    if (!nvn_hm_get(&g_gann, &key)) {
+        nvn_hm_put(&g_gann, &key, (void *)(uintptr_t)(tick() | 1));
+        if (g_gaq_t - g_gaq_h < GANN_Q) { g_gaq[g_gaq_t % GANN_Q].key = key; g_gaq[g_gaq_t % GANN_Q].stage = stage; g_gaq_t++; atomic_fetch_add(&g_gan_n, 1); } else atomic_fetch_add(&g_gan_drop, 1);
+        if (!g_gan_on) { g_gan_on = 1; long nc = sysconf(_SC_NPROCESSORS_ONLN); int nt = nc >= 8 ? 4 : nc >= 4 ? 2 : 1; const char *e = getenv("DM_VK_GPL_PROGRAM_THREADS"); if (e && atoi(e) > 0) nt = atoi(e) > 8 ? 8 : atoi(e);
+            for (int i = 0; i < nt; i++) { pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED); pthread_create(&t, &a, gpl_ann_thread, NULL); pthread_attr_destroy(&a); }
+            VKLOG("GPL: a big bundle: the parts of a program's shaders are made on %d threads from the moment the game sets them (DM_VK_GPL_PROGRAM_THREADS)", nt); }
+        pthread_cond_signal(&g_gaq_cv); }
+    pthread_mutex_unlock(&g_gaq_mu);
+    uint64_t n = atomic_load(&g_gan_n);
+    if (n >= 64 && !(n & (n - 1))) { static _Atomic uint64_t said; if (atomic_exchange(&said, n) != n) { uint64_t m = atomic_load(&g_gan_made);
+        VKLOG("GPL: %llu shaders set in programs so far: %llu parts made for them ahead of their draws (%.1f ms each on average), %u waiting; draws that still had to make a part: %llu announced too late, %llu never announced, %llu a variant (views, added outputs, flips, alpha test); %llu not queued (full)",
+              (unsigned long long)n, (unsigned long long)m, m ? atomic_load(&g_gan_ns) / 1e6 / (double)m : 0.0, g_gaq_t - g_gaq_h, (unsigned long long)atomic_load(&g_gan_late), (unsigned long long)atomic_load(&g_gan_never),
+              (unsigned long long)atomic_load(&g_gan_variant), (unsigned long long)atomic_load(&g_gan_drop));
+        VKLOG("GPL: links that found both parts made: %llu; the later shader was announced <50 ms before the link %llu times, <250 ms %llu, <1 s %llu, <5 s %llu, longer %llu",
+              (unsigned long long)atomic_load(&g_gan_hit), (unsigned long long)atomic_load(&g_gan_lead[0]), (unsigned long long)atomic_load(&g_gan_lead[1]), (unsigned long long)atomic_load(&g_gan_lead[2]),
+              (unsigned long long)atomic_load(&g_gan_lead[3]), (unsigned long long)atomic_load(&g_gan_lead[4])); } }
+}
+// A big bundle's link (gpl_link, the replay thread): with both parts there, how long before it the later of its two shaders was announced (the lead the game gives:
+// g_gan_lead, buckets under 50 ms, 250 ms, 1 s, 5 s and over); with a part made at the draw, why the announcement did not cover it (too late, never, a variant)
+static void gpl_ann_link(uint64_t vs, int vs_made, const gprkey *pk, uint64_t fsk, int fs_made, const gfskey *fk, const vkshader_t *fs) {
+    uint64_t now = tick(), av, af;
+    pthread_mutex_lock(&g_gaq_mu); av = (uint64_t)(uintptr_t)nvn_hm_get(&g_gann, &vs); af = fsk ? (uint64_t)(uintptr_t)nvn_hm_get(&g_gann, &fsk) : 0; pthread_mutex_unlock(&g_gaq_mu);
+    if (!vs_made && !fs_made) { uint64_t at = av > af ? av : af; if (!at) return; double ms = (now - at) / 1e6; atomic_fetch_add(&g_gan_hit, 1);
+        atomic_fetch_add(&g_gan_lead[ms < 50 ? 0 : ms < 250 ? 1 : ms < 1000 ? 2 : ms < 5000 ? 3 : 4], 1); return; }
+    int vstd = gpl_pr_std(pk), fstd = gpl_fs_std(fk, fs) || (!fk->um && !fk->im && !fk->ms && fk->fd == 1);   // (the fragment depth part is made ahead too: gpl_ann_make)
+    if (vs_made) atomic_fetch_add(!vstd ? &g_gan_variant : av ? &g_gan_late : &g_gan_never, 1);
+    if (fs_made) atomic_fetch_add(!fstd ? &g_gan_variant : af ? &g_gan_late : &g_gan_never, 1);
+    static _Atomic int n; if (atomic_fetch_add(&n, 1) < 80)
+        VKLOG("GPL: a draw made a part the program's announcement did not cover:%s%s; vertex %016llx announced %s (%.0f ms before), standard key %d (views %#llx/%#llx outputs added %#x flips %#x); fragment %016llx announced %s (%.0f ms before), standard key %d (views %#llx/%#llx variant %#x ms %#x)",
+              vs_made ? " pre-rasterization" : "", fs_made ? " fragment" : "", (unsigned long long)vs, av ? "yes" : "no", av ? (now - av) / 1e6 : 0.0, vstd, (unsigned long long)pk->um0, (unsigned long long)pk->im0, pk->xo0, pk->vi0,
+              (unsigned long long)fsk, af ? "yes" : "no", af ? (now - af) / 1e6 : 0.0, fstd, (unsigned long long)fk->um, (unsigned long long)fk->im, fk->fd, fk->ms);
 }
 // The front end (datasync_android.c dm_prep_begin), on a thread of its own before the game: 1 when the parts were made now (note: progress, from this thread every
 // 100 ms), 0 when there is nothing to do (no bundle: an OpenGL ES game; DM_VK_GPL=0; no libraries on this device; made before: the warm-up is started)

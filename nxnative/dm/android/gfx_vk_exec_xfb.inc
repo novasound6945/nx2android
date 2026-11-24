@@ -474,6 +474,19 @@ static void *compute_warm(void *arg) {
     VKLOG("compute pipelines made ahead: %d of %d compute shaders in %.0f ms", made, n, (tick() - t0) / 1e6);
     return NULL;
 }
+// A big bundle's compute pipeline, made when the game sets the shader in a program (gfx_vk_gpl.inc vk_gpl_announce): compute_warm leaves a bundle of more than
+// DM_VK_COMPUTE_WARM_MAX compute shaders to the replay, which then builds each at its first dispatch, on its own thread (FINAL FANTASY RESONANCE: 2,934 of them)
+static _Atomic uint64_t g_cann_made, g_cann_ns;
+static void compute_ann_make(uint64_t key) {
+    uint64_t ck[3] = {key, 0, 0}, t0 = tick();
+    pthread_mutex_lock(&g_cpipe_mu); int have = nvn_hm_get(&g_cpipes, ck) != NULL; pthread_mutex_unlock(&g_cpipe_mu);
+    if (have || !prewarm_room()) return;
+    vkshader_t *cs = vk_shader(key, 5); if (!cs) return;
+    VkPipeline p = compute_build(cs, 0, 0);
+    pthread_mutex_lock(&g_cpipe_mu); if (!nvn_hm_get(&g_cpipes, ck)) nvn_hm_put(&g_cpipes, ck, p); else if (p != (void *)1) vkDestroyPipeline(V.dev, p, NULL); pthread_mutex_unlock(&g_cpipe_mu);
+    uint64_t n = atomic_fetch_add(&g_cann_made, 1) + 1; atomic_fetch_add(&g_cann_ns, tick() - t0);
+    if (n <= 4 || !(n & (n - 1))) VKLOG("compute pipelines made when the game set their shaders: %llu so far, %.1f ms each on average", (unsigned long long)n, atomic_load(&g_cann_ns) / 1e6 / (double)n);
+}
 static void compute_warm_start(void) {
     if (getenv("DM_VK_NOPREWARM")) return;
     pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED); pthread_create(&t, &a, compute_warm, NULL); pthread_attr_destroy(&a);
@@ -521,6 +534,7 @@ static void dispatch(const p_dispatch *d) {
         if (had) { if (p != (void *)1) vkDestroyPipeline(V.dev, p, NULL); p = had; } else nvn_hm_put(&g_cpipes, ck, p);   // (compute_warm made it meanwhile)
         pthread_mutex_unlock(&g_cpipe_mu);
         if (p != (void *)1) firstuse_note(0, 0, cs->key, ck[1], ck[2], 0, 5);
+        if (g_gpl_big) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 40) VKLOG("compute pipeline built at its dispatch: shader %016llx, integer-texel views %#llx/%#llx (a big bundle: not made when the game set the shader, or a variant)", (unsigned long long)cs->key, (unsigned long long)ck[1], (unsigned long long)ck[2]); }
     }
     if (p == (void *)1) return;
     vk_img_barrier_all(cb);
