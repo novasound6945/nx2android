@@ -823,6 +823,11 @@ VkPipelineLayout vk_pipeline_layout_lib(VkDescriptorSetLayout sets[5], int nsets
 static void bundle_hash_once(void) {   // with the load-time clean-ups' version and switches (spv_xf): other modules, another mark; and the dynamic uniform buffers' stages (other set layouts)
     spv_xf(); uint32_t xf[4] = {SPV_XF_VER, (uint32_t)g_xf_clip, (uint32_t)g_xf_caps, (uint32_t)vk_dyn_ubo_mode() | 0x44590000u};
     g_bundle_h = gpl_hash64(g_bundle, g_bundle_len) ^ gpl_hash64(xf, sizeof xf) * 0x9E3779B97F4A7C15ull;
+    // The hash read every page of the mapping; they stayed in the process's resident set (counted in its PSS and footprint) although only the shaders a run makes are
+    // read again. Final Fantasy Resonance's 1.2 GB bundle: footprint 3.1-3.4 GB at its title with the pipeline libraries, 2.0-2.1 GB without (no hash). Past the
+    // index they are given back (a read-only file mapping: a later read faults the page in from the file again)
+    { long pg = sysconf(_SC_PAGESIZE); size_t at = pg > 0 ? ((size_t)(12 + 32ull * g_nent) + (size_t)pg - 1) & ~((size_t)pg - 1) : g_bundle_len;
+      if (at < g_bundle_len) madvise((void *)(g_bundle + at), g_bundle_len - at, MADV_DONTNEED); }
     { const char *e = getenv("DM_VK_FS_NOKILL"); if (e && *e) g_bundle_h ^= gpl_hash64(e, strlen(e)) * 0xC2B2AE3D27D4EB4Full; } }   // other modules for those shaders: another mark
 uint64_t vk_bundle_hash(uint32_t *nshaders) {
     bundle_auto(); static pthread_once_t once = PTHREAD_ONCE_INIT;
