@@ -10,3 +10,11 @@ status	playable
 tested	v65536 Lenovo Legion Y700 TB321FU (Snapdragon 8 Gen 3, Adreno 750, Android 16)
 package	org.nx2a.finalfantasyresonanceasia
 orientation	landscape
+# Retroid Pocket Nova (Adreno 740, Turnip PurpleVK T30, 2026-11-24): the first start's shader-part preparation (gfx_vk_gpl.inc vk_gpl_prepare) went through
+# its 73,512 shaders keeping each one's SPIR-V (1.4 GB at 16,384) and the app died at 18 % (native crash, PSS 5.3 GB; vkCreateShaderModule -1 and pipeline
+# library failures before it). Without the pipeline libraries, as upstream runs it: no preparation, the title in 35 s, footprint about 2.1-2.3 GB.
+env	DM_VK_GPL=0
+# Queue submit waited for the GPU (first road standing, 804 draws: 13.9-19.4 ms, GPU busy 10.5-13.7 ms) and the game held 40 fps (frame work p50 21.6-27 ms).
+# With fences (two runs each way, same spot): queue submit 0.66-0.69 ms, GPU busy 9.4 ms, frame work p50 17.4-17.5 ms, 60 fps (13-14 of 300 dropped);
+# the first battle's command menu 40 -> 60 fps (queue submit 15.2 -> 0.74 ms), fires and smoke the same in both
+env	DM_VK_X_FENCES=1
