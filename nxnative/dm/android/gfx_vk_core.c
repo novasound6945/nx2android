@@ -2029,6 +2029,7 @@ static void *completion_main(void *a) {
         if (g_shadow_pools && c->rslot >= 0) pools_copy_back(&g_slot[c->rslot]);
         if (g_tsq && c->slot >= 0) { uint64_t t[2]; if (vkGetQueryPoolResults(V.dev, g_tsq, 2 * (uint32_t)c->slot, 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] > t[0])
             { uint64_t ns = (uint64_t)((double)(t[1] - t[0]) * V.props.limits.timestampPeriod); g_gpu_ns += ns; int k = (int)(c->frame % 64);
+              { int nvn_seq_active(void); uint64_t now_ns(void); static uint64_t last_end; if (nvn_seq_active()) VKLOG("[seq] %.3f GPU ran host fence %llu for %.2f ms; its start %.2f ms after the end of the one before (the GPU's own clock)", now_ns() / 1e6, (unsigned long long)c->fence, ns / 1e6, last_end && t[0] > last_end ? (double)(t[0] - last_end) * V.props.limits.timestampPeriod / 1e6 : 0.0); last_end = t[1]; }   // (this fork's: DM_NVN_SEQ)
               if (g_frame_gpu_of[k] != c->frame + 1) { g_frame_gpu[k] = 0; g_frame_gpu_of[k] = c->frame + 1; } g_frame_gpu[k] += ns; } }
         if (g_pq && pass_times_on() && c->slot >= 0) {   // this submission's passes
             int np = c->npass; uint64_t t[PASSQ * 2];

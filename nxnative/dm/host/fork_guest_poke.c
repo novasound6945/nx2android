@@ -30,12 +30,14 @@ static uint8_t *poke_at(int i) {   // where poke i's bytes go now: NULL while it
 
 static void *poke_watch(void *arg) {
     (void)arg; int said = 0;
-    for (int t = 0; t < 240; t++) { usleep(250000);
+    for (int t = 0;; t++) { usleep(t < 240 ? 250000 : 500000);   // (as long as the game runs: an engine sets some of these again at every level load)
         for (int i = 0; i < g_npoke; i++) { uint8_t *at = poke_at(i); if (!at || !memcmp(at, g_poke[i].b, (size_t)g_poke[i].n)) continue;
             int first = g_poke[i].deref && !g_poke[i].said; g_poke[i].said = 1;
-            if (first) LOG("guest poke: %s: its pointer is set %.1f s in: %02x%s -> %02x%s", g_poke[i].what, (t + 1) * 0.25, at[0], g_poke[i].n > 1 ? ".." : "", g_poke[i].b[0], g_poke[i].n > 1 ? ".." : "");
+            char was[POKE_MAX * 2 + 1] = ""; for (int k = 0; k < g_poke[i].n; k++) snprintf(was + k * 2, 3, "%02x", at[k]);
+            double sec = t < 240 ? (t + 1) * 0.25 : 60 + (t - 239) * 0.5;
             memcpy(at, g_poke[i].b, (size_t)g_poke[i].n);
-            if (!first && said++ < 8) LOG("guest poke: %s was written over by the game %.1f s in: written again", g_poke[i].what, (t + 1) * 0.25); } }
+            if (first) LOG("guest poke: %s: its pointer is set %.1f s in: it held %s", g_poke[i].what, sec, was);
+            else if (said++ < 24) LOG("guest poke: %s was written over by the game %.1f s in (it held %s): written again", g_poke[i].what, sec, was); } }
     return NULL;
 }
 void dm_fork_guest_poke(void);
