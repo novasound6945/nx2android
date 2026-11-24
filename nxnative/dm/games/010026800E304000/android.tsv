@@ -3,11 +3,12 @@
 # their settings carry over; the game profile beside this is the provisional one porter wrote from the survey (not checked by hand); the shader tables are its own (66 shaders,
 # the same keys as V's). Text is drawn with the system shared font (nn::fontll): build with --shared-font <Korean TTF>, or the Korean text has no glyphs (the device's Roboto
 # has no Hangul). The hero's names are typed in (build with --native-keyboard).
-# Checked on the Retroid Pocket Nova (Adreno 740, Turnip T30, 2026-11-24, 1.0.1-1): title, new game, the six DLC mounted (Addcont 100 / 322 / 323 / 327 / 328 / 329), the
-# opening movie, the chapter 0 dialogue and the first map, 60 fps (first map: 178-198 draws and 6 passes a frame, frame work p50 11-12 ms).
-# Open: the opening movie (H.264, 2,125 packets in, 2,121 pictures out) stays black on its end until Switch B skips it (the decoder is never stopped by the game).
-# Not set: DM_VK_ZC_CHUNK_MB=2048. It ends the "ranges across two chunks of a memory pool" warning (about one a frame from the title on, 16,384 by the first map) but in the
-# chapter 0 dialogue every draw then ends its pass (167 passes for 168 draws a frame, frame work p50 13.5 ms, against 7 passes and 9 ms without it).
+# Checked on the Retroid Pocket Nova (Adreno 740, Turnip T30, 2026-11-24, 1.0.1-1 / -2): title, new game, the six DLC mounted (Addcont 100 / 322 / 323 / 327 / 328 / 329), the
+# opening movie, the chapter 0 dialogue, the first map (60 fps, 185-198 draws and 6 passes a frame, frame work p50 11-12 ms) and battles there (the game sets present interval 2,
+# 30 fps: 405-590 draws a frame, frame work p50 13-17 ms). The opening movie's end waited for good until host commit 423001e6 (H.264 end of stream, dm/host/hle_movie.c md_avc_eos).
+# Not set: DM_VK_ZC_CHUNK_MB=2048. It ends the "ranges across two chunks of a memory pool" warning (about one a frame from the title on) and changed nothing measured: the chapter 0
+# temple, run twice each way, 158 draws / 3 passes / p50 7.3-8.4 ms on its caption line and 150 draws / 149 passes / p50 13.4-14.2 ms on 「그래…」 with and without it
+# (that line ends a pass at every draw either way; an earlier single run that blamed the setting compared different lines).
 status	experimental
 package	org.nx2a.srwx
 orientation	landscape
