@@ -135,6 +135,24 @@ static void exec_ops(const uint8_t *p) {
             if (DM_GAME_RENDER_COND) { rc_note(ad, t == 0 || t == 0x10 ? 1 : 2); rc_count_report(t); } mtl_sub_counter(ad, (uint32_t)t); break; }
         case OP_RESET_COUNTER: { uint64_t t; memcpy(&t, a, 8); if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED && g_occ_mode) { occ_rec_reset(&g_occ, &g_occ_io); g_occ_used = g_tex_frame; } break; }
         case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8);
+            // (this fork's) Where the fence sits in its submission. On the console the sync signals when the GPU reaches the fence; here it is given the fence of a
+            // whole host submission, the one being recorded, so a fence at the head of a long command buffer signals only when all of that buffer is done.
+            // Unreal Engine's render thread waits for such a fence before it builds the next frame (FINAL FANTASY RESONANCE: an infinite wait of the GPU's whole
+            // frame time, 12 ms, at the start of every frame, so a frame cost the GPU's time plus the CPU's, not the larger of the two).
+            // DM_VK_FENCE_SPLIT=1 (start-up): a fence with no GPU work of this submission before it takes the last submission's fence (what precedes it is done
+            // when that is). =2: besides, a fence after some work makes that work a submission of its own (mtl_sub_commit, then the rest goes on), so the sync
+            // signals when the GPU has done what precedes the fence and not what follows
+            { static int split = -1; if (split < 0) { const char *e = getenv("DM_VK_FENCE_SPLIT"); split = e ? atoi(e) : 0; if (split) VKLOG("fences in command buffers signal for the work before them (DM_VK_FENCE_SPLIT=%d)", split); }
+              uint32_t work = g_sub_ops[OP_REPORT_COUNTER] + g_sub_ops[OP_COPY_B2B] + g_sub_ops[OP_CLEAR_COLOR] + g_sub_ops[OP_CLEAR_DS] + g_sub_ops[OP_DRAW] + g_sub_ops[OP_DRAW_IDX] + g_sub_ops[OP_DISPATCH] +
+                              g_sub_ops[OP_COPY_B2T] + g_sub_ops[OP_COPY_T2B] + g_sub_ops[OP_COPY_T2T] + g_sub_ops[OP_CLEAR_TEX] + g_sub_ops[OP_CLEAR_BUF] + g_sub_ops[OP_UPDATE_UB] + g_sub_ops[OP_SIGNAL_EVENT];
+              static uint64_t nf, nhead, nwork, sumwork; nf++; if (work) { nwork++; sumwork += work; } else nhead++;
+              if (!(nf & (nf - 1)) && nf >= 256) VKLOG("fences in command buffers so far: %llu, %llu with no GPU work of their submission before them, %llu after work (%.0f draws, dispatches, copies and clears before each on average)",
+                                                       (unsigned long long)nf, (unsigned long long)nhead, (unsigned long long)nwork, nwork ? (double)sumwork / (double)nwork : 0.0);
+              uint64_t f = mtl_last_fence() + 1;
+              if (split && !work) f = mtl_last_fence();
+              else if (split >= 2 && work) { f = mtl_sub_commit(); vk_sub_resume(); }
+              if (!sync_replay_fence(s, f)) { static int n; if (n++ < 4) VKLOG("fence on sync %p skipped: the game has finalized or freed it (nvn_obj.h sync_replay_fence)", (void *)s); }
+              break; }
             if (!sync_replay_fence(s, mtl_last_fence() + 1)) { static int n; if (n++ < 4) VKLOG("fence on sync %p skipped: the game has finalized or freed it (nvn_obj.h sync_replay_fence)", (void *)s); }
             break; }
         // (DM_VK_TRACE_PASS=-2 lists the buffer writes too: copies, clears and uniform updates, by address)
