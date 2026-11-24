@@ -142,7 +142,7 @@ static pend_t g_pend[NPEND]; static unsigned g_npend; static pthread_mutex_t g_p
 __attribute__((weak)) void vk_gpl_announce(uint64_t key, int stage);   // gfx_vk_gpl.inc (gfx_vk_exec.c); absent in the tools that build this file alone
 static void shader_set(const uint8_t k[8], const void *control, uint64_t data, uint32_t ncode) {
     uint64_t key = 0; for (int i = 0; i < 8; i++) key = key << 8 | k[i];
-    if (key && vk_gpl_announce) { int st = vk_shader_stage(key); if (st == 0 || st == 1) vk_gpl_announce(key, st); }   // a big bundle's parts, from now (gfx_vk_gpl.inc)
+    if (key && vk_gpl_announce) { int st = vk_shader_stage(key); if (st == 0 || st == 1 || st == 5) vk_gpl_announce(key, st); }   // a big bundle's parts, from now (gfx_vk_gpl.inc)
     if (!key || !control || !data || !ncode || ncode >= (1u << 24) || vk_shader_stage(key) >= 0) return;
     uint32_t nctl = 0x880, own; memcpy(&own, (const uint8_t *)control + 0x20, 4); if (own >= 0x760 && own < 0x880) nctl = own;   // as hle_nvn.c keys_hash
     uint8_t *c = malloc(nctl); if (!c) return; memcpy(c, control, nctl);
@@ -439,6 +439,16 @@ static vkshader_t *vk_shader_q(uint64_t key, int stage, int quiet) {
     nvn_hm_put(&g_shaders, &hk, s);
     pthread_mutex_unlock(&g_sh_mu);
     return s;
+}
+// The bake (gfx_vk_gpl.inc gpl_bake, this fork's) is done with a shader once its parts are made: its modules and its SPIR-V go, and its entry (a later vk_shader
+// makes it again). Only for a shader no draw holds: the bake runs before the game
+void vk_shader_drop(vkshader_t *s);
+void vk_shader_drop(vkshader_t *s) {
+    struct { uint64_t key; uint64_t stage; } hk = {s->key, (uint64_t)s->stage};
+    pthread_mutex_lock(&g_sh_mu); nvn_hm_del(&g_shaders, &hk); pthread_mutex_unlock(&g_sh_mu);
+    for (int i = 0; i < s->nvar; i++) if (s->var[i].mod && s->var[i].mod != s->mod) vkDestroyShaderModule(V.dev, s->var[i].mod, NULL);
+    if (s->mod) { vkDestroyShaderModule(V.dev, s->mod, NULL); __atomic_fetch_sub(&g_spv_n, 1, __ATOMIC_RELAXED); __atomic_fetch_sub(&g_spv_bytes, (uint64_t)s->nspv * 4, __ATOMIC_RELAXED); }
+    free(s->spv); free(s);
 }
 // Integer texels. Maxwell's texture instructions return the texel's 32-bit words as they are, and the shader decides what they mean; the translator declares
 // every sampled image as float, which matches only float views. A view of an integer format, or the stencil of a depth-stencil texture (DepthStencilMode

@@ -187,8 +187,10 @@ static void driver_row(void) {
     else snprintf(g_vk_driver, sizeof g_vk_driver, "ID %04X %u.%u.%u", vid & 0xffff, d >> 22, d >> 12 & 0x3ff, d & 0xfff);
 }
 
+#include "fork_vk_bake.inc"   // this fork's: the driver's shader cache on disk and the bake's files
 void vk_init(void) {
     static int done; if (done) return; done = 1;
+    vk_mesa_cache_env();
     // DM_VK_DRIVER=<library>: a Vulkan driver the APK carries (Mesa's Turnip for Adreno; porter --vulkan-driver), loaded through libadrenotools (BSD-2-Clause), which the
     // APK carries beside it with its hook libraries: a second copy of the system's loader in a linker namespace of its own, whose driver is this library. The loader keeps
     // making the surface and the swapchain, which Turnip on Android has none of (the platform loader makes them over VK_ANDROID_native_buffer). TOTKDroid, a port of Tears

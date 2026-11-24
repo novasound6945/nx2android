@@ -448,7 +448,7 @@ static VkPipeline compute_build(vkshader_t *cs, uint64_t um, uint64_t im) {   //
     static int alt = -1; if (alt < 0) { const char *e = getenv("DM_VK_SPV_ALT"); alt = e && atoi(e); }
     VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(VK_SHADER_STAGE_COMPUTE_BIT, cs->local), 0, VK_SHADER_STAGE_COMPUTE_BIT, vk_shader_module(cs, um, im, alt && !um && !im ? 1u << 31 : 0, 0, 0), "main", NULL}, vk_pipeline_layout(dsl, 1), VK_NULL_HANDLE, -1};   // (pNext: DM_VK_SUBGROUP_PIN)
     if (bs >= 0) g_build[bs].phase = 2;
-    VkResult r = PSERIAL(vkCreateComputePipelines(V.dev, V.pcache, 1, &ci, NULL, &p)); build_end(bs);
+    VkResult r = PSERIAL(vkCreateComputePipelines(V.dev, GPL_PCACHE, 1, &ci, NULL, &p)); build_end(bs);
     vk_pipeline_cache_changed();
     if (r) { LOG("[RED] [vk] compute pipeline failed: %016llx", (unsigned long long)cs->key); p = (VkPipeline)1; }
     return p;
@@ -473,6 +473,13 @@ static void *compute_warm(void *arg) {
     }
     VKLOG("compute pipelines made ahead: %d of %d compute shaders in %.0f ms", made, n, (tick() - t0) / 1e6);
     return NULL;
+}
+// the bake's (gfx_vk_gpl.inc gpl_bake): a compute shader's pipeline made for the driver's cache on disk and destroyed. 1 made, -1 not
+static int compute_bake_one(uint64_t key) {
+    vkshader_t *cs = vk_shader(key, 5); if (!cs) return -1;
+    VkPipeline p = compute_build(cs, 0, 0); int ok = p != (void *)1;
+    if (ok) vkDestroyPipeline(V.dev, p, NULL);
+    vk_shader_drop(cs); return ok ? 1 : -1;
 }
 // A big bundle's compute pipeline, made when the game sets the shader in a program (gfx_vk_gpl.inc vk_gpl_announce): compute_warm leaves a bundle of more than
 // DM_VK_COMPUTE_WARM_MAX compute shaders to the replay, which then builds each at its first dispatch, on its own thread (FINAL FANTASY RESONANCE: 2,934 of them)
