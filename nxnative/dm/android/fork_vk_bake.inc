@@ -70,6 +70,16 @@ int vk_mesa_baked(void) {
            if (!stat(a, &st)) VKLOG("the driver's shader cache: no bake for this driver (cache UUID %s) under %s: shader parts compile as before", hex, a); }
     return v = n > 0;
 }
+// The driver makes its cache folders for the owner only (0700): a bake could not be pulled off the device (adb's shell is in the folder's group, not its owner),
+// nor could porter install push one into them. At each start the folders under mesa/ get the group's access the app's other folders have, and the files its read
+// and write (a handful of entries: three levels and two or four files).
+static void mesa_open_group(const char *dir, int depth) {
+    DIR *d = opendir(dir); if (!d) return; chmod(dir, 02770); struct dirent *en;
+    while ((en = readdir(d))) { if (en->d_name[0] == '.' && (!en->d_name[1] || (en->d_name[1] == '.' && !en->d_name[2]))) continue;
+        char p[1400]; struct stat st; if (snprintf(p, sizeof p, "%s/%s", dir, en->d_name) >= (int)sizeof p || lstat(p, &st)) continue;
+        if (S_ISDIR(st.st_mode)) { if (depth < 5) mesa_open_group(p, depth + 1); } else if (S_ISREG(st.st_mode) && (st.st_mode & 0660) != 0660) chmod(p, (st.st_mode & 07777) | 0660); }
+    closedir(d);
+}
 static void vk_mesa_cache_env(void) {   // (vk_init, before the driver is loaded)
     const char *root = getenv("DM_ROOT"), *e = getenv("DM_VK_MESA_CACHE"); char dir[1100]; struct stat st;
     if (!root || (e && !atoi(e))) return;
@@ -77,6 +87,7 @@ static void vk_mesa_cache_env(void) {   // (vk_init, before the driver is loaded
     snprintf(dir, sizeof dir, "%s/mesa", root);
     if (bake) { mkdir(dir, 0770); mesa_dirs(mesa_bake_resume, NULL); }
     if (stat(dir, &st) || !S_ISDIR(st.st_mode)) return;
+    mesa_open_group(dir, 0);
     setenv("MESA_SHADER_CACHE_DISABLE", "false", 0); setenv("MESA_SHADER_CACHE_DIR", dir, 0); setenv("MESA_DISK_CACHE_SINGLE_FILE", "1", 0);
     if (!bake) setenv("MESA_DISK_CACHE_READ_ONLY_FOZ_DBS", MESA_BAKED, 0);
     VKLOG("the driver's shader cache on disk: %s (%s)", dir, bake ? "a bake: every shader part of the bundle is compiled into it now" : "read on demand; " MESA_BAKED ".foz there is a port's bake");
