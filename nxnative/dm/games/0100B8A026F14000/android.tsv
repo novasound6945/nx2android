@@ -11,9 +11,30 @@ tested	v65536 Lenovo Legion Y700 TB321FU (Snapdragon 8 Gen 3, Adreno 750, Androi
 package	org.nx2a.finalfantasyresonanceasia
 orientation	landscape
 # Retroid Pocket Nova (Adreno 740, Turnip PurpleVK T30, 2026-11-24): the first start's shader-part preparation (gfx_vk_gpl.inc vk_gpl_prepare) went through
-# its 73,512 shaders keeping each one's SPIR-V (1.4 GB at 16,384) and the app died at 18 % (native crash, PSS 5.3 GB; vkCreateShaderModule -1 and pipeline
-# library failures before it). Without the pipeline libraries, as upstream runs it: no preparation, the title in 35 s, footprint about 2.1-2.3 GB.
-env	DM_VK_GPL=0
+# its 73,512 shaders keeping each one's SPIR-V (1.4 GB at 16,384) and the app died at 18 % (native crash, PSS 5.3 GB). A bundle this large is no longer prepared
+# whole (DM_VK_GPL_PREP_MAX): a shader's parts are made when the game puts it in a program, on six threads.
+# The engine's PSO precaching is compiled into this build with its RHI flag off (GRHIGlobals.SupportsPSOPrecaching, the byte at main+0x8adade2, which no code of
+# the build writes; r.PSOPrecaching itself is 1). With the byte set the engine asks for a component's pipelines when the component loads (512 shaders set within
+# 3 s of the start) instead of at its first draw. The program call then waits while more than 12 of its shaders are still being made, and texel buffers read as
+# floats get their views without a variant. The first field from the save with empty caches: shader parts first made at a draw 65 -> 8, draws left out for a part
+# not made yet 641 -> 2. With the driver's cache baked (DM_VK_GPL_BAKE: 138,893 parts, 20-25 min, 871 MB) a part is read back in 0.3 ms and no freeze passes 1 s.
+env	DM_GUEST_POKE=b7f965b9d7227db8e29f04e84ea7331b:main+0x8adade2=01
+env	DM_VK_GPL_PROGRAM_WAIT=12
+env	DM_VK_TBUF_FLOAT=1
+# Frame time, docked (1920x1080 window), Nova, GPU clock at its 680 MHz ceiling, from the save in the first field (300 frames each, cool device):
+#   at the save's spot (425 draws)          18.0 ms, 27 dropped -> 16.9 ms, 6 dropped with the replay on its own thread
+#   the field's heaviest place (the road    20.4-20.8 ms (48 fps), 68-75 dropped, the GPU busy 18.0 ms of it. The game submits 8 times a frame: with 6
+#   down to its end: 841 draws, 145         submission slots each frame's replay waited for the GPU to finish the frame before (gfx_vk_core.c g_nslot).
+#   dispatches, 57 passes a frame)          With 16 slots 18.3 ms, 29 dropped, the GPU never idle (99 % busy).
+# What is left is the scene's size. The game runs the engine's dynamic resolution between 60 % and 80 % of its 1728x972 picture (r.DynamicRes.OperationMode 2,
+# the minimum 60, the maximum 80; 60 / 60 while it loads) but sets the minimum to 80 in the field, and the engine's heuristic did not lower the size here
+# whatever its budget. The host steers it (fork_ue_dynres.inc): in that place 60 % (1040x584), GPU 15.3 ms, frame p50 16.7 ms, 1 of 300 dropped; back at the
+# save's spot 80 % again within 10 s. The first battle (its opening at 19-21 ms of GPU p90 at 80 %) came down to 60 % in 20 s with frame p50 at 16.7 throughout.
+# (DM_VK_FDZ=0 would take another 1.3 ms off the GPU there, 14.0 ms: the game writes the scene depth through gl_FragDepth, so every later draw gets the
+# variant that gives up early culling. Left on: without it Adreno drops triangles in some frames of other games, and 60 fps holds with it.)
+env	DM_NVN_ASYNC=1
+env	DM_VK_SLOTS=16
+env	DM_UE_DYNRES=b7f965b9d7227db8e29f04e84ea7331b:0x8be80e0,0x8be80f8,0x8be8110:60-80
 # Queue submit waited for the GPU (first road standing, 804 draws: 13.9-19.4 ms, GPU busy 10.5-13.7 ms) and the game held 40 fps (frame work p50 21.6-27 ms).
 # With fences (two runs each way, same spot): queue submit 0.66-0.69 ms, GPU busy 9.4 ms, frame work p50 17.4-17.5 ms, 60 fps (13-14 of 300 dropped);
 # the first battle's command menu 40 -> 60 fps (queue submit 15.2 -> 0.74 ms), fires and smoke the same in both

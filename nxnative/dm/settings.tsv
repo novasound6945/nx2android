@@ -258,7 +258,7 @@ DM_TEST_LEAK_GPU	str		debug,ios	?	nvn_mtl.m
 DM_TEST_LINK_STALL	str		debug,ios	?	nvn_mtl.m	
 DM_TEST_PRESENT_LAG	str		debug	?	hle_nvn.c	
 DM_THREAD_DUMPS	str		debug	start	hle_nvn.c	this fork's: <present>[#n]: from that present on, n (8) dumps of every guest thread's wait and backtrace, 7.3 ms apart: which threads wait, and for what, at different moments of a frame
-DM_UE_DYNRES	str		profile	start	fork_ue_dynres.inc	this fork's: <main's build ID>:<min>,<max>,<throttle>:<lo>-<hi>: an Unreal Engine game's own dynamic resolution steered by the host: the hex offsets in main of the value pointers of r.DynamicRes.MinScreenPercentage, MaxScreenPercentage and ThrottlingMaxScreenPercentage, and the screen percentages to move between (steps of 5: down when the frames' GPU p90 over 30 presents passes 92% of the frame time, up after four such windows under 82% and not within 600 presents of a drop)
+DM_UE_DYNRES	str		profile	start	fork_ue_dynres.inc	this fork's: <main's build ID>:<min>,<max>,<throttle>:<lo>-<hi>: an Unreal Engine game's own dynamic resolution steered by the host: the hex offsets in main of the value pointers of r.DynamicRes.MinScreenPercentage, MaxScreenPercentage and ThrottlingMaxScreenPercentage, and the screen percentages to move between (steps of 5: down when the frames' GPU p90 over 30 presents passes 92% of the frame time, up after four such windows under 82% and not within 600 presents of a drop, a pause that doubles up to 7200 each time a rise is taken back within 900 presents)
 DM_TEST_SWKBD_HOLD_MS	int		debug	?	hle_swkbd.c	
 DM_TEST_SWKBD_LAG_MS	int		debug	?	hle_swkbd.c	test: slow down "keyboard handed back → the game's thread gets the result" to verify that auto-accept does not jump the gun // front end path cleanup (dm_cursor.c): auto-accept after the name is typed on the naming page
 DM_TEST_UP_LEAK	str		debug,ios	?	nvn_mtl.m	test switch DM_TEST_UP_LEAK=1: do not retire the old block, as before the fix (for comparison, to measure the leak)
@@ -305,7 +305,7 @@ DM_VK_GPL_PREP_MAX	int	30000	profile	start	gfx_vk_gpl.inc	a shader bundle of mor
 DM_VK_GPL_PREP_THREADS	int		debug	?	gfx_vk_gpl.inc	
 DM_VK_GPL_PROGRAM_FDZ	bool	1	debug	start	gfx_vk_gpl.inc	0 = a big bundle's fragment shaders get no fragment depth part when the game sets them in a program (only the plain one)
 DM_VK_GPL_PROGRAM_THREADS	int		debug	start	gfx_vk_gpl.inc	the threads that make a big bundle's parts when the game sets a program's shaders (default 4 on 8 cores)
-DM_VK_GPL_PROGRAM_WAIT	bool		profile	start	gfx_vk_gpl.inc	this fork's: nvnProgramSetShaders returns only once the parts of the shaders it gave are made, so an engine that precaches its pipelines at load (Unreal Engine's PSO precaching, DM_GUEST_POKE) waits for them as on the platforms where making a pipeline is the compile
+DM_VK_GPL_PROGRAM_WAIT	int		profile	start	gfx_vk_gpl.inc	this fork's: nvnProgramSetShaders returns only once the parts of the shaders it gave are made, so an engine that precaches its pipelines at load (Unreal Engine's PSO precaching, DM_GUEST_POKE) waits for them as on the platforms where making a pipeline is the compile
 DM_VK_GPL_SEEN	bool	1	debug	start	gfx_vk_gpl.inc	0: the shader parts made at draws are not recorded (DM_ROOT/vk_gpl_seen.bin) nor made first at the next start
 DM_VK_GPL_TRACE	int		debug	?	gfx_vk_gpl.inc	
 DM_VK_GS_SPLIT	bool	0	profile	live	gfx_vk_exec.c	1 = split geometry-shader draws (gfx_vk_gs_split.c)
