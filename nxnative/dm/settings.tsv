@@ -52,6 +52,7 @@ DM_GL_CAPTURE	str		debug,ios	?	hle_gl.m
 DM_GL_LOG	str		debug,ios	?	hle_gl.m	
 DM_GL_STUBS	str		debug,ios	?	hle_gl.m	
 DM_GPU_TURBO	str		profile	live	perf_android.c	"auto" or 1: ask the GPU for its high clocks while the game is GPU-bound; "need": only while the game is held below its target; unset or 0 = no
+DM_GUEST_POKE	str		profile	start	fork_guest_poke.c	this fork's: `<main's build ID>:<module>+<hex offset>=<hex bytes>[,...]`, bytes written into a loaded module before the game runs (and again if its start-up writes over them): a switch of the game's own that its Switch build leaves off
 DM_GUEST_SPAWN_TEST	int		debug	?	hle_guestthread.c	
 DM_HLECOUNT	str		debug	start	hle_count.c	count every HLE call and write a TSV (category, name, count) at exit; the `ctl.txt` line `hlecount <file>` writes the counts so far, so two dumps around one action show the calls it made
 DM_HOME	str		app	start	front_android.c savecloud_android.c datasync_android.c	the internal files folder (the Android front end sets it): the log, saves/ and sync.txt stay there while the game data (DM_ROOT) is on an SD card

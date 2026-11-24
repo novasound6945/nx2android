@@ -1,0 +1,50 @@
+// This fork's: bytes written into a loaded module's image before any guest code runs (DM_GUEST_POKE), to turn on a switch of the game's own that its Switch
+// build leaves off. Called from main.c once the modules are loaded and relocated, beside dm_ue_malloc_install.
+//
+//   DM_GUEST_POKE=<main's build ID, 32 hex>:<module>+<hex offset>=<hex bytes>[,<module>+<hex offset>=<hex bytes>...]     (start-up; a game's android.tsv env row)
+//
+// The build ID must be the running main's, so a row written for one build never lands in another. A place the game's own start-up writes over afterwards (a
+// static constructor, an init function) is written again, and the log says so: the places are looked at every 250 ms for the first 60 s.
+//
+// FINAL FANTASY RESONANCE (Unreal Engine 5.6.1, main b7f965b9d7227db8e29f04e84ea7331b): the engine's PSO precaching is compiled in and r.PSOPrecaching is 1 (the
+// variable at main+0x779c65c), but the nine inlined IsPSOPrecachingEnabled checks (main+0x147a360, +0x147d33c, ...) also read the byte at main+0x8adade2, the
+// RHI's "PSO precaching supported" flag, which no code of this build was found to write: the NVN RHI does not declare it, so the engine makes each pipeline's program
+// only when the first draw needs it (measured: half of them within 250 ms of that draw). With the byte set the engine asks for a component's pipelines when the
+// component is loaded, as on the platforms that compile pipelines slowly, and the host makes their parts then (gfx_vk_gpl.inc vk_gpl_announce).
+#include "dm.h"
+#include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+enum { NPOKE = 8, POKE_MAX = 16 };
+static struct { uint8_t *at; uint8_t b[POKE_MAX]; int n; char what[48]; } g_poke[NPOKE]; static int g_npoke;
+
+static void *poke_watch(void *arg) {
+    (void)arg; int said = 0;
+    for (int t = 0; t < 240; t++) { usleep(250000);
+        for (int i = 0; i < g_npoke; i++) if (memcmp(g_poke[i].at, g_poke[i].b, (size_t)g_poke[i].n)) {
+            memcpy(g_poke[i].at, g_poke[i].b, (size_t)g_poke[i].n);
+            if (said++ < 8) LOG("guest poke: %s was written over by the game %.1f s in: written again", g_poke[i].what, (t + 1) * 0.25); } }
+    return NULL;
+}
+void dm_fork_guest_poke(void);
+void dm_fork_guest_poke(void) {
+    const char *e = getenv("DM_GUEST_POKE"); if (!e || !*e) return;
+    const char *colon = strchr(e, ':'), *build = dm_main_build();
+    if (!colon || colon - e != 32 || strncmp(e, build, 32)) { LOG("[RED] guest poke: DM_GUEST_POKE is for main %.32s, this main is %s: nothing written", e, build); return; }
+    for (const char *p = colon + 1; *p && g_npoke < NPOKE;) {
+        const char *plus = strchr(p, '+'), *eq = plus ? strchr(plus, '=') : NULL; if (!plus || !eq || plus - p >= 16) break;
+        char name[16] = ""; memcpy(name, p, (size_t)(plus - p)); char *end; uint64_t off = strtoull(plus + 1, &end, 16);
+        module_t *m = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, name)) m = &g_mod[i];
+        int n = 0; uint8_t b[POKE_MAX]; const char *h = eq + 1;
+        while (n < POKE_MAX && h[0] && h[1] && h[0] != ',' && h[1] != ',') { char x[3] = {h[0], h[1], 0}; b[n++] = (uint8_t)strtoul(x, NULL, 16); h += 2; }
+        if (!m || end != eq || !n || off + (uint64_t)n > m->size) { LOG("[RED] guest poke: %.*s is not <module>+<offset>=<bytes> inside a loaded module: left out", (int)(h - p), p); }
+        else { snprintf(g_poke[g_npoke].what, sizeof g_poke[g_npoke].what, "%s+%#llx (%d bytes)", name, (unsigned long long)off, n);
+               g_poke[g_npoke].at = m->base + off; memcpy(g_poke[g_npoke].b, b, (size_t)n); g_poke[g_npoke].n = n;
+               LOG("guest poke: %s: %02x%s -> %02x%s", g_poke[g_npoke].what, m->base[off], n > 1 ? ".." : "", b[0], n > 1 ? ".." : "");
+               memcpy(m->base + off, b, (size_t)n); g_npoke++; }
+        p = *h == ',' ? h + 1 : h; if (*h && *h != ',') break;
+    }
+    if (g_npoke) { pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED); pthread_create(&t, &a, poke_watch, NULL); pthread_attr_destroy(&a); }
+}
