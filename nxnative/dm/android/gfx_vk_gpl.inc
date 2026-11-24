@@ -26,8 +26,10 @@ typedef struct { uint64_t fs, um, im; uint32_t fd, ms; } gfskey;   // fd: vk_sha
 typedef struct { uint32_t ncol, cfmt[8], dfmt, samples, a2c, blend_en, logic_en, logic_op, wmask[8]; struct { uint32_t src, dst, srca, dsta, eq, eqa; } bl[8]; } gfokey;
 static nvn_hmap g_gvi = {.klen = sizeof(gvikey)}, g_gpr = {.klen = sizeof(gprkey)}, g_gfs = {.klen = sizeof(gfskey)}, g_gfo = {.klen = sizeof(gfokey)};
 static pthread_mutex_t g_glib_mu = PTHREAD_MUTEX_INITIALIZER;   // the parts' tables and the statistics: the replay, preparation, warm-up and background threads
+int vk_mesa_baked(void);   // fork_vk_bake.inc
 static int g_gpl_bake;   // the bake runs (gpl_bake, further down): parts are made with no pipeline cache of ours and not kept
 #define GPL_PCACHE (g_gpl_bake ? VK_NULL_HANDLE : V.pcache)
+static _Atomic uint64_t g_bake_read, g_bake_comp, g_bake_read_ns, g_bake_comp_ns;   // with a port's bake (vk_mesa_baked): parts that took under 2 ms (read from it) and the others (compiled)
 // link: a linked pipeline's whole time at its draw, the parts made there included; link_only: the link call alone; part: a shader part made at a draw; parts_at: those
 // that were alpha test variants (fragment parts with a function in fd), parts_int integer output variants (fd bits 8-23); prep_at / ns_prep_at / ns_prep_all: the
 // preparation's alpha test parts and their time (summed over threads); prep_int / ns_prep_int: its integer output parts (gpl_part_i), int_writers: the shaders that take one
@@ -167,6 +169,7 @@ static VkPipeline gpl_part(int fs_part, const void *key, vkshader_t *a, vkshader
     nvn_hmap *m = fs_part ? &g_gfs : &g_gpr; VkPipeline p = gpl_get(m, key); *made = 0; if (p) return p;
     if (gpl_get(bad, key)) return VK_NULL_HANDLE;
     uint64_t t0 = tick(); p = fs_part ? gpl_fs_make(key, a) : gpl_pr_make(key, a, b); *made = tick() - t0 + 1;
+    if (p && vk_mesa_baked()) { int rd = *made < 2000000; atomic_fetch_add(rd ? &g_bake_read : &g_bake_comp, 1); atomic_fetch_add(rd ? &g_bake_read_ns : &g_bake_comp_ns, *made); }
     if (!p) { pthread_mutex_lock(&g_glib_mu); g_gst.part_fail++; if (!nvn_hm_get(bad, key)) nvn_hm_put(bad, key, (void *)1); pthread_mutex_unlock(&g_glib_mu); return VK_NULL_HANDLE; }
     return gpl_put(m, key, p);
 }
@@ -322,6 +325,7 @@ static void gpl_pjob_run(struct gpl_pjob *j) {   // (a background pipeline threa
 static int gpl_parts_async(const pkey *k) {   // (the replay thread)
     int async = g_async_parts && async_skip_ok(k);
     if (!async) return 0;   // (the keys are not worked out for nothing: gpl_link does)
+    if (vk_mesa_baked()) return 0;   // (this fork's, fork_vk_bake.inc: with a port's bake a part is a read from the driver's cache, so the draw makes it and nothing is left out)
     gprkey pk; gfskey fk; vkshader_t *vs, *fs, *gs; gpl_draw_keys(k, &pk, &fk, &vs, &fs, &gs);
     unsigned need = 0, pend = 0, q;
     pthread_mutex_lock(&g_glib_mu);
@@ -404,6 +408,9 @@ void vk_gpl_report(void) {   // gfx_vk_present.c, every 600 presents
           (unsigned long long)s.parts_bg[0], (unsigned long long)s.parts_bg[1], b50, b95, bmx, (unsigned long long)s.bg_queued, (unsigned long long)s.bg_qfull,
           (unsigned long long)s.queued, (unsigned long long)s.qfull, (unsigned long long)atomic_load(&g_gpl_swaps) - s.opt_fail, o50, o95, omx, (unsigned long long)s.opt_fail, (unsigned long long)s.n_old, s.ns_old / 1e6,
           (unsigned long long)g_vkst.skip_pipe);
+    if (vk_mesa_baked()) { uint64_t r = atomic_load(&g_bake_read), c = atomic_load(&g_bake_comp);   // (this fork's: fork_vk_bake.inc)
+        VKLOG("GPL: with the port's bake: %llu shader parts read from it (%.2f ms each), %llu compiled (%.1f ms each: variants the bake has none of, or a bake of other shaders or another host build)",
+              (unsigned long long)r, r ? atomic_load(&g_bake_read_ns) / 1e6 / (double)r : 0.0, (unsigned long long)c, c ? atomic_load(&g_bake_comp_ns) / 1e6 / (double)c : 0.0); }
 }
 
 // ---- the preparation (before the game: datasync_android.c's screen) and the warm-up (a later start, in the background) ----

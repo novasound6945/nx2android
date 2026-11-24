@@ -53,6 +53,23 @@ long long vk_mesa_bake_done(void) {
     if (!n) VKLOG("[RED] the driver's shader cache: nothing was baked (no mesa_shader_cache_sf/<driver>/<GPU>/foz_cache.foz with entries under DM_ROOT/mesa: is the driver Mesa's, DM_VK_DRIVER?)");
     return n;
 }
+// 1 when the data folder holds a bake of this driver (its cache UUID's folder has an nx2a.foz): a shader part then costs a read where it cost a compile, and a
+// draw makes the parts it lacks itself, where it would have been left out while they compiled in the background (gfx_vk_gpl.inc gpl_parts_async). Once the device is made
+int vk_mesa_baked(void);
+int vk_mesa_baked(void) {
+    static int v = -1; if (v >= 0) return v;
+    const char *root = getenv("DM_ROOT"), *e = getenv("DM_VK_MESA_CACHE"); char a[1300], c[1800], hex[33]; long long n = 0;
+    if (!root || (e && !atoi(e)) || ((e = getenv("DM_VK_GPL_BAKE")) && atoi(e))) return v = 0;
+    for (int i = 0; i < 16; i++) snprintf(hex + i * 2, 3, "%02x", V.props.pipelineCacheUUID[i]);
+    snprintf(a, sizeof a, "%s/mesa/mesa_shader_cache_sf/%s", root, hex);
+    DIR *d = opendir(a);
+    if (d) { for (struct dirent *de; (de = readdir(d)); ) { if (de->d_name[0] == '.') continue; snprintf(c, sizeof c, "%s/%s", a, de->d_name); long long sz = mesa_size(c, MESA_BAKED ".foz"); if (sz > 0) n += sz; }
+             closedir(d); }
+    if (n) VKLOG("the driver's shader cache: a port's bake for this driver is there (%.1f MB): shader parts are read from it, and a draw makes its parts itself", n / 1048576.0);
+    else { struct stat st; snprintf(a, sizeof a, "%s/mesa/mesa_shader_cache_sf", root);
+           if (!stat(a, &st)) VKLOG("the driver's shader cache: no bake for this driver (cache UUID %s) under %s: shader parts compile as before", hex, a); }
+    return v = n > 0;
+}
 static void vk_mesa_cache_env(void) {   // (vk_init, before the driver is loaded)
     const char *root = getenv("DM_ROOT"), *e = getenv("DM_VK_MESA_CACHE"); char dir[1100]; struct stat st;
     if (!root || (e && !atoi(e))) return;
