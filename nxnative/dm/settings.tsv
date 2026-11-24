@@ -301,6 +301,7 @@ DM_VK_GPL_PREP_MAX	int	30000	profile	start	gfx_vk_gpl.inc	a shader bundle of mor
 DM_VK_GPL_PREP_THREADS	int		debug	?	gfx_vk_gpl.inc	
 DM_VK_GPL_PROGRAM_FDZ	bool	1	debug	start	gfx_vk_gpl.inc	0 = a big bundle's fragment shaders get no fragment depth part when the game sets them in a program (only the plain one)
 DM_VK_GPL_PROGRAM_THREADS	int		debug	start	gfx_vk_gpl.inc	the threads that make a big bundle's parts when the game sets a program's shaders (default 4 on 8 cores)
+DM_VK_GPL_PROGRAM_WAIT	bool		profile	start	gfx_vk_gpl.inc	this fork's: nvnProgramSetShaders returns only once the parts of the shaders it gave are made, so an engine that precaches its pipelines at load (Unreal Engine's PSO precaching, DM_GUEST_POKE) waits for them as on the platforms where making a pipeline is the compile
 DM_VK_GPL_SEEN	bool	1	debug	start	gfx_vk_gpl.inc	0: the shader parts made at draws are not recorded (DM_ROOT/vk_gpl_seen.bin) nor made first at the next start
 DM_VK_GPL_TRACE	int		debug	?	gfx_vk_gpl.inc	
 DM_VK_GS_SPLIT	bool	0	profile	live	gfx_vk_exec.c	1 = split geometry-shader draws (gfx_vk_gs_split.c)

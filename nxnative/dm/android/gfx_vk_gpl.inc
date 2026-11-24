@@ -496,6 +496,17 @@ static nvn_hmap g_gann = {.klen = sizeof(uint64_t)};   // key → the time it wa
 static _Atomic uint64_t g_gan_n, g_gan_made, g_gan_ns, g_gan_drop, g_gan_late, g_gan_never, g_gan_variant;
 static _Atomic uint64_t g_gan_lead[5], g_gan_hit;   // (gpl_ann_link)
 static void compute_ann_make(uint64_t key);   // gfx_vk_exec_xfb.inc: a compute shader's pipeline (no integer-texel variant), as compute_warm makes a small bundle's
+// DM_VK_GPL_PROGRAM_WAIT=1 (start-up; this fork's, with the engine's own PSO precaching: fork_guest_poke.c): nvnProgramSetShaders returns only once the parts of the
+// shaders it gave are made. On a Switch the call is all there is to making a program, so an engine that precaches its pipelines when it loads a component
+// (Unreal Engine's PSO precaching, which holds the component back until its pipelines are made) takes them for made at once and draws; held here for as long as
+// the parts compile, the call costs what pipeline creation costs on the platforms that feature was written for, and the engine waits as it does there. The parts
+// are still made on the threads of their own, so the two shaders of a program compile side by side while its call waits. A call from the thread that draws
+// (a pipeline the engine did not precache) waits the same way: the frame is held for the compile that the draw would otherwise have met
+static int g_gan_wait = -1; static __thread uint64_t t_gan_keys[6]; static __thread int t_gan_n;
+static nvn_hmap g_gan_done = {.klen = sizeof(uint64_t)}; static pthread_cond_t g_gan_done_cv = PTHREAD_COND_INITIALIZER;   // (under g_gaq_mu)
+static _Atomic uint64_t g_gan_waits, g_gan_wait_ns, g_gan_wait_max, g_gan_wait_to;
+static struct { char name[16]; uint64_t n, wait_ns; } g_gan_by[8]; static int g_gan_nby;   // the calls by the calling thread's name (under g_gaq_mu)
+static int gan_wait_on(void) { if (g_gan_wait < 0) { const char *e = getenv("DM_VK_GPL_PROGRAM_WAIT"); g_gan_wait = e && atoi(e) ? 1 : 0; } return g_gan_wait; }
 static void gpl_ann_make(uint64_t key, int stage) {
     uint64_t made = 0, t0 = tick(); int n = 0;
     if (stage == 5) { compute_ann_make(key); return; }
@@ -521,11 +532,12 @@ static void gpl_ann_make(uint64_t key, int stage) {
     if (n) { atomic_fetch_add(&g_gan_made, (uint64_t)n); atomic_fetch_add(&g_gan_ns, tick() - t0); }
 }
 static void *gpl_ann_thread(void *arg) {
-    (void)arg; pthread_setname_np(pthread_self(), "vk gpl program"); setpriority(PRIO_PROCESS, 0, 5);   // below the game's threads, above the warm-up's
+    (void)arg; pthread_setname_np(pthread_self(), "vk gpl program"); if (!gan_wait_on()) setpriority(PRIO_PROCESS, 0, 5);   // below the game's threads, above the warm-up's (the game's own priority when its calls wait for these threads)
     for (;;) {
         pthread_mutex_lock(&g_gaq_mu); while (g_gaq_h == g_gaq_t) pthread_cond_wait(&g_gaq_cv, &g_gaq_mu);
         uint64_t key = g_gaq[g_gaq_h % GANN_Q].key; int stage = g_gaq[g_gaq_h % GANN_Q].stage; g_gaq_h++; pthread_mutex_unlock(&g_gaq_mu);
         gpl_ann_make(key, stage);
+        pthread_mutex_lock(&g_gaq_mu); nvn_hm_put(&g_gan_done, &key, (void *)1); pthread_cond_broadcast(&g_gan_done_cv); pthread_mutex_unlock(&g_gaq_mu);
     }
     return NULL;
 }
@@ -535,12 +547,14 @@ void vk_gpl_announce(uint64_t key, int stage) {   // (the game's thread: only qu
     pthread_mutex_lock(&g_gaq_mu);
     if (!nvn_hm_get(&g_gann, &key)) {
         nvn_hm_put(&g_gann, &key, (void *)(uintptr_t)(tick() | 1));
-        if (g_gaq_t - g_gaq_h < GANN_Q) { g_gaq[g_gaq_t % GANN_Q].key = key; g_gaq[g_gaq_t % GANN_Q].stage = stage; g_gaq_t++; atomic_fetch_add(&g_gan_n, 1); } else atomic_fetch_add(&g_gan_drop, 1);
-        if (!g_gan_on) { g_gan_on = 1; long nc = sysconf(_SC_NPROCESSORS_ONLN); int nt = nc >= 8 ? 4 : nc >= 4 ? 2 : 1; const char *e = getenv("DM_VK_GPL_PROGRAM_THREADS"); if (e && atoi(e) > 0) nt = atoi(e) > 8 ? 8 : atoi(e);
+        if (g_gaq_t - g_gaq_h < GANN_Q) { g_gaq[g_gaq_t % GANN_Q].key = key; g_gaq[g_gaq_t % GANN_Q].stage = stage; g_gaq_t++; atomic_fetch_add(&g_gan_n, 1); }
+        else { atomic_fetch_add(&g_gan_drop, 1); nvn_hm_put(&g_gan_done, &key, (void *)1); }   // (never made here: nothing to wait for)
+        if (!g_gan_on) { g_gan_on = 1; long nc = sysconf(_SC_NPROCESSORS_ONLN); int nt = nc >= 8 ? (gan_wait_on() ? 6 : 4) : nc >= 4 ? 2 : 1; const char *e = getenv("DM_VK_GPL_PROGRAM_THREADS"); if (e && atoi(e) > 0) nt = atoi(e) > 8 ? 8 : atoi(e);
             for (int i = 0; i < nt; i++) { pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED); pthread_create(&t, &a, gpl_ann_thread, NULL); pthread_attr_destroy(&a); }
             VKLOG("GPL: a big bundle: the parts of a program's shaders are made on %d threads from the moment the game sets them (DM_VK_GPL_PROGRAM_THREADS)", nt); }
         pthread_cond_signal(&g_gaq_cv); }
     pthread_mutex_unlock(&g_gaq_mu);
+    if (gan_wait_on() && t_gan_n < 6) t_gan_keys[t_gan_n++] = key;   // (waited for at the call's end: vk_gpl_program_done)
     uint64_t n = atomic_load(&g_gan_n);
     if (n >= 64 && !(n & (n - 1))) { static _Atomic uint64_t said; if (atomic_exchange(&said, n) != n) { uint64_t m = atomic_load(&g_gan_made);
         VKLOG("GPL: %llu shaders set in programs so far: %llu parts made for them ahead of their draws (%.1f ms each on average), %u waiting; draws that still had to make a part: %llu announced too late, %llu never announced, %llu a variant (views, added outputs, flips, alpha test); %llu not queued (full)",
@@ -550,6 +564,30 @@ void vk_gpl_announce(uint64_t key, int stage) {   // (the game's thread: only qu
               (unsigned long long)atomic_load(&g_gan_hit), (unsigned long long)atomic_load(&g_gan_lead[0]), (unsigned long long)atomic_load(&g_gan_lead[1]), (unsigned long long)atomic_load(&g_gan_lead[2]),
               (unsigned long long)atomic_load(&g_gan_lead[3]), (unsigned long long)atomic_load(&g_gan_lead[4])); } }
 }
+void vk_gpl_program_done(void);
+void vk_gpl_program_done(void) {   // (the game's thread, at the end of nvnProgramSetShaders: gfx_vk_shader.c program_set_done)
+    if (!t_gan_n) return;
+    uint64_t t0 = tick(); int to = 0; char nm[16] = "?"; pthread_getname_np(pthread_self(), nm, sizeof nm);
+    struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += 20;   // (a part cannot take this long: a wait that does is given up, and said)
+    pthread_mutex_lock(&g_gaq_mu);
+    for (int i = 0; i < t_gan_n && !to; i++) while (!nvn_hm_get(&g_gan_done, &t_gan_keys[i])) if (pthread_cond_timedwait(&g_gan_done_cv, &g_gaq_mu, &dl)) { to = 1; break; }
+    uint64_t ns = tick() - t0; int b = -1;
+    for (int i = 0; i < g_gan_nby; i++) if (!strncmp(g_gan_by[i].name, nm, sizeof nm)) b = i;
+    if (b < 0 && g_gan_nby < 8) { b = g_gan_nby++; snprintf(g_gan_by[b].name, sizeof g_gan_by[b].name, "%s", nm); }
+    if (b >= 0) { g_gan_by[b].n++; g_gan_by[b].wait_ns += ns; }
+    pthread_mutex_unlock(&g_gaq_mu);
+    t_gan_n = 0;
+    uint64_t n = atomic_fetch_add(&g_gan_waits, 1) + 1; atomic_fetch_add(&g_gan_wait_ns, ns); if (to) atomic_fetch_add(&g_gan_wait_to, 1);
+    uint64_t mx = atomic_load(&g_gan_wait_max); while (ns > mx && !atomic_compare_exchange_weak(&g_gan_wait_max, &mx, ns)) { }
+    if (to) { static _Atomic int said; if (atomic_fetch_add(&said, 1) < 8) VKLOG("[RED] GPL: a program's call waited 20 s for its shaders' parts and went on without them (thread %s)", nm); }
+    if (n >= 64 && !(n & (n - 1))) { char by[400] = ""; size_t at = 0;
+        pthread_mutex_lock(&g_gaq_mu);
+        for (int i = 0; i < g_gan_nby && at < sizeof by - 60; i++) at += (size_t)snprintf(by + at, sizeof by - at, "%s%s %llu (%.0f ms)", i ? ", " : "", g_gan_by[i].name, (unsigned long long)g_gan_by[i].n, g_gan_by[i].wait_ns / 1e6);
+        pthread_mutex_unlock(&g_gaq_mu);
+        VKLOG("GPL: %llu program calls held until their shaders' parts were made: %.1f ms each on average, the longest %.0f ms, %llu given up; by calling thread (calls, time held in all): %s",
+              (unsigned long long)n, atomic_load(&g_gan_wait_ns) / 1e6 / (double)n, atomic_load(&g_gan_wait_max) / 1e6, (unsigned long long)atomic_load(&g_gan_wait_to), by); }
+}
+
 // A big bundle's link (gpl_link, the replay thread): with both parts there, how long before it the later of its two shaders was announced (the lead the game gives:
 // g_gan_lead, buckets under 50 ms, 250 ms, 1 s, 5 s and over); with a part made at the draw, why the announcement did not cover it (too late, never, a variant)
 static void gpl_ann_link(uint64_t vs, int vs_made, const gprkey *pk, uint64_t fsk, int fs_made, const gfskey *fk, const vkshader_t *fs) {
