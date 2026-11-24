@@ -27,8 +27,9 @@ typedef struct { uint32_t ncol, cfmt[8], dfmt, samples, a2c, blend_en, logic_en,
 static nvn_hmap g_gvi = {.klen = sizeof(gvikey)}, g_gpr = {.klen = sizeof(gprkey)}, g_gfs = {.klen = sizeof(gfskey)}, g_gfo = {.klen = sizeof(gfokey)};
 static pthread_mutex_t g_glib_mu = PTHREAD_MUTEX_INITIALIZER;   // the parts' tables and the statistics: the replay, preparation, warm-up and background threads
 int vk_mesa_baked(void);   // fork_vk_bake.inc
-static int g_gpl_bake;   // the bake runs (gpl_bake, further down): parts are made with no pipeline cache of ours and not kept
-#define GPL_PCACHE (g_gpl_bake ? VK_NULL_HANDLE : V.pcache)
+static int g_gpl_bake;   // the bake runs (gpl_bake, further down): parts are made with the baking thread's own short-lived pipeline cache and not kept
+static __thread VkPipelineCache t_bake_cache;   // (a cache of a few hundred parts, destroyed and made again: whatever the driver keeps per cache object goes with it)
+#define GPL_PCACHE (g_gpl_bake ? t_bake_cache : V.pcache)
 static _Atomic uint64_t g_bake_read, g_bake_comp, g_bake_read_ns, g_bake_comp_ns;   // with a port's bake (vk_mesa_baked): parts that took under 2 ms (read from it) and the others (compiled)
 // link: a linked pipeline's whole time at its draw, the parts made there included; link_only: the link call alone; part: a shader part made at a draw; parts_at: those
 // that were alpha test variants (fragment parts with a function in fd), parts_int integer output variants (fd bits 8-23); prep_at / ns_prep_at / ns_prep_all: the
@@ -46,7 +47,7 @@ static VkPipeline gpl_make(VkGraphicsPipelineLibraryFlagsEXT part, VkGraphicsPip
     ci->pNext = &li; ci->flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR; ci->basePipelineIndex = -1;
     if (gpl_lto()) ci->flags |= VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT;
     VkPipeline p = VK_NULL_HANDLE; VkResult r = PSERIAL(vkCreateGraphicsPipelines(V.dev, cache, 1, ci, NULL, &p));
-    if (cache) vk_pipeline_cache_changed();
+    if (cache && !g_gpl_bake) vk_pipeline_cache_changed();
     if (r) { static int n; if (n++ < 16) VKLOG("[RED] GPL: a pipeline library (part %#x) failed (%d)", (unsigned)part, r); return VK_NULL_HANDLE; }
     return p;
 }
@@ -568,7 +569,7 @@ static void gpl_ann_link(uint64_t vs, int vs_made, const gprkey *pk, uint64_t fs
 // A bundle too big to prepare at a player's first start (g_gpl_big) is compiled whole once by whoever ports the game, on a device with the driver and GPU the port is
 // for: each vertex shader's standard pre-rasterization parts, each fragment shader's plain, fragment depth and integer output parts (what vk_gpl_announce asks for when
 // the game sets a program: gpl_ann_make) and each compute shader's pipeline. Nothing is kept in memory: a part is destroyed as soon as it is made and its shader
-// dropped (vk_shader_drop), and it is made with no pipeline cache of ours, so what remains is the driver's entry on disk (fork_vk_bake.inc: Mesa's database, written
+// dropped (vk_shader_drop), and it is made with a short-lived pipeline cache of the baking thread's, so what remains is the driver's entry on disk (fork_vk_bake.inc: Mesa's database, written
 // by the driver's own thread). The preparation of everything in memory died at 18% of this bundle (5.3 GB); the bake's memory does not grow with the bundle.
 // A bake that was stopped goes on: the parts already in the database come out of it. At the end the database takes the baked name (nx2a.foz), and the folder
 // DM_ROOT/mesa goes into the data pack as it is. DM_VK_GPL_PROGRAM_FDZ=0: no fragment depth parts. The game can be started after it, as after any preparation
@@ -593,8 +594,12 @@ static void gpl_bake_i(int i) {
     atomic_fetch_add(&g_bk_parts, (uint64_t)n); atomic_fetch_add(&g_bk_fail, (uint64_t)bad); atomic_fetch_add(&g_bk_ns, tick() - t0);
 }
 static void *gpl_bake_thread(void *arg) {
-    (void)arg; pthread_setname_np(pthread_self(), "vk gpl bake"); int total = g_bkn[0] + g_bkn[1] + g_bkn[2];
-    for (;;) { int i = atomic_fetch_add(&g_bk_next, 1); if (i >= total) break; gpl_bake_i(i); atomic_fetch_add(&g_bk_done, 1); }
+    (void)arg; pthread_setname_np(pthread_self(), "vk gpl bake"); int total = g_bkn[0] + g_bkn[1] + g_bkn[2], k = 0;
+    VkPipelineCacheCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, NULL, VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT, 0, NULL};   // (this thread's alone)
+    for (;;) { int i = atomic_fetch_add(&g_bk_next, 1); if (i >= total) break;
+        if (!(k++ & 255)) { if (t_bake_cache) vkDestroyPipelineCache(V.dev, t_bake_cache, NULL); t_bake_cache = VK_NULL_HANDLE; if (vkCreatePipelineCache(V.dev, &pi, NULL, &t_bake_cache)) t_bake_cache = VK_NULL_HANDLE; }
+        gpl_bake_i(i); atomic_fetch_add(&g_bk_done, 1); }
+    if (t_bake_cache) { vkDestroyPipelineCache(V.dev, t_bake_cache, NULL); t_bake_cache = VK_NULL_HANDLE; }
     return NULL;
 }
 static void gpl_bake(void (*note)(void *u, int done, int total), void *u, int nt) {
