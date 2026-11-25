@@ -31,6 +31,7 @@ DM_DYN_SCALE	str		profile	live	hle_nvn.c	the host's dynamic resolution: a level 
 DM_ENV_FILE_KEYS	str		app,ios	start	main.m	the iOS launcher: the keys an env file set (Launcher.swift keeps them)
 DM_FD_LOG	int		debug	?	hle_fdstat.c	
 DM_FIXED_TIME	str		debug	?	hle_time.c main.c	
+DM_FNA3D_GL_PUMP	str		profile	start	fork_fna3d_pump.c	this fork's: <main's build ID>:<hex offset of the OpenGL driver's SwapBuffers in main>,<hex offset of the command list in the renderer>: FNA3D's OpenGL driver runs the GL calls of other threads on the device's thread once a frame; with this the thread that holds the GL context runs them when it would sleep in a condition wait (MARVEL Cosmic Invasion stopped before its first frame, its main thread waiting for a lock held by a loader that waited for the main thread)
 DM_FONT_DIR	str		debug	?	hle_sdk16.c	
 DM_FORCE_STRICT	str		debug	?	loader.c	
 DM_FPS	int		debug,ios	?	nvn_mtl.m	

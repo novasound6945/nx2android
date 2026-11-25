@@ -1,0 +1,46 @@
+# Game profile of MARVEL Cosmic Invasion (Switch, base game and update 1.10 in one NSP, v589824, which the porter reads as v0). Starts on Android (Retroid Pocket Nova)
+# Format: see dm/games/README.md
+# FNA 25.3 (XNA 4 reimplemented in C#) compiled with .NET NativeAOT, SDL 3, FMOD Studio, SDK 20.5.29. Epic Online Services comes as an NRO (nro/EOSSDK-Switch-Shipping.nro), which the
+# host refuses as an online SDK: the EOS calls main imports are answered offline (dm/host/fork_eos_offline.c).
+# Rendering: on the console FNA3D draws through SDL_GPU on Vulkan (subsdk0, NintendoSDK_Vulkan). The hosts have no Vulkan for a game (vkGetInstanceProcAddr is unimplemented), SDL_GPU
+# finds no backend, and FNA3D falls back to its OpenGL driver. patches.py makes that driver ask for an OpenGL ES 3 context (its FNA3D_OPENGL_FORCE_ES3 path) instead of desktop
+# OpenGL, and hands the host the renderer; android.tsv turns on the host's run of the driver's command list (DM_FNA3D_GL_PUMP), without which the game stops before its first frame
+
+# ---- Identity ----
+title_id	010059D020C26000
+program_id	010059D020C26000
+
+# ---- App ----
+name	MARVEL Cosmic Invasion
+ipa	MarvelCosmicInvasion.ipa
+app_category	public.app-category.games
+# The game ships Korean text (Content/Global/Loc/Korean.zpbn, chosen in its options or by the system language) but its control data lists no ko: porter --language ko is allowed
+languages_extra	ko
+
+# ---- Versions ----
+build	v0	1.10	main=4b8064a4a57b1ec333220daf331d31de	sdk=a5813da32d12ef17099152ca79c9b24d
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk0 (NintendoSDK_Vulkan), subsdk1 (NintendoSDK_OpenGL)
+modules	main sdk
+romfs_marker	Content/Videos/MCI_IntroAnimation.ogv
+zip_store	.bank:.dat:.nro:.ogv:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource (virtual address memory) and main never sets a heap: the game maps its memory itself in address regions of the alias region.
+# nninitStartup takes StandardAllocator::Initialize(nullptr, 40 GB) and nnMain then asks AllocateAddressRegion for 20 GB more (0x500000000, the .NET GC's region range): 60 GB of
+# address space, which a 4.375 GB alias region refused (abort before the first frame). The block is 256 MB in front + a 64 GB alias region (the console's, with virtual address
+# memory) + 256 MB stack region + 128 MB heap region; 0.5 to 0.8 GB of it is mapped from the start to the main menu. The SDK's address region manager needs its node area cut for
+# a region this size (dm/tools/sdk_patches.py, sdk a5813da3…)
+mem_reserve	0x1028000000
+mem_alias	0x1000000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Shader split ----
+# (the game compiles GLSL that MojoShader writes at run time, profile glsles3: nothing is translated ahead)
+shader_groups	/Content/=content /.nrr/=nrr /icu/=icu /nro/=nro
+shader_note	MARVEL Cosmic Invasion shaders

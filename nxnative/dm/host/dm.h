@@ -112,7 +112,8 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs);
 enum { OBS_MOVIE_RING_LINK = 19, OBS_MOVIE_RING_UNLINK = 20,   // Metroid Dread 2.1.0's movie request ring (hle_movie.c)
        OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)
        OBS_MOVIE_QUEUE_PUSH = 22, OBS_MOVIE_QUEUE_POP = 23, OBS_MOVIE_QUEUE_DONE = 24,   // Disgaea 5 1.0.3: its movie player's output queues, appended and taken under one lock (hle_movie.c)
-       OBS_MAX = 25 };
+       OBS_FNA3D_RENDERER = 25,                                  // this fork's: MARVEL Cosmic Invasion 1.10: FNA3D's OpenGL renderer, at the head of its CreateTexture2D (fork_fna3d_pump.c)
+       OBS_MAX = 26 };
 void gate_obs_set(int id, void (*fn)(const uint64_t *regs));
 int gate_obs_present(int id);
 uint64_t now_ns(void);

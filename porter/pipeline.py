@@ -496,6 +496,11 @@ class Port:
         want = nsp.language_code(lang_in) if lang_in else 'en-US'
         if not want: raise BuildError(f'unknown game language {lang_in!r}')
         have = nacp.languages(self.game / 'control.nacp') or nacp.languages(self.base / 'control.nacp')
+        # this fork's: languages the game has though its control data does not list them (game.tsv languages_extra; MARVEL Cosmic Invasion ships Korean text, its NACP has no ko)
+        more = self.g.get('languages_extra', '').split()
+        bad = [c for c in more if c not in dict(nacp.LANGUAGES)]
+        if bad: raise BuildError(f'{self.g.id} game.tsv languages_extra: not a language code: {", ".join(bad)}')
+        if have: have = list(have) + [c for c in more if c not in have]
         self.lang = nsp.game_language(want, bool(lang_in), have)
         say(f'app: {self.app_name} {self.display} ({self.package}), game language {self.lang}')
 

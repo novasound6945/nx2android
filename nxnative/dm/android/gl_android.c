@@ -403,6 +403,9 @@ EGLB(eglMakeCurrent, EGLBoolean, EGLDisplay d, EGLSurface dr, EGLSurface rd, EGL
     return ok;
 }
 EGLB(eglGetCurrentContext, EGLContext, void) { REAL(EGLContext, eglGetCurrentContext, void); return r_eglGetCurrentContext(); }
+// this fork's: the calling thread holds the game's GL context (fork_fna3d_pump.c: the thread FNA3D's OpenGL driver runs its command list on)
+int dm_gl_has_context(void);
+int dm_gl_has_context(void) { if (!G.dpy) return 0; REAL(EGLContext, eglGetCurrentContext, void); return r_eglGetCurrentContext() != NULL; }
 EGLB(eglGetCurrentSurface, EGLSurface, EGLint which) { REAL(EGLSurface, eglGetCurrentSurface, EGLint); return r_eglGetCurrentSurface(which); }
 EGLB(eglGetCurrentDisplay, EGLDisplay, void) { return G.dpy; }
 EGLB(eglSwapInterval, EGLBoolean, EGLDisplay d, EGLint n) { (void)d; if (n != G.interval) { GLOG("swap interval %d", n); G.interval = n; } return EGL_TRUE; }
