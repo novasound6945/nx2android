@@ -1,8 +1,8 @@
 # MARVEL Cosmic Invasion (010059D020C26000) on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android")
 # An OpenGL game here (see game.tsv): the device's OpenGL ES driver draws it, and the host shows its frames through Vulkan (dm/android/gl_android.c).
-# Retroid Pocket Nova, 2026-11-25: logos, the intro animation (Theora), the title, the licence prompt and the main menu at 60 fps; Korean chosen in the options draws its text.
-# A stage has not been played yet
-status	boots
+# Retroid Pocket Nova, 2026-11-25: logos, the intro animation (Theora), the title, the licence prompt, the menus and two stages in 27 minutes of play at 60 fps (97,200 frames,
+# 3 shown late, memory level at 1.0 GB, no error line). Built with --language ko the game starts in Korean (it reads the system language as "kr")
+status	playable
 tested	v0 Retroid Pocket Nova (QCS8550, Adreno 740, Android 13)
 package	org.nx2a.marvelcosmicinvasion
 orientation	landscape

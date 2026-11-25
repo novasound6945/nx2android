@@ -1,0 +1,41 @@
+# Game profile of DEMONS' NIGHT FEVER (Switch, base game 1.0.0, v0). Plays on Android (Retroid Pocket Nova)
+# Format: see dm/games/README.md
+# Unity 2022.3.62f3 (IL2CPP) with FMOD, SDK 19.3.14; subsdk0 is the movie module (the opening movie). Nearly everything is in 20,380 Addressables bundles
+# (StreamingAssets/aa/Switch). The game presents at interval 2 (30 fps, main+0xcfb728). Its control data lists Korean
+
+# ---- Identity ----
+title_id	0100B8E026374000
+program_id	0100B8E026374000
+
+# ---- App ----
+name	DEMONS' NIGHT FEVER
+ipa	DemonsNightFever.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=a1c3dd4bfdf74f776230838f8893cca9	subsdk0=b94b22a35b112945c8a43e9c40a93821	sdk=871fb219c95d507fd5b45f667d51f9c1
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/aa/Switch/movieforsteam_assets_assets/graphics/movie/movie_opening_ja.webm_490013bbf7ed20d6d918113bde28fc49.bundle
+zip_store	.assets:.bundle:.dat:.json:.ress:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource (virtual address memory) and main sets a heap. nninitStartup hands pool − used to StandardAllocator as one address region (3.14 GB
+# with the Switch's pool) and Unity reserves its own beside it: in a 4.375 GB alias region that filled at +4.37 GB 9 s in (4.15 GB reserved, 1.28 GB mapped) and the game crashed.
+# A 1 GB pool, as Castlevania: Belmont's Curse's (the same Unity 2022.3); the sdk build gets the node-area cut (dm/tools/sdk_patches.py).
+# With those the regions' high-water mark still went from +2.76 GB to +4.37 GB in 18 minutes of play with 2.5 GB reserved (Unity's 16 and 64 MB blocks come and go and new ones
+# land ever higher: about 0.1 GB a minute). The alias region is the console's 64 GB (256 MB in front + 64 GB + 256 MB stack region + 128 MB heap region), as MARVEL Cosmic
+# Invasion's; a 12.4 GB one was at +3.75 GB after 2 minutes
+mem_reserve	0x1028000000
+mem_alias	0x1000000000
+mem_stack	0x10000000
+app_pool	0x40000000
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	DEMONS' NIGHT FEVER shaders
