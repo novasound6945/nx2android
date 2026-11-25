@@ -38,6 +38,15 @@ env	DM_UE_DYNRES=b7f965b9d7227db8e29f04e84ea7331b:0x8be80e0,0x8be80f8,0x8be8110:
 # The numbers above are with the frame rate held at 60 (the launcher's "Auto" then means 60; its 40 and 30 still apply). Left to the adaptive rate, a heavy place
 # would step the game to 40 fps before the resolution has come down, and at 40 the GPU's time fits again, so the resolution goes back up and the rate stays there.
 env	DM_FPS_PIN=60
+# Retroid Pocket 6 (8 GB: MemTotal 7.36 GB; the Nova has 11.5): Android's low-memory killer ended the game after four minutes of play (2026-11-25 08:17, exit reason
+# LOW_MEMORY at 3.6 GB PSS; it had killed seven background apps in the second before, "device is not responding"). The game holds 2.8 GB at its title, 3.2 GB in
+# the first field, 3.4-3.6 in heavier places (Graphics 1.7 GB, native heap 1.3 GB), which leaves 1.4-1.7 GB of MemAvailable there, and the killer acted before the
+# backend's own trim level (800 MB) was ever reached. With the levels raised the backend gives back what it can earlier: forced on the Nova (heaviest field) 3.44 ->
+# 3.32 GB PSS with the frames as they were (19 against 21 dropped in the field); the Retroid Pocket 6's record at its floor showed 172 MB of kept pool buffers and
+# 105 MB of empty image blocks. Not yet measured on that device (adb over Tailscale dies with the background apps). The game's own texture settings did not move
+# memory in that field (r.Streaming.PoolSize 700 -> 450, r.Streaming.MipBias 1 -> 2: the same bytes of GPU memory).
+env	DM_MEM_FLOOR_MB=2304
+env	DM_MEM_TRIM_MB=1792
 # Queue submit waited for the GPU (first road standing, 804 draws: 13.9-19.4 ms, GPU busy 10.5-13.7 ms) and the game held 40 fps (frame work p50 21.6-27 ms).
 # With fences (two runs each way, same spot): queue submit 0.66-0.69 ms, GPU busy 9.4 ms, frame work p50 17.4-17.5 ms, 60 fps (13-14 of 300 dropped);
 # the first battle's command menu 40 -> 60 fps (queue submit 15.2 -> 0.74 ms), fires and smoke the same in both
