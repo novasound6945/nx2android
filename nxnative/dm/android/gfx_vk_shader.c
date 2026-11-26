@@ -384,6 +384,12 @@ static vkshader_t *vk_shader_q(uint64_t key, int stage, int quiet) {
     // Chronicles 3's are rewritten there. DM_VK_SUBGROUP_ONE_LANE=0 (start-up): no module is rewritten, as before, for A/B tests
     static int one_lane = -1; if (one_lane < 0) { const char *e = getenv("DM_VK_SUBGROUP_ONE_LANE"); one_lane = !(e && !atoi(e)); if (!one_lane) VKLOG("subgroups: no one-invocation rewrite (DM_VK_SUBGROUP_ONE_LANE=0)"); }
     if (one_lane) { uint32_t ops = V.sg_stages & stage_flag(stage) ? V.sg_ops : 0; if (stage != 1 && stage != 5 && !V.sg_quad_all) ops &= ~(uint32_t)VK_SUBGROUP_FEATURE_QUAD_BIT;
+      // this fork's DM_VK_SUBGROUP_LACK=<mask> (start-up; VkSubgroupFeatureFlagBits, shuffle 0x10, shuffle relative 0x20): classes a fragment shader is taken not to
+      // have, though the device lists them. Turnip's compiler lowers a shuffle to a loop over the subgroup's lanes (64 or 128 turns for every fragment): The Legend
+      // of Zelda: Echoes of Wisdom's 788 lit fragment shaders OR their light masks over the warp with 5 butterfly shuffles (or 10 indexed ones when the warp is
+      // not full), and its main pass cost 6.5 ms of the frame's 12 on an Adreno 740 at any resolution. As subgroups of one invocation the mask is the fragment's own
+      { static int lack = -1; if (lack < 0) { const char *e = getenv("DM_VK_SUBGROUP_LACK"); lack = e ? (int)strtoul(e, NULL, 0) : 0; if (lack) VKLOG("subgroups: classes %#x taken as missing in fragment shaders (DM_VK_SUBGROUP_LACK): the modules that use them run as subgroups of one invocation", lack); }
+        if (stage == 1) ops &= ~(uint32_t)lack; }
       char why[64]; uint32_t n2 = 0, *w2 = spv_one_lane(w, nw, ops, &n2, why, sizeof why);
       if (w2) { free(w); w = w2; nw = n2; VKLOG("shader %016llx (stage %d): subgroups of one invocation (the device's subgroup operations in this stage: %#x)", (unsigned long long)key, stage, ops); }
       else if (why[0]) VKLOG("[RED] shader %016llx (stage %d) uses subgroup operations the device lacks in this stage (it has %#x), and %s is not covered by the one-invocation rewrite: left as it is", (unsigned long long)key, stage, ops, why); }

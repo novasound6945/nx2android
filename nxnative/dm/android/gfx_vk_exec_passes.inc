@@ -263,6 +263,15 @@ static void pass_dump_depth(void) {   // the pass's depth (D24S8 / D32 / D16) as
     VkCommandBuffer cb = vk_cmd(); vk_img_barrier_all(cb);
     VkBufferImageCopy c = {0, 0, 0, {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1}, {0, 0, 0}, {im->w, im->h, 1}};
     vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, d->b, 1, &c); vk_img_barrier_all(cb);
+    { const char *ps = getenv("DM_VK_PASSDUMP_STENCIL");   // this fork's (live): =1 also the pass's stencil (a depth-stencil target), its raw values as grey and counted in the log
+      if (ps && atoi(ps) && (im->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) && g_npd < PD_MAX) {
+        pdump_t *t = &g_pd[g_npd++]; t->w = im->w; t->h = im->h; t->f = VK_FORMAT_S8_UINT; t->pass = d->pass; t->present = d->present;
+        VkBufferCreateInfo sbi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, (VkDeviceSize)im->w * im->h, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE};
+        VKCHK(vkCreateBuffer(V.dev, &sbi, NULL, &t->b)); VkMemoryRequirements srq; vkGetBufferMemoryRequirements(V.dev, t->b, &srq);
+        VkMemoryAllocateInfo sai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, srq.size, vk_mem_type(srq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0)};
+        VKCHK(vkAllocateMemory(V.dev, &sai, NULL, &t->m)); VKCHK(vkBindBufferMemory(V.dev, t->b, t->m, 0)); VKCHK(vkMapMemory(V.dev, t->m, 0, VK_WHOLE_SIZE, 0, &t->p));
+        VkBufferImageCopy sc = {0, 0, 0, {VK_IMAGE_ASPECT_STENCIL_BIT, 0, 0, 1}, {0, 0, 0}, {im->w, im->h, 1}};
+        vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, t->b, 1, &sc); vk_img_barrier_all(cb); } }
 }
 static inline float half2f(uint16_t h) { uint32_t s = (uint32_t)(h >> 15) << 31, e = (h >> 10) & 31, m = h & 1023, f;
     if (!e) { if (!m) f = s; else { e = 1; while (!(m & 1024)) { m <<= 1; e--; } m &= 1023; f = s | ((e + 112) << 23) | (m << 13); } } else if (e == 31) f = s | 0x7f800000 | (m << 13); else f = s | ((e + 112) << 23) | (m << 13);
@@ -314,6 +323,13 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
         VKLOG("pass dump %02d is the submission's pass %d (present %llu)", i, d->pass, (unsigned long long)d->present);
         FILE *f = fopen(path, "wb"); if (!f) continue; fprintf(f, "P6\n%u %u\n255\n", d->w, d->h);
         uint8_t *row = malloc((size_t)d->w * 3); uint64_t bad = 0, n_nan = 0, n_inf = 0, n_finite = 0; float mx = 0, mn = 0; double sum = 0;
+        if (d->f == VK_FORMAT_S8_UINT) {   // DM_VK_PASSDUMP_STENCIL: the raw values as grey, and how many texels hold each
+            uint64_t cnt[256] = {0}; const uint8_t *sv = (const uint8_t *)d->p;
+            for (uint32_t y = 0; y < d->h; y++) { for (uint32_t x = 0; x < d->w; x++) { uint8_t v = sv[(size_t)y * d->w + x]; cnt[v]++; row[3 * x] = row[3 * x + 1] = row[3 * x + 2] = v; } fwrite(row, 1, (size_t)d->w * 3, f); }
+            char hs[512]; int o = 0; for (int v = 0; v < 256 && o < (int)sizeof hs - 32; v++) if (cnt[v]) o += snprintf(hs + o, sizeof hs - (size_t)o, " %#x:%llu", v, (unsigned long long)cnt[v]);
+            free(row); fclose(f); VKLOG("pass dump %02d: stencil %ux%u, values%s → %s", i, d->w, d->h, hs, path);
+            vkDestroyBuffer(V.dev, d->b, NULL); vkFreeMemory(V.dev, d->m, NULL); continue;
+        }
         if (d->f == VK_FORMAT_D24_UNORM_S8_UINT || d->f == VK_FORMAT_D32_SFLOAT || d->f == VK_FORMAT_D32_SFLOAT_S8_UINT || d->f == VK_FORMAT_D16_UNORM || d->f == VK_FORMAT_X8_D24_UNORM_PACK32) {
             size_t np = (size_t)d->w * d->h; float lo = 1e30f, hi = -1e30f; float *v = malloc(np * sizeof *v);
             for (size_t k = 0; k < np; k++) { float x;
@@ -352,6 +368,10 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
             else { const uint8_t *p = (const uint8_t *)d->p + ((size_t)y * d->w + x) * 4; int bgr = d->f == VK_FORMAT_B8G8R8A8_UNORM; row[3 * x] = p[bgr ? 2 : 0]; row[3 * x + 1] = p[1]; row[3 * x + 2] = p[bgr ? 0 : 2]; } }
             fwrite(row, 1, (size_t)d->w * 3, f); }
         free(row); fclose(f);
+        { const char *pa = getenv("DM_VK_PASSDUMP_ALPHA");   // this fork's (live): =1 also writes an RGBA8 target's alpha as <dump>.alpha.pgm (the PPM drops it)
+          if (pa && atoi(pa) && (d->f == VK_FORMAT_R8G8B8A8_UNORM || d->f == VK_FORMAT_B8G8R8A8_UNORM || d->f == VK_FORMAT_R8G8B8A8_SRGB || d->f == VK_FORMAT_B8G8R8A8_SRGB)) {
+            char ap[1100]; snprintf(ap, sizeof ap, "%s.alpha.pgm", path); FILE *af = fopen(ap, "wb");
+            if (af) { fprintf(af, "P5\n%u %u\n255\n", d->w, d->h); for (size_t k = 0; k < (size_t)d->w * d->h; k++) fputc(((const uint8_t *)d->p)[4 * k + 3], af); fclose(af); VKLOG("pass dump %02d alpha → %s", i, ap); } } }
         if (raw) { char rp[1100]; snprintf(rp, sizeof rp, "%s.f32", path); FILE *rf = fopen(rp, "wb");
             if (rf) { size_t n = (size_t)d->w * d->h * 3, written = fwrite(raw, sizeof(float), n, rf); int closed = fclose(rf);
                 if (written == n && !closed) VKLOG("pass dump %02d RGB32F: %ux%u -> %s", i, d->w, d->h, rp);

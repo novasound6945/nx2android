@@ -349,6 +349,7 @@ DM_VK_PACE	bool		debug	live	gfx_vk_present.c	present without desired times (`VK_
 DM_VK_PACE_LOG	bool		debug	live	gfx_vk_present.c	logs the display pacing every 600 frames (`pace log:` the measured lead from a present call to the frame's earliest possible present, the driver's present margin) and each resync with its predicted shortfall
 DM_VK_PASSDUMP	bool		debug	live	gfx_vk_exec.c	dump each pass's first colour target and its depth (PPM, NaN counts, depth stretched) for one frame; `=N` waits N−1 presents first. **The dump adds barriers and depth reads, which can hide bugs**
 DM_VK_PASSDUMP_AGAIN	int		debug	live	gfx_vk_exec.c	N (once): the pass dump again for N submissions
+DM_VK_PASSDUMP_ALPHA	bool		debug	live	gfx_vk_exec.c	this fork's: an RGBA8 target's dump also writes its alpha as `<dump>.alpha.pgm` (the PPM has no alpha)
 DM_VK_PASSDUMP_CROP	str		debug	live	gfx_vk_exec.c	Copy only this bounded rectangle of the selected colour image, reducing memory and disk use for temporal numeric probes. Origin is logged; an empty value restores full images.
 DM_VK_PASSDUMP_DEPTH	bool		debug	start	gfx_vk_exec.c	with `DM_VK_PASSDUMP_SIZE`, the size-filtered passes' depth too; every depth dump also writes its raw values as float32 (`<name>.f32` beside the PPM)
 DM_VK_PASSDUMP_FMT	str		debug	live	gfx_vk_exec.c	only these pass numbers of each submission / only passes whose first two colour formats are VkFormat a and b (pass numbers move from frame to frame; TTYD's first lit pass is `122/64`), to follow one pass over many frames
@@ -362,6 +363,7 @@ DM_VK_PASSDUMP_SIZE	str		debug	start	gfx_vk_exec.c	skip the first n passes, or s
 DM_VK_PASSDUMP_SKIP	int		debug	start	gfx_vk_exec.c	skip the first n passes, or start at the first pass of that size (depth included); only passes of those sizes (colour only)
 DM_VK_PASSDUMP_STATS	int		debug	?	gfx_vk_exec.c	
 DM_VK_PASSDUMP_STATS_STEP	int		debug	?	gfx_vk_exec.c	every n-th texel of every n-th row
+DM_VK_PASSDUMP_STENCIL	bool		debug	live	gfx_vk_exec.c	this fork's: a pass with a depth-stencil target also dumps its stencil (raw values as grey; the log counts the texels of each value)
 DM_VK_PASSDUMP_TARGET	bool		debug	?	gfx_vk_exec.c	=n: colour target n where the pass has one
 DM_VK_PASS_SPIKE	float		debug	start	gfx_vk_core.c	a frame whose timed passes and dispatches, or whose submissions, take longer logs `GPU spike:` with its six costliest items and the time outside them. The timestamps themselves add time: Tears of the Kingdom's 18 ms frames summed to 26 ms of passes, so set it well above the normal sum
 DM_VK_PASS_SPLIT	int	0	profile	?	gfx_vk_exec.c	split a pass into command buffers every N draws; 0 = never. Digimon Story: Time Stranger sets 128 (with DM_VK_PASS_SPLIT_DEPTH=1)
@@ -401,12 +403,13 @@ DM_VK_SHOT_DIR	str		debug	?	gfx_vk_present.c
 DM_VK_SKIP_OPS	str		debug	live	gfx_vk_exec.c	bisection aids: skip command kinds; 1 no draw calls, 2 no vertex buffers, 4 no descriptor sets
 DM_VK_SLOT0_FILL	bool		debug	?	gfx_vk_exec.c	
 DM_VK_SLOTS	int	6	profile	start	gfx_vk_core.c	this fork's: the submission slots the ring takes (6 to 32). A slot is taken again only once the GPU has finished the submission it held, so the replay runs at most that many submissions ahead of the GPU: a game that submits more than about half that many times a frame (Unreal Engine 5: 8) has each frame's replay wait for the GPU to finish the frame before
-DM_VK_SPV_ALT	bool		debug	?	gfx_vk_exec.c	pipelines made while `ALT` is on use `<dir>/<key>.spv` in place of the bundle's code where the file exists (same bindings), so two compilations of a shader compare in one run (e.g. the translator's GLSL through `glslc`, or a patched module)
+DM_VK_SPV_ALT	int		debug	?	gfx_vk_exec.c	pipelines made while `ALT` is on use `<dir>/<key>.spv` in place of the bundle's code where the file exists (same bindings), so two compilations of a shader compare in one run (e.g. the translator's GLSL through `glslc`, or a patched module); this fork's `=2`: also for a stage with integer views (stencil, uint textures), whose bindings the file must declare in their integer class itself
 DM_VK_SPV_CAPS	int		debug	?	gfx_vk_shader.c	
 DM_VK_SPV_CLIPCULL	int		debug	?	gfx_vk_shader.c	
 DM_VK_SPV_DIR	str		debug	?	gfx_vk_shader.c	pipelines made while `ALT` is on use `<dir>/<key>.spv` in place of the bundle's code where the file exists (same bindings), so two compilations of a shader compare in one run (e.g. the translator's GLSL through `glslc`, or a patched module)
 DM_VK_SR	bool		debug	start	gfx_vk_present.c	the present pass's super resolution (settings.txt `sr=`, the pause menu's Game tab); 0/1 overrides it for a device run
 DM_VK_SR_SHARP	int		debug	live	gfx_vk_present.c	the Sharpness slider for a run: percent, 0 to 100 (settings.txt `sharpness=`)
+DM_VK_SUBGROUP_LACK	hex		profile	start	gfx_vk_shader.c	this fork's: subgroup classes (`VkSubgroupFeatureFlagBits`: shuffle 0x10, shuffle relative 0x20) a fragment shader is taken not to have, though the device lists them: the modules that use one run as subgroups of one invocation (`gfx_vk_subgroup.c`). Turnip lowers a shuffle to a loop over the subgroup's lanes; The Legend of Zelda: Echoes of Wisdom sets 0x30 (its lit shaders OR their light masks over the warp with 5 to 10 shuffles a fragment)
 DM_VK_SUBGROUP_ONE_LANE	bool		debug	start	gfx_vk_shader.c	no shader module is rewritten as subgroups of one invocation (`gfx_vk_subgroup.c`): modules whose stage lacks subgroup operations keep them, as before the rewrite, which Vulkan leaves undefined (VUID-RuntimeSpirv-None-06343). For A/B tests on a driver where a rewritten shader draws wrong. Qualcomm's
 DM_VK_SUBGROUP_PIN	int		debug	start	gfx_vk_core.c	game pipelines' fragment and compute stages run at that subgroup size (`VkPipelineShaderStageRequiredSubgroupSizeCreateInfo`), where the device's `requiredSubgroupSizeStages` allows it; a compute workgroup larger than `maxComputeWorkgroupSubgroups` such subgroups keeps the driver's size. Off by defa
 DM_VK_SUBMIT_SPLIT	bool		debug	live	gfx_vk_core.c	don't submit the pieces early

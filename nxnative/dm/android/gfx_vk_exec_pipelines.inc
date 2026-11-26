@@ -432,7 +432,7 @@ static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshade
     uint64_t vi_flip = vi_scaled | vi_flip_of(k, stg[0]);
     for (int i = 0; i < 3; i++) if (stg[i] && !(i == 1 && k->raster_discard)) {
         VkShaderModule mod = i == 2 && k->gs_split ? stg[i]->gs_mod[k->gs_split - 1] :
-            vk_shader_module(stg[i], k->um[i], k->im[i], k->alt && !k->um[i] && !k->im[i] && !xo[i] ? 1u << 31 : xo[i], i == 1 ? (k->fdz ? 1 : 0) | (k->dual ? 2 : 0) | (int)(k->atest & 15) << 4 | (int)int_out_bits(k, stg[1]) : 0, i == 0 ? vi_flip : 0);
+            vk_shader_module(stg[i], k->um[i], k->im[i], k->alt && (k->alt == 2 || (!k->um[i] && !k->im[i])) && !xo[i] ? 1u << 31 : xo[i], i == 1 ? (k->fdz ? 1 : 0) | (k->dual ? 2 : 0) | (int)(k->atest & 15) << 4 | (int)int_out_bits(k, stg[1]) : 0, i == 0 ? vi_flip : 0);
         if (i == 0 && vi_scaled && mod == stg[0]->mod) {   // no vertex variant could be made (vk_shader_module fell back to the original): the integer fetch chosen above
             // would feed a float input, which Vulkan leaves undefined. Skip the pipeline, as for a format with no fallback
             static atomic_uchar noted_var; if (!atomic_exchange(&noted_var, 1))
