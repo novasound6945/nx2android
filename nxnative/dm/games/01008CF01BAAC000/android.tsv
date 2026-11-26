@@ -5,3 +5,14 @@ orientation	landscape
 tested	v196608 Retroid Pocket 6 (Adreno 740, PurpleVK)
 readme_image	docs/images/zelda-echoes-of-wisdom-rp6.png
 readme_tag	v0.4.0
+# This fork's (2026-11-26, Retroid Pocket Nova, Adreno 740, docked): 788 of the game's 4,553 fragment shaders (every lit material) OR their light masks over the warp before the
+# light loop: 5 butterfly shuffles when the warp is full, 10 indexed ones when it is not. Turnip's compiler turns each shuffle into a loop over the subgroup's lanes, so the main lit
+# pass cost 6.5 ms of the frame's 12 whatever the resolution (27 draws, about 130,000 indices; depth test EQUAL after a pre-pass). As subgroups of one invocation the mask is the
+# fragment's own and the shuffles are gone: the same pass 4.4 ms at 1600x900 where it took 6.5 at 1408x792
+env	DM_VK_SUBGROUP_LACK=0x30
+# As Link's Awakening (the same engine): the game waits for the frame before at each submission (acquire, SyncWait on the last frame's fence, submit, present), so a frame lasts the
+# replay plus the GPU's time, the GPU idles while the frame is replayed, reads about 62% busy and its governor keeps it at 401 of 680 MHz: 14.2 ms of GPU at 1920x1080 and frames of
+# 18.5 ms (about 45 dropped in 300) in Ganon's room. At its highest clock the same room takes 10.9-11.8 ms and 0-1 frames in 300 are dropped. The rate is held at 60: the frame work
+# sits near the period, where the adaptive rate stepped down to 40 and back
+env	DM_GPU_TURBO=1
+env	DM_FPS_PIN=60
