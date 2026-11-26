@@ -70,7 +70,7 @@ DM_LONGFRAME	str		debug	?	hle_nvn.c
 DM_MEMSTAT	str		debug,ios	?	memstat.m	
 DM_MEMSTAT_DUMP	int		debug,ios	?	memstat.m	
 DM_MEM_CAP_GB	str		debug	?	hle_nvn.c	
-DM_MEM_FLOOR_MB	int	1536	profile	start	gfx_vk_core.c	MB of MemAvailable under which the backend is under memory pressure (idle images and pipelines go, the prewarm and the shader preparation stop); 0 = never
+DM_MEM_FLOOR_MB	int	1536	profile	start	gfx_vk_core.c	MB of MemAvailable under which the backend is under memory pressure (idle images and pipelines go, the prewarm stops); 0 = never
 DM_MEM_TRIM_MB	int	800	profile	start	gfx_vk_core.c	MB of MemAvailable under which the backend trims (every empty block, kept pool buffers, idle pipelines, the allocator's free pages); 0 = only on onLowMemory
 DM_MENU_BUTTON	bool	1	porter	start	front_android.c	0 = no menu button on the on-screen gamepad (porter --no-menu-button)
 DM_MENU_RATE	bool		profile	start	front_android.c datasync_android.c	the launcher's App settings' Frame rate row (settings.txt rate=: 30 / 60), for a build with a frame step page
@@ -295,7 +295,6 @@ DM_VK_GPL_FSMS	bool		debug	live	gfx_vk_gpl.inc	every fragment part of a multisam
 DM_VK_GPL_LINK	int		debug	?	gfx_vk_exec.c	
 DM_VK_GPL_LINK_MS	int		debug	?	gfx_vk_exec.c	
 DM_VK_GPL_LTO	int		debug	?	gfx_vk_gpl.inc	
-DM_VK_GPL_PREP_MAX	int	32768	profile	start	gfx_vk_gpl.inc	the shader preparation makes every shader's parts only for a bundle of at most this many vertex + fragment shaders; a bigger one (Final Fantasy Resonance: 70,558) prepares only the shaders the device's records name (vk_pipelines.bin, vk_gpl_seen.bin) and makes the others' parts at their first draw. 0 = always the whole bundle
 DM_VK_GPL_PREP_THREADS	int		debug	?	gfx_vk_gpl.inc	
 DM_VK_GPL_SEEN	bool	1	debug	start	gfx_vk_gpl.inc	0: the shader parts made at draws are not recorded (DM_ROOT/vk_gpl_seen.bin) nor made first at the next start
 DM_VK_GPL_TRACE	int		debug	?	gfx_vk_gpl.inc	

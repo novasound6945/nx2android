@@ -55,21 +55,6 @@ static inline gpl_rast gpl_rast_key(uint32_t eds3, uint32_t clamp, uint32_t mode
 }
 static inline int gpl_rast_variants(uint32_t eds3, int has_clip_ctl) { return !(eds3 & GPL_E3_CLIP) && has_clip_ctl ? 2 : 1; }   // pre-rasterization parts the preparation makes per vertex shader
 
-// ---- which shaders the preparation makes parts for (gfx_vk_gpl.inc gpl_keys_load): every vertex and fragment shader of the bundle, or, when there are more than
-// DM_VK_GPL_PREP_MAX of them, only those the device's records name (the pipelines the last runs built, DM_ROOT/vk_pipelines.bin, and the parts they made at draws,
-// vk_gpl_seen.bin). Final Fantasy Resonance's 9,253 vertex + 61,305 fragment shaders are 193,168 parts; at the 39 a second its first start made (Retroid Pocket
-// Nova, 7 threads) some 80 minutes, and the app died at 18 % with 1.4 GB of SPIR-V kept (vkshader_t spv, besides the driver's copy in each module). The games
-// below it (Dark Souls: Remastered 3,099, Super Robot Wars Y 27,144) are prepared whole, as before. max: DM_VK_GPL_PREP_MAX (0 or less: always whole) ----
-#define GPL_PREP_MAX_DEF 32768
-static inline int gpl_prep_subset(uint32_t nvs_fs, long max) { return max > 0 && (unsigned long)nvs_fs > (unsigned long)max; }
-static inline int gpl_u64cmp(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
-static inline int gpl_keys_uniq(uint64_t *k, int n) {   // sorted, zeros and repeats dropped: the count left
-    if (!k || n <= 0) return 0;
-    qsort(k, (size_t)n, sizeof *k, gpl_u64cmp); int o = 0;
-    for (int i = 0; i < n; i++) if (k[i] && (!o || k[o - 1] != k[i])) k[o++] = k[i];
-    return o;
-}
-
 // ---- which pipeline a draw takes. opt: the whole pipeline's entry (0 none, 1 built, 2 failed, 3 being built); eligible: the draw can take a linked one (gpl_eligible) ----
 enum { GPL_OPT_NONE, GPL_OPT_OK, GPL_OPT_FAILED, GPL_OPT_PENDING };
 enum { GPL_USE_OPT, GPL_USE_FAST, GPL_USE_OLD };   // the whole pipeline; the parts linked (made now if missing; the whole one queued when opt is NONE); the path without libraries
