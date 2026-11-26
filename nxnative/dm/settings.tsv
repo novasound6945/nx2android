@@ -31,6 +31,7 @@ DM_DYN_SCALE	str		profile	live	hle_nvn.c	the host's dynamic resolution: a level 
 DM_ENV_FILE_KEYS	str		app,ios	start	main.m	the iOS launcher: the keys an env file set (Launcher.swift keeps them)
 DM_FD_LOG	int		debug	?	hle_fdstat.c	
 DM_FIXED_TIME	str		debug	?	hle_time.c main.c	
+DM_FNA3D_GL_PUMP	str		profile	start	fork_fna3d_pump.c	this fork's: <main's build ID>:<hex offset of the OpenGL driver's SwapBuffers in main>,<hex offset of the command list in the renderer>: FNA3D's OpenGL driver runs the GL calls of other threads on the device's thread once a frame; with this the thread that holds the GL context runs them when it would sleep in a condition wait (MARVEL Cosmic Invasion stopped before its first frame, its main thread waiting for a lock held by a loader that waited for the main thread)
 DM_FONT_DIR	str		debug	?	hle_sdk16.c	
 DM_FORCE_STRICT	str		debug	?	loader.c	
 DM_FPS	int		debug,ios	?	nvn_mtl.m	
@@ -52,6 +53,8 @@ DM_GL_CAPTURE	str		debug,ios	?	hle_gl.m
 DM_GL_LOG	str		debug,ios	?	hle_gl.m	
 DM_GL_STUBS	str		debug,ios	?	hle_gl.m	
 DM_GPU_TURBO	str		profile	live	perf_android.c	"auto" or 1: ask the GPU for its high clocks while the game is GPU-bound; "need": only while the game is held below its target; unset or 0 = no
+DM_GUEST_PEEK	str		debug	start	fork_guest_poke.c	this fork's: <main's build ID>:<module>+<hex offset>[><hex offset>]?<bytes>[,...]: the places DM_GUEST_POKE names, only read: each place's bytes are logged when first readable and whenever they have changed (every 250 ms, up to 40 lines a place)
+DM_GUEST_POKE	str		profile	start	fork_guest_poke.c	this fork's: `<main's build ID>:<module>+<hex offset>=<hex bytes>[,...]`, bytes written into a loaded module before the game runs (and again if its start-up writes over them): a switch of the game's own that its Switch build leaves off
 DM_GUEST_SPAWN_TEST	int		debug	?	hle_guestthread.c	
 DM_HLECOUNT	str		debug	start	hle_count.c	count every HLE call and write a TSV (category, name, count) at exit; the `ctl.txt` line `hlecount <file>` writes the counts so far, so two dumps around one action show the calls it made
 DM_HOME	str		app	start	front_android.c savecloud_android.c datasync_android.c	the internal files folder (the Android front end sets it): the log, saves/ and sync.txt stay there while the game data (DM_ROOT) is on an SD card
@@ -255,6 +258,8 @@ DM_TEST_KILL_AT	str		debug	?	hle_fs.c
 DM_TEST_LEAK_GPU	str		debug,ios	?	nvn_mtl.m	
 DM_TEST_LINK_STALL	str		debug,ios	?	nvn_mtl.m	
 DM_TEST_PRESENT_LAG	str		debug	?	hle_nvn.c	
+DM_THREAD_DUMPS	str		debug	start	hle_nvn.c	this fork's: <present>[#n]: from that present on, n (8) dumps of every guest thread's wait and backtrace, 7.3 ms apart: which threads wait, and for what, at different moments of a frame
+DM_UE_DYNRES	str		profile	start	fork_ue_dynres.inc	this fork's: <main's build ID>:<min>,<max>,<throttle>:<lo>-<hi>: an Unreal Engine game's own dynamic resolution steered by the host: the hex offsets in main of the value pointers of r.DynamicRes.MinScreenPercentage, MaxScreenPercentage and ThrottlingMaxScreenPercentage, and the screen percentages to move between (steps of 5: down when the frames' GPU p90 over 30 presents passes 92% of the frame time, up after four such windows under 82% and not within 600 presents of a drop, a pause that doubles up to 7200 each time a rise is taken back within 900 presents)
 DM_TEST_SWKBD_HOLD_MS	int		debug	?	hle_swkbd.c	
 DM_TEST_SWKBD_LAG_MS	int		debug	?	hle_swkbd.c	test: slow down "keyboard handed back → the game's thread gets the result" to verify that auto-accept does not jump the gun // front end path cleanup (dm_cursor.c): auto-accept after the name is typed on the naming page
 DM_TEST_UP_LEAK	str		debug,ios	?	nvn_mtl.m	test switch DM_TEST_UP_LEAK=1: do not retire the old block, as before the fix (for comparison, to measure the leak)
@@ -285,17 +290,23 @@ DM_VK_DEVICE_FAULT	str		debug	start	gfx_vk_core.c
 DM_VK_DRIVER	str		porter	start	gfx_vk_core.c	the Vulkan driver library in the APK (porter --vulkan-driver, e.g. Turnip)
 DM_VK_DYN_UBO	bool		profile	start	gfx_vk_shader.c	no dynamic uniform-buffer offsets (descriptor reuse drops)
 DM_VK_FDZ	bool	1	profile	live	gfx_vk_exec.c	no fragment-depth variants: draws that test a depth buffer a fragment shader wrote through `gl_FragDepth` (in the last two presents) normally get a variant of their fragment shader that writes `gl_FragDepth = gl_FragCoord.z`, the same depth tested after the shader, out of Adreno's early culling, whi
+DM_VK_FENCE_SPLIT	int		profile	start	gfx_vk_exec_walker.inc	this fork's: a fence recorded in a command buffer signals for the GPU work before it, as on the console, not for the whole host submission that holds it: 1 a fence with no work of its submission before it takes the last submission's fence, 2 besides, the work before a fence becomes a submission of its own
 DM_VK_FLIPY	bool		debug	live	gfx_vk_exec.c	the old clip-space y convention (pictures flip)
 DM_VK_FRONT	int		profile	start	gfx_vk_exec.c	the Vulkan front face for every draw: 0 clockwise, 1 counter-clockwise; 2 inverts the winding rule by the device's window origin (not the queue's; Disgaea 4 Return, Burnout Paradise)
 DM_VK_FRONT_INVERT	bool		profile	?	gfx_vk_exec.c	the name DM_VK_FRONT=2 had in data packs made before (Disgaea 4 Return's)
 DM_VK_FS_NOKILL	hex		profile	start	gfx_vk_shader.c	pixel shader keys whose discards are left out (comma-separated)
 DM_VK_GPL	str		profile	start	gfx_vk_core.c gfx_vk_gpl.inc	graphics pipeline libraries (VK_EXT_graphics_pipeline_library); 0 = off
+DM_VK_GPL_BAKE	bool		profile	start	gfx_vk_gpl.inc	this fork's, at port time: every shader part of the bundle is compiled once into the driver's cache on disk (DM_ROOT/mesa, which then goes into the data pack); nothing is kept in memory, and a bake that was stopped goes on where it was
 DM_VK_GPL_DYN	int		debug	?	gfx_vk_exec.c	
 DM_VK_GPL_FSMS	bool		debug	live	gfx_vk_gpl.inc	every fragment part of a multisampled draw takes the draw's multisample state (diagnosis)
 DM_VK_GPL_LINK	int		debug	?	gfx_vk_exec.c	
 DM_VK_GPL_LINK_MS	int		debug	?	gfx_vk_exec.c	
 DM_VK_GPL_LTO	int		debug	?	gfx_vk_gpl.inc	
+DM_VK_GPL_PREP_MAX	int	30000	profile	start	gfx_vk_gpl.inc	a shader bundle of more vertex and fragment shaders than this is not prepared whole: the parts earlier runs listed are made at the start, a shader's parts when the game sets it in a program; 0 = no limit
 DM_VK_GPL_PREP_THREADS	int		debug	?	gfx_vk_gpl.inc	
+DM_VK_GPL_PROGRAM_FDZ	bool	1	debug	start	gfx_vk_gpl.inc	0 = a big bundle's fragment shaders get no fragment depth part when the game sets them in a program (only the plain one)
+DM_VK_GPL_PROGRAM_THREADS	int		debug	start	gfx_vk_gpl.inc	the threads that make a big bundle's parts when the game sets a program's shaders (default 4 on 8 cores)
+DM_VK_GPL_PROGRAM_WAIT	int		profile	start	gfx_vk_gpl.inc	this fork's: nvnProgramSetShaders returns only once the parts of the shaders it gave are made, so an engine that precaches its pipelines at load (Unreal Engine's PSO precaching, DM_GUEST_POKE) waits for them as on the platforms where making a pipeline is the compile
 DM_VK_GPL_SEEN	bool	1	debug	start	gfx_vk_gpl.inc	0: the shader parts made at draws are not recorded (DM_ROOT/vk_gpl_seen.bin) nor made first at the next start
 DM_VK_GPL_TRACE	int		debug	?	gfx_vk_gpl.inc	
 DM_VK_GS_SPLIT	bool	0	profile	live	gfx_vk_exec.c	1 = split geometry-shader draws (gfx_vk_gs_split.c)
@@ -316,6 +327,7 @@ DM_VK_MDI	int		debug	start	gfx_vk_exec.c	3`
 DM_VK_MDI_LOG	int		debug	start	gfx_vk_exec.c	two frames from that present: each multi-draw's count (GPU copy, CPU), its records below and past it, the dispatches, copies and clears
 DM_VK_MEMLOG	int		debug	start	gfx_vk_core.c	every s seconds a `[mem]` line: the process's memory (anonymous, file, shared, swapped), the system's (available, free, swap, pressure) and the pools (zero-copy, of it backed when first used, not used yet, copied, used). Sampling from outside stalls under memory pressure; this does not
 DM_VK_MEM_DIAG	bool		debug	start	gfx_vk_core.c	enabled storage-image features (extended formats, formatless reads/writes), each copied buffer's size, allowed memory-type mask, selected type/cache flags and compatible host-visible cached candidate (-1 if none; diagnostic only), and zero-copy failures once per stage, with the API return or errno; 
+DM_VK_MESA_CACHE	bool	1	profile	start	fork_vk_bake.inc	this fork's: with a folder DM_ROOT/mesa (a port's bake), the driver's own shader cache on disk is turned on and read on demand; 0 leaves it off
 DM_VK_MIP_MAX	int		debug	start	gfx_vk_tex.c	caps every sampler's `maxLod` at that level (0: always the base level; a sampler that already stops lower keeps its own, and `minLod` is lowered to it too): tells whether a flat material is the mip choice or the texture / UVs
 DM_VK_MT_REPLAY	bool	0	profile	start	gfx_vk_dq.c	two-stage replay: the vkCmd* calls (40 of them) are copied into a 32 MB ring and a "vk record" thread makes the real calls in order; the calls that end, submit or present a command buffer (and pool resets, waits) wait for the ring to empty first; a call with a pNext the copy does not know runs direc
 DM_VK_NAN_MINMAX	str		debug	?	gfx_vk_shader.c	
@@ -380,6 +392,7 @@ DM_VK_SHOTS	bool		debug	live	gfx_vk_present.c	save each of the next N presented 
 DM_VK_SHOTS_FAST	str		debug	?	gfx_vk_present.c	
 DM_VK_SHOT_DIR	str		debug	?	gfx_vk_present.c	
 DM_VK_SKIP_OPS	str		debug	live	gfx_vk_exec.c	bisection aids: skip command kinds; 1 no draw calls, 2 no vertex buffers, 4 no descriptor sets
+DM_VK_SLOTS	int	6	profile	start	gfx_vk_core.c	this fork's: the submission slots the ring takes (6 to 32). A slot is taken again only once the GPU has finished the submission it held, so the replay runs at most that many submissions ahead of the GPU: a game that submits more than about half that many times a frame (Unreal Engine 5: 8) has each frame's replay wait for the GPU to finish the frame before
 DM_VK_SLOT0_FILL	bool		debug	?	gfx_vk_exec.c	
 DM_VK_SPV_ALT	bool		debug	?	gfx_vk_exec.c	pipelines made while `ALT` is on use `<dir>/<key>.spv` in place of the bundle's code where the file exists (same bindings), so two compilations of a shader compare in one run (e.g. the translator's GLSL through `glslc`, or a patched module)
 DM_VK_SPV_CAPS	int		debug	?	gfx_vk_shader.c	
@@ -389,6 +402,7 @@ DM_VK_SUBGROUP_ONE_LANE	bool		debug	start	gfx_vk_shader.c	no shader module is re
 DM_VK_SUBGROUP_PIN	int		debug	start	gfx_vk_core.c	game pipelines' fragment and compute stages run at that subgroup size (`VkPipelineShaderStageRequiredSubgroupSizeCreateInfo`), where the device's `requiredSubgroupSizeStages` allows it; a compute workgroup larger than `maxComputeWorkgroupSubgroups` such subgroups keeps the driver's size. Off by defa
 DM_VK_SUBMIT_SPLIT	bool		debug	live	gfx_vk_core.c	don't submit the pieces early
 DM_VK_SYNC_PRESENT	str		debug	start	gfx_vk_present.c	present on the game thread instead of the present thread
+DM_VK_TBUF_FLOAT	bool		profile	start	gfx_vk_tex.c	buffer textures of 32-bit integer texels are viewed with the float format of the same layout, so the shaders that read or write them need no integer-texel variant (FINAL FANTASY RESONANCE's particle buffers)
 DM_VK_TEXBIND	str		debug	start	gfx_vk_exec.c	once per matching pipeline, a log line for every texture the draw has bound (stage, slot, ID, size, NVN format, levels, pool and offset). `all`: every draw that samples something, one group per pixel shader
 DM_VK_TEXBIND_DUMP	int		debug	start	gfx_vk_exec.c	writes the storage of that group's first mipmapped texture (`all`: the first 6 slots) as the GPU has it, block-linear, to `$DM_ROOT/texbind_<vs>_<fs>_s<slot>.bin`; the log line beside it has the dimensions and format to deswizzle it offline
 DM_VK_TEXDUMP	hex		debug	start	gfx_vk_exec.c	during the dump, the first sampled image at that pool offset (the trace prints both) is blitted to RGBA16F and dumped with the passes (level 0, up to 6 layers, pass number −100 − layer): a compressed texture such as a BC6H cube map, decoded by the GPU
@@ -398,6 +412,7 @@ DM_VK_TRACE_FRAME	str		debug	live	gfx_vk_exec.c	trace every pass of the next sub
 DM_VK_TRACE_FRAME_IN	int		debug	?	gfx_vk_exec.c	
 DM_VK_TRACE_FRAME_SPEC	str		debug	?	gfx_vk_exec.c	
 DM_VK_TRACE_PASS	int		debug	live	gfx_vk_exec.c	`-2` lists one submission's passes; `n` logs every draw of pass n once (targets, depth target, textures, pipeline state); the `-2` list also shows each barrier's NVN bits and where each pass was ended from (an offset in `libdmhost.so`), each dispatch's storage buffers (`s<n> <address>+<size>`, for a
+DM_VK_TS_SCALE	float		debug	start	gfx_vk_core.c	this fork's: the factor GPU timestamps are multiplied by (1 = the driver's unit as it is). Unset: measured against the CPU's clock over the first seconds (the bundled Turnip's timestamps ran at 0.631 of real time on the Retroid Pocket Nova)
 DM_VK_TRACE_SIZE	str		debug	live	gfx_vk_exec.c	trace the (n+1)th pass whose first colour target has that size (and formats): pass numbers move by tens from frame to frame
 DM_VK_TRACE_VS	str		debug	?	gfx_vk_exec.c	
 DM_VK_UBD_HEAP	hex		debug	live	gfx_vk_exec.c	a deferred uniform update keeps no copy in ordinary memory, and the shadows read its bytes back from the submission's scratch buffer, as before (`gfx_vk_core.c` `vk_sub_update`). Scratch is mapped GPU memory, not cached on Adreno: those reads were 17 to 33% of the replay thread on Breath of the Wild

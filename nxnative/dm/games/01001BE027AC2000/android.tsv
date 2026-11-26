@@ -1,0 +1,9 @@
+# Flight Simulator 2026 (01001BE027AC2000) on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android")
+# Retroid Pocket Nova, 2026-11-26: played by hand from the first experimental build and reported working; the device was not reachable afterwards, so no log of that run was read
+status	playable
+tested	v65536 Retroid Pocket Nova (QCS8550, Adreno 740, Android 13)
+package	org.nx2a.flightsimulator2026
+orientation	landscape
+# The bundle's 10,542 shaders are under the limit a bundle is prepared whole at (30,000). Measured on the Nova 40 s in: 4.49 GB (native heap 1.83 GB) prepared whole, 2.78 GB
+# (native heap 0.20 GB) with a shader's parts made when the game sets it in a program; the same long frames and dropped frames (2) up to the menu either way
+env	DM_VK_GPL_PREP_MAX=5000

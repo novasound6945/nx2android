@@ -19,6 +19,8 @@ VkPipelineLayout vk_pipeline_layout(VkDescriptorSetLayout sets[5], int nsets);
 VkPipelineLayout vk_pipeline_layout_gfx(VkDescriptorSetLayout sets[5], int nsets);   // a graphics pipeline's (with V.gpl: independent sets, gfx_vk_gpl.inc)
 void vk_shader_c1(vkshader_t *s, VkBuffer *buf, VkDeviceSize *off, VkDeviceSize *len);
 VkBufferView vk_tbuf_view(const tex_t *t, int storage);
+int vk_tbuf_float(const tex_t *t);   // gfx_vk_tex.c: 32-bit integer texels read through a float view (DM_VK_TBUF_FLOAT): no integer-texel variant
+VkBufferView vk_tbuf_view_f(const tex_t *t, int storage, int as_float);
 void vk_sub_update(uint64_t dst, const void *data, uint64_t n);
 int prog_key(const prog_t *p, unsigned st, uint8_t key[8]);
 

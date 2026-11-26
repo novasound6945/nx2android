@@ -1,0 +1,15 @@
+# DEMONS' NIGHT FEVER (0100B8E026374000) on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android")
+# Retroid Pocket Nova, 2026-11-25/26: the intro, the opening movie, the title and 18 minutes from a new game, in Korean, at the game's own 30 fps: 31,800 frames, 4 shown late,
+# 8 saves, no error line. That run had the 5 GB block; the larger alias region (game.tsv) was built after it
+status	playable
+tested	v0 Retroid Pocket Nova (QCS8550, Adreno 740, Android 13)
+package	org.nx2a.demonsnightfever
+orientation	landscape
+# The bundle's 19,590 shaders are under the limit a bundle is prepared whole at (30,000): the host then keeps their SPIR-V (721 MB) and makes all 29,496 shader parts at the
+# start. Measured on the Nova 40 s in: 5.27 GB (native heap 3.11 GB) prepared whole, 2.49 GB (native heap 0.48 GB) with a shader's parts made when the game sets it in a
+# program; the same long frames and no dropped frame up to the intro either way. A device with 8 GB of memory kills an app of 3.6 GB (FINAL FANTASY RESONANCE on the Retroid Pocket 6)
+env	DM_VK_GPL_PREP_MAX=8000
+# 20,272 of the RomFS's 20,455 files are at most 1 MB (0.92 GB of 1.96 GB, the Addressables bundles): a new install downloaded the pack's 20,478 files in 29 minutes, one
+# request each (BALL x PIT's 81 files, 0.9 GB, took 35 s on the same line). They go into packs the host reads in place
+data_bundles	1048576	67108864
+romfs_packs	on

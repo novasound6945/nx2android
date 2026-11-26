@@ -1,0 +1,12 @@
+# MARVEL Cosmic Invasion (010059D020C26000) on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android")
+# An OpenGL game here (see game.tsv): the device's OpenGL ES driver draws it, and the host shows its frames through Vulkan (dm/android/gl_android.c).
+# Retroid Pocket Nova, 2026-11-25: logos, the intro animation (Theora), the title, the licence prompt, the menus and two stages in 27 minutes of play at 60 fps (97,200 frames,
+# 3 shown late, memory level at 1.0 GB, no error line). Built with --language ko the game starts in Korean (it reads the system language as "kr")
+status	playable
+tested	v0 Retroid Pocket Nova (QCS8550, Adreno 740, Android 13)
+package	org.nx2a.marvelcosmicinvasion
+orientation	landscape
+# FNA3D's OpenGL driver makes the GL calls of other threads on the main thread, once a frame in SwapBuffers. The game's preload threads load content under one lock, and a texture
+# among it waited for a frame the main thread could not reach: it was still in LoadContent, waiting for that lock. With this row the main thread runs the driver's list when it
+# waits (dm/host/fork_fna3d_pump.c): SwapBuffers at main+0x1a7460, the list at renderer+0x578
+env	DM_FNA3D_GL_PUMP=4b8064a4a57b1ec333220daf331d31de:0x1a7460,0x578

@@ -139,8 +139,10 @@ static uint32_t *bundle_spv(const bent *e, uint32_t *nw) {
 typedef struct { uint64_t key, data; uint32_t nctl, ncode; uint8_t *ctl; } pend_t;
 enum { NPEND = 4096 };
 static pend_t g_pend[NPEND]; static unsigned g_npend; static pthread_mutex_t g_pend_mu = PTHREAD_MUTEX_INITIALIZER;
+__attribute__((weak)) void vk_gpl_announce(uint64_t key, int stage);   // gfx_vk_gpl.inc (gfx_vk_exec.c); absent in the tools that build this file alone
 static void shader_set(const uint8_t k[8], const void *control, uint64_t data, uint32_t ncode) {
     uint64_t key = 0; for (int i = 0; i < 8; i++) key = key << 8 | k[i];
+    if (key && vk_gpl_announce) { int st = vk_shader_stage(key); if (st == 0 || st == 1 || st == 5) vk_gpl_announce(key, st); }   // a big bundle's parts, from now (gfx_vk_gpl.inc)
     if (!key || !control || !data || !ncode || ncode >= (1u << 24) || vk_shader_stage(key) >= 0) return;
     uint32_t nctl = 0x880, own; memcpy(&own, (const uint8_t *)control + 0x20, 4); if (own >= 0x760 && own < 0x880) nctl = own;   // as hle_nvn.c keys_hash
     uint8_t *c = malloc(nctl); if (!c) return; memcpy(c, control, nctl);
@@ -148,7 +150,9 @@ static void shader_set(const uint8_t k[8], const void *control, uint64_t data, u
     pend_t *p = &g_pend[g_npend++ % NPEND]; free(p->ctl); *p = (pend_t){key, data, nctl, ncode, c};   // the oldest goes: a draw needs a program soon after it is set
     pthread_mutex_unlock(&g_pend_mu);
 }
-__attribute__((constructor)) static void shader_set_on(void) { extern void (*g_nvn_on_shader)(const uint8_t *, const void *, uint64_t, uint32_t); g_nvn_on_shader = shader_set; }
+__attribute__((weak)) void vk_gpl_program_done(void);   // gfx_vk_gpl.inc: the call waits for the parts of the shaders it gave (DM_VK_GPL_PROGRAM_WAIT)
+static void program_set_done(void) { if (vk_gpl_program_done) vk_gpl_program_done(); }
+__attribute__((constructor)) static void shader_set_on(void) { extern void (*g_nvn_on_shader)(const uint8_t *, const void *, uint64_t, uint32_t); extern void (*g_nvn_on_program)(void); g_nvn_on_shader = shader_set; g_nvn_on_program = program_set_done; }
 void vk_shader_missing(uint64_t key) {
     pend_t p = {0};
     pthread_mutex_lock(&g_pend_mu);
@@ -437,6 +441,16 @@ static vkshader_t *vk_shader_q(uint64_t key, int stage, int quiet) {
     nvn_hm_put(&g_shaders, &hk, s);
     pthread_mutex_unlock(&g_sh_mu);
     return s;
+}
+// The bake (gfx_vk_gpl.inc gpl_bake, this fork's) is done with a shader once its parts are made: its modules and its SPIR-V go, and its entry (a later vk_shader
+// makes it again). Only for a shader no draw holds: the bake runs before the game
+void vk_shader_drop(vkshader_t *s);
+void vk_shader_drop(vkshader_t *s) {
+    struct { uint64_t key; uint64_t stage; } hk = {s->key, (uint64_t)s->stage};
+    pthread_mutex_lock(&g_sh_mu); nvn_hm_del(&g_shaders, &hk); pthread_mutex_unlock(&g_sh_mu);
+    for (int i = 0; i < s->nvar; i++) if (s->var[i].mod && s->var[i].mod != s->mod) vkDestroyShaderModule(V.dev, s->var[i].mod, NULL);
+    if (s->mod) { vkDestroyShaderModule(V.dev, s->mod, NULL); __atomic_fetch_sub(&g_spv_n, 1, __ATOMIC_RELAXED); __atomic_fetch_sub(&g_spv_bytes, (uint64_t)s->nspv * 4, __ATOMIC_RELAXED); }
+    free(s->spv); free(s);
 }
 // Integer texels. Maxwell's texture instructions return the texel's 32-bit words as they are, and the shader decides what they mean; the translator declares
 // every sampled image as float, which matches only float views. A view of an integer format, or the stencil of a depth-stencil texture (DepthStencilMode
@@ -823,12 +837,12 @@ VkPipelineLayout vk_pipeline_layout_lib(VkDescriptorSetLayout sets[5], int nsets
 static void bundle_hash_once(void) {   // with the load-time clean-ups' version and switches (spv_xf): other modules, another mark; and the dynamic uniform buffers' stages (other set layouts)
     spv_xf(); uint32_t xf[4] = {SPV_XF_VER, (uint32_t)g_xf_clip, (uint32_t)g_xf_caps, (uint32_t)vk_dyn_ubo_mode() | 0x44590000u};
     g_bundle_h = gpl_hash64(g_bundle, g_bundle_len) ^ gpl_hash64(xf, sizeof xf) * 0x9E3779B97F4A7C15ull;
+    { const char *e = getenv("DM_VK_FS_NOKILL"); if (e && *e) g_bundle_h ^= gpl_hash64(e, strlen(e)) * 0xC2B2AE3D27D4EB4Full; }   // other modules for those shaders: another mark
     // The hash read every page of the mapping; they stayed in the process's resident set (counted in its PSS and footprint) although only the shaders a run makes are
     // read again. Final Fantasy Resonance's 1.2 GB bundle: footprint 3.1-3.4 GB at its title with the pipeline libraries, 2.0-2.1 GB without (no hash). Past the
     // index they are given back (a read-only file mapping: a later read faults the page in from the file again)
     { long pg = sysconf(_SC_PAGESIZE); size_t at = pg > 0 ? ((size_t)(12 + 32ull * g_nent) + (size_t)pg - 1) & ~((size_t)pg - 1) : g_bundle_len;
-      if (at < g_bundle_len) madvise((void *)(g_bundle + at), g_bundle_len - at, MADV_DONTNEED); }
-    { const char *e = getenv("DM_VK_FS_NOKILL"); if (e && *e) g_bundle_h ^= gpl_hash64(e, strlen(e)) * 0xC2B2AE3D27D4EB4Full; } }   // other modules for those shaders: another mark
+      if (at < g_bundle_len) madvise((void *)(g_bundle + at), g_bundle_len - at, MADV_DONTNEED); } }
 uint64_t vk_bundle_hash(uint32_t *nshaders) {
     bundle_auto(); static pthread_once_t once = PTHREAD_ONCE_INIT;
     *nshaders = g_bundle ? g_nent : 0; if (!g_bundle) return 0;

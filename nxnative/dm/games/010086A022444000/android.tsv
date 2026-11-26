@@ -1,0 +1,6 @@
+# BALL x PIT (010086A022444000) on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android")
+# Retroid Pocket Nova, 2026-11-25/26: 8 minutes of play in Korean at 60 fps: 28,800 frames, none shown late, 17 saves, no error line
+status	playable
+tested	v524288 Retroid Pocket Nova (QCS8550, Adreno 740, Android 13)
+package	org.nx2a.ballxpit
+orientation	landscape

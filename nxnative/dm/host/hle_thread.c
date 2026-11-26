@@ -452,6 +452,9 @@ static const char *thr_name(thr_t *t, char *nb, size_t n) {   // SDK ThreadType+
         vm_read_overwrite(mach_task_self(), np, n - 1, (vm_address_t)nb, &got)) return "?";
     nb[got] = 0; return nb;
 }
+// (this fork's: DM_NVN_SEQ's lines name the guest thread that made the call)
+const char *dm_thread_name_self(char *nb, size_t n);
+const char *dm_thread_name_self(char *nb, size_t n) { pthread_t me = pthread_self(); for (thr_t *t = g_all; t; t = t->all) if (t->started && !t->exited && pthread_equal(t->pt, me)) return thr_name(t, nb, n); return "host"; }
 // All live guest threads (used by the sampler DM_SAMPLE=ms:*): fill the pthreads into out, return the count
 int thr_list(pthread_t *out, int max) {
     int n = 0;

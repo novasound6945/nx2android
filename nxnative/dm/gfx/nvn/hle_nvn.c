@@ -686,6 +686,7 @@ static void pk_drop(const void *p) {
 // Set by a backend whose shaders are translated before the game runs (Android's Vulkan bundle, gfx_vk_shader.c): called at SetShaders for each stage whose key is known then, while the
 // control section is still the game's to read, so a shader whose code no game file holds can be saved and translated by the next port (Xenoblade Chronicles 3 sets hundreds)
 void (*g_nvn_on_shader)(const uint8_t key[8], const void *control, uint64_t data, uint32_t ncode);
+void (*g_nvn_on_program)(void);   // nvnProgramSetShaders, its shaders given to g_nvn_on_shader: the backend may hold the call here until their code is made (this fork's, gfx_vk_gpl.inc)
 // mapped = 1: computed only when the code area is in a registered memory pool (at SetShaders: Mario sets some programs with an unmapped address first and fills it in before the first draw)
 static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     uint32_t ncode = 0; void *mb; uint64_t mo;
@@ -725,6 +726,7 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
         // DM_NVN_SHDUMP (debugging): keep a copy of the control section so the replay layer can save shaders missing from the map (never freed)
         if (dump && sd[i].control) { void *c = malloc(0x880); memcpy(c, sd[i].control, 0x880); o->sd[i].control = c; }
     }
+    if (g_nvn_on_program) g_nvn_on_program();
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
     return 1;
 }
@@ -739,7 +741,8 @@ static uint64_t g_frame;
 // DM_NVN_SEQ=N (live, a DM_CTL env line): the next N frames' submissions, fences, acquires, sync waits and presents in order, with thread and time
 // (how Xenoblade Chronicles 3's render thread was found waiting in SyncWait on the acquire sync for its whole frame's GPU work)
 static int seq_on(void) { static uint64_t until; const char *e = getenv("DM_NVN_SEQ"); if (e && atoi(e)) { until = g_frame + (uint64_t)atoi(e); setenv("DM_NVN_SEQ", "0", 1); } return g_frame < until; }
-#define SEQ(...) do { if (seq_on()) { char sb_[256]; snprintf(sb_, sizeof sb_, __VA_ARGS__); LOG("[seq] f%llu t%lx %.3f %s", (unsigned long long)g_frame, (unsigned long)(uintptr_t)pthread_self(), now_ns() / 1e6, sb_); } } while (0)
+int nvn_seq_active(void); int nvn_seq_active(void) { return seq_on(); }   // (this fork's: the Vulkan side's lines of the same trace, gfx_vk_core.c and gfx_vk_exec_walker.inc)
+#define SEQ(...) do { if (seq_on()) { char sb_[256], tn_[40]; const char *dm_thread_name_self(char *, size_t); snprintf(sb_, sizeof sb_, __VA_ARGS__); LOG("[seq] f%llu t%lx %.3f %s [%s]", (unsigned long long)g_frame, (unsigned long)(uintptr_t)pthread_self(), now_ns() / 1e6, sb_, dm_thread_name_self(tn_, sizeof tn_)); } } while (0)   // (this fork's: the thread's name at the end)
 NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = nvn_fence_now(); SEQ("fence %p", (void *)s); }
 // A sync object that was never fenced waits until timeout, as on a real device; a fenced one is released only after the GPU has actually completed up to that fence value
 // A GPU-side wait on a sync: the host has a single Metal queue that executes submissions in order, so commands before the fence are always done first and nothing needs waiting. A sync not fenced yet (fenced later by another thread) is not waited for here; logged once
@@ -754,9 +757,9 @@ NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     // TIMEOUT for the not-yet-fenced object made Final Fantasy Resonance abort through nn::diag at start-up: wait for the queued jobs first.
     if (!o->fenced && nvn_async()) nvn_jobs_wait_queued(timeout);
     if (!o->fenced) { SEQ("syncwait %p unfenced", (void *)s); return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED; }
-    if (nvn_fence_wait(o->fence, 0)) { SEQ("syncwait %p kind %u already", (void *)s, o->fenced); return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; }
+    if (nvn_fence_wait(o->fence, 0)) { SEQ("syncwait %p kind %u fence %llu already", (void *)s, o->fenced, (unsigned long long)o->fence); return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; }
     uint64_t t0 = now_ns(); int r = nvn_fence_wait(o->fence, timeout);
-    SEQ("syncwait %p kind %u timeout %llu waited %.2f ms -> %d", (void *)s, o->fenced, (unsigned long long)timeout, (now_ns() - t0) / 1e6, r);
+    SEQ("syncwait %p kind %u fence %llu timeout %llu waited %.2f ms -> %d", (void *)s, o->fenced, (unsigned long long)o->fence, (unsigned long long)timeout, (now_ns() - t0) / 1e6, r);
     return r ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
 }
 NVN(nvnEventBuilderSetDefaults, void, NVNeventBuilder *b) { memset(b, 0, sizeof(ev_builder_t)); }
@@ -1635,7 +1638,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     // here; its work between presenting and acquiring (~13 ms a frame) still overlaps the replay. DM_NVN_ACQ_REPLAYED=0: no wait
     { static int w = -1; if (w < 0) { const char *ar = getenv("DM_NVN_ACQ_REPLAYED"); w = !(ar && !atoi(ar)); } if (w && nvn_async()) job_wait(g_job_enq, ~0ull); }
     if (s) { ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = acq_now || *idx >= 4 ? nvn_fence_now() : o->done[*idx]; }
-    SEQ("acquire %d sync %p", *idx, (void *)s);   // The swapchain texture becomes available once the commits before this point have completed
+    SEQ("acquire %d sync %p (waited: pace %.2f ms, its last present %.2f ms)", *idx, (void *)s, pace_ns / 1e6, pq_ns / 1e6);   // The swapchain texture becomes available once the commits before this point have completed
     if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; g_fs_pq = pq_ns; dm_perf_frame_start(pace_ns, pq_ns); }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
@@ -2106,12 +2109,23 @@ static void engine_dyn_tick(uint64_t presents) {
     if (nk != k) { static int nlog; if (nlog++ < 100) LOG("[nvn] engine dynamic resolution: GPU clock factor %.2f → %.2f at present %llu (GPU p90 %.1f ms, budget %.1f)", k, nk, (unsigned long long)presents, p90, budget);
         k = nk; gclk_set(k); }
 }
+#include "fork_ue_dynres.inc"   // this fork's: DM_UE_DYNRES (ue_dynres_tick)
+// DM_THREAD_DUMPS=<present>[#n] (this fork's, read at start): from that present on, n (8) dumps of every guest thread's wait and backtrace, 7.3 ms apart (not a
+// multiple of a 60 Hz frame): which threads wait, and for what, at different moments of a frame
+static void *thread_dumps_main(void *arg) {
+    void svc_thread_dump(void); int n = (int)(intptr_t)arg;
+    for (int i = 0; i < n; i++) { LOG("[dumps] guest threads, dump %d of %d at %.3f ms", i + 1, n, now_ns() / 1e6); svc_thread_dump(); usleep(7300); }
+    return NULL;
+}
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
+    { static long at = -2; static int n; if (at == -2) { const char *e = getenv("DM_THREAD_DUMPS"); at = e ? atol(e) : -1; const char *h = e ? strchr(e, '#') : NULL; n = h && atoi(h + 1) > 0 ? atoi(h + 1) : 8; }
+      if (at >= 0 && ((win_t *)w)->presents == (uint64_t)at) { pthread_t t; if (!pthread_create(&t, NULL, thread_dumps_main, (void *)(intptr_t)n)) pthread_detach(t); } }
     (void)q; win_t *o = (win_t *)w; o->presents++; o->itv_run = nvn_pace_itv_run(o->interval, o->itv_run); SEQ("present %d", idx);   // (itv_run before present_itv: this present counts)
     dm_fps_lock_tick();
     if (dm_fps_state) { static int was; int c = fps_step_cap(); if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? " (prerendered movie)" : ""); was = c; } }
     if (dm_fps_state) dyn_scale_tick(o->presents);
     else engine_dyn_tick(o->presents);
+    ue_dynres_tick(o->presents);
     if (dm_fps_state && o->presents % 30 == 0 && !dyn_scale_on()) {   // DM_RENDER_SCALE changed while the game runs (a DM_CTL "env" line): the render-scale stubs read the state page every frame
         static char last[16] = "-"; const char *rs = getenv("DM_RENDER_SCALE"); if (!rs) rs = "";
         if (last[0] == '-') snprintf(last, sizeof last, "%s", rs);   // the value loader.c applied at start

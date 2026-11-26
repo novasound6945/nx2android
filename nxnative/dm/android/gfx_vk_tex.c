@@ -1165,8 +1165,27 @@ void vk_tbuf_drop_pool(uint64_t serial) {
         for (int j = 0; j < nv; j++) vk_defer_free_bview(vs[j]);
     }
 }
+// DM_VK_TBUF_FLOAT=1 (start-up; a game's android.tsv): a buffer texture of 32-bit integer texels (R32UI, R32I and their two-, three- and four-channel kinds) is viewed
+// with the float format of the same layout. The translated shaders declare every texel buffer float and take its texels as their bits (the integer-texel variant,
+// gfx_vk_shader.c spv_int_images, retypes the buffer and bitcasts each fetch and store), so a float view gives them the same words with no variant: no second shader
+// module, no second pipeline part and no compile at the first draw for a shader whose buffers hold integers. FINAL FANTASY RESONANCE's particles (Niagara: R32UI and
+// R32I parameter buffers) made 19 vertex, 27 fragment and 32 compute variants of that kind in five minutes, each a compile at its first draw. A fetch or a store of
+// 32-bit float texels moves the words as they are (no filter, no conversion: texel buffers have neither), so what the shader reads and writes is unchanged
+int vk_tbuf_float(const tex_t *t) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_TBUF_FLOAT"); on = e && atoi(e) != 0; if (on) VKLOG("buffer textures of 32-bit integer texels are viewed as floats (DM_VK_TBUF_FLOAT): no integer-texel shader variants for them"); }
+    if (!on || !t) return 0;
+    const vkfmt_t *f = vk_fmt(t->d.format);
+    return f && f->vk >= VK_FORMAT_R32_UINT && f->vk <= VK_FORMAT_R32G32B32A32_SFLOAT && f->is_int;
+}
+static VkFormat tbuf_vkfmt(const tex_t *t, const vkfmt_t *f, int as_float) {   // the view's format: the float kind of the same layout where asked and vk_tbuf_float allows
+    if (!as_float || !vk_tbuf_float(t)) return f->vk;
+    return f->vk <= VK_FORMAT_R32_SINT ? VK_FORMAT_R32_SFLOAT : f->vk <= VK_FORMAT_R32G32_SINT ? VK_FORMAT_R32G32_SFLOAT : f->vk <= VK_FORMAT_R32G32B32_SINT ? VK_FORMAT_R32G32B32_SFLOAT : VK_FORMAT_R32G32B32A32_SFLOAT;
+}
+VkBufferView vk_tbuf_view_f(const tex_t *t, int storage, int as_float);
 unsigned g_tbuf_copies;   // views over a per-bind copy in scratch memory (gfx_vk_exec.c stage_set: such a stage is not kept for later draws, rmemo)
-VkBufferView vk_tbuf_view(const tex_t *t, int storage) {
+VkBufferView vk_tbuf_view(const tex_t *t, int storage) { return vk_tbuf_view_f(t, storage, 0); }
+// as_float: the float view of 32-bit integer texels (vk_tbuf_float; the caller asks for it only where the shader's binding declares no integer format)
+VkBufferView vk_tbuf_view_f(const tex_t *t, int storage, int as_float) {
     // keyed by the pool too: a pool finalized and another made at the same address has a new VkBuffer, and the old one's memory is freed once the GPU is past it. Keyed by address
     // alone, the view over the old buffer was handed out again and shaders read and wrote freed memory, which the kernel gives to newer buffers (Xenoblade Chronicles 3: the
     // allocator kept inside one of its memory pools had its tree bins overwritten during the opening movie, and malloc crashed at the next scene)
@@ -1184,14 +1203,14 @@ VkBufferView vk_tbuf_view(const tex_t *t, int storage) {
             VkDeviceSize es = V.tbuf_align_storage ? V.tbuf_align_storage : al;
             VkDeviceSize sa = al; if (eu > sa) sa = eu; if (es > sa) sa = es;
             uint8_t *p = vk_scratch(n, sa, &b, &so); void vk_ubd_read(uint64_t a, uint64_t n, uint8_t *dst); vk_ubd_read(addr, n, p);
-            VkBufferViewCreateInfo ci = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, b, f->vk, so, n}; VkBufferView v = VK_NULL_HANDLE;
+            VkBufferViewCreateInfo ci = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, b, tbuf_vkfmt(t, f, as_float), so, n}; VkBufferView v = VK_NULL_HANDLE;
             if (!vkCreateBufferView(V.dev, &ci, NULL, &v)) vk_defer_free_bview(v);
             return v;   // the per-bind copy is not cached: no live guest pool owns this view
         }
         if (t->mem) VKRED_ONCE(16, "buffer texture not in a pool (format %#x, %u elements)", t->d.format, t->d.width);
         return vk_dummy_tbuf(storage);
     }
-    tbkey k = {addr, pl->serial, (uint32_t)t->d.format, t->d.width};
+    tbkey k = {addr, pl->serial, (uint32_t)t->d.format | (as_float && vk_tbuf_float(t) ? 0x80000000u : 0), t->d.width};   // (the float view of integer texels is another view)
     pthread_mutex_lock(&g_tbuf_mu);
     VkBufferView v = nvn_hm_get(&g_tbuf_cache, &k);
     if (!v) {
@@ -1210,7 +1229,7 @@ VkBufferView vk_tbuf_view(const tex_t *t, int storage) {
             VkDeviceSize need = need_u > need_s ? need_u : need_s;
             int ok_align = (off % need == 0);
             if (ok_align) {
-                VkBufferViewCreateInfo ci = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, b, f->vk, off, (VkDeviceSize)t->d.width * f->bpb};
+                VkBufferViewCreateInfo ci = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, b, tbuf_vkfmt(t, f, as_float), off, (VkDeviceSize)t->d.width * f->bpb};
                 if (!vkCreateBufferView(V.dev, &ci, NULL, &v)) {
                     nvn_hm_put(&g_tbuf_cache, &k, v);
                     if (off % al != 0) {
@@ -1226,7 +1245,7 @@ VkBufferView vk_tbuf_view(const tex_t *t, int storage) {
             // before the direct views is what is left for a driver that does not allow this offset.
             VkDeviceSize n = (VkDeviceSize)t->d.width * f->bpb, so; VkBuffer sb; void vk_ubd_read(uint64_t a, uint64_t n, uint8_t *dst);
             uint8_t *p = vk_scratch(n, sa, &sb, &so); vk_ubd_read((uint64_t)(uintptr_t)t->mem, n, p);
-            VkBufferViewCreateInfo ci = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, sb, f->vk, so, n};
+            VkBufferViewCreateInfo ci = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, sb, tbuf_vkfmt(t, f, as_float), so, n};
             if (vkCreateBufferView(V.dev, &ci, NULL, &v)) v = VK_NULL_HANDLE; else { vk_defer_free_bview(v); g_tbuf_copies++; }
             static unsigned nc; if (nc++ < 4) VKLOG("buffer texture at a misaligned offset (%llu, not a multiple of %llu; format %#x, %u elements): read from a copy", (unsigned long long)off, (unsigned long long)sa, t->d.format, t->d.width);
             pthread_mutex_unlock(&g_tbuf_mu); return v;   // (not cached: a copy of this bind's bytes)

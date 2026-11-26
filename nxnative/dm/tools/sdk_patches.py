@@ -71,6 +71,12 @@ CUTS = {
     (0x1423fc, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
     (0x142468, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
   ],
+  # DEMONS' NIGHT FEVER 1.0.0 (v0) sdk (SDK 19.3.14, Unity 2022.3.62f3, virtual address memory): the same node area cut, at the same offsets (the only matches of either encoding).
+  # Without it main's 3.14 GB region started after the 1 GB node area, and 33 s into the game a 16 MB region was refused at +4.37 GB of the 4.38 GB alias region (0x1803), then a crash
+  '871fb219c95d507fd5b45f667d51f9c1': [
+    (0x1423fc, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x142468, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
+  ],
   # Hollow Knight: Silksong 1.0.30000 (v655360) sdk (SDK 20.5.8, Unity 6000.0.50f1): the same node area cut. Unity 6 takes all its memory itself through nn::os::AllocateAddressRegion and
   # AllocateMemoryPages (no heap, no StandardAllocator in nninitStartup), and without the cut its regions start after the node area: the alias region's high-water mark was +1.00 GB at
   # nninitStartup and +3.00 GB in the first room of play, with 1.51 GB mapped. The constructor is at sdk+0x145bec (limit = alias start + 0x3fe00000 at +0x28, a unit heap of 0x30-byte
@@ -86,6 +92,20 @@ CUTS = {
   # (limit = alias start + 0x3fe00000 at +0x28, a unit heap of 0x30-byte nodes, the area then registered as occupied at +0x145d78); VammManager::AllocateAddressRegion (sdk+0x145df0) aligns
   # regions to 64 KB or 2 MB only, so no alignment cut is needed
   '574284b40c06cf1821a44857939083be': [
+    (0x145d0c, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x145d78, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
+  ],
+  # MARVEL Cosmic Invasion 1.10 (v589824) sdk (SDK 20.5.29, an FNA game that renders with OpenGL): the same node area cut. nninitStartup (main+0x518280) calls
+  # StandardAllocator::Initialize(nullptr, 40 GB) with virtual address memory; the host lowers it to the 4.06 GB the alias region has room for, and the SDK's AllocateAddressRegion
+  # refused that (0x1803) after its 1 GB node area, so the game aborted through nn::diag before its first frame. The constructor's two movs are at the same offsets as in the SDK
+  # 20.5.22 build above (the only match of either encoding in the module)
+  'a5813da32d12ef17099152ca79c9b24d': [
+    (0x145d0c, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x145d78, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
+  ],
+  # BALL x PIT 1.308 (v524288) sdk (SDK 20.5.19, Unity 6000.0.62f1): the same node area cut as Silksong's (Unity 6 takes all its memory through AllocateAddressRegion), at the
+  # same offsets as in the SDK 20.5.22 build (the only matches of either encoding)
+  '8bfebccd6f5c1392597b364b9ab22a8d': [
     (0x145d0c, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
     (0x145d78, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
   ],
@@ -173,6 +193,11 @@ CUTS = {
   # at +0x28, a unit heap of 0x30-byte nodes, the area then registered as occupied at +0x14fc5c); VammManager::AllocateAddressRegion (sdk+0x14fd00) aligns regions to 64 KB or 2 MB only,
   # so no alignment cut is needed
   '148394139d9d26ca8afd5c9ba5d30601': [
+    (0x14fbf0, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x14fc5c, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
+  ],
+  # Flight Simulator 2026 1.0.1 (v65536) sdk (SDK 21.4.7, Unity 6000.0.67f1): the same node area cut as the SDK 21.4.4 build above, at the same offsets (the only matches of either encoding)
+  'ab3835b2a37b1916e296f27e82dd4e36': [
     (0x14fbf0, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
     (0x14fc5c, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
   ],

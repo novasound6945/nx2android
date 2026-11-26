@@ -1,0 +1,38 @@
+# Game profile of BALL x PIT (Switch, base game v0 + update 1.308 = v524288, one DLC). Plays on Android (Retroid Pocket Nova)
+# Format: see dm/games/README.md
+# Unity 6000.0.62f1 (IL2CPP) with FMOD, SDK 20.5.19; subsdk0 is the movie module. The game presents at interval 1 (60 fps). Its control data lists Korean.
+# main links Nintendo's online platform libraries (NPLN with gRPC, WebRTC and OpenSSL): nothing of them was seen to matter offline
+
+# ---- Identity ----
+title_id	010086A022444000
+program_id	010086A022444000
+
+# ---- App ----
+name	BALL x PIT
+ipa	BallXPit.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v524288	1.308	main=c2742236ec0d8096d3af89baf0f75e1c	subsdk0=b1b31ebc17b9417164a4f5fea049367e	sdk=8bfebccd6f5c1392597b364b9ab22a8d
+package	v524288
+shader_versions	v524288
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/sharedassets1.assets
+zip_store	.assets:.bank:.bundle:.dat:.ress:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource (virtual address memory) and main never sets a heap: Unity 6 takes all its memory through AllocateAddressRegion. The 5 GB block of the
+# other Unity 6 games (4.375 GB alias region); the sdk build gets the node-area cut (dm/tools/sdk_patches.py). In 8 minutes of play the regions' high-water mark reached +2.51 GB
+# with 1.66 GB reserved and 1.58 GB mapped, and it rises as play goes on (+2.01 GB at 9 s, +2.26 GB at 108 s): the alias region is the console's 64 GB, as MARVEL Cosmic Invasion's
+mem_reserve	0x1028000000
+mem_alias	0x1000000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	BALL x PIT shaders

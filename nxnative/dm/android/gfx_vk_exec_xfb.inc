@@ -448,7 +448,7 @@ static VkPipeline compute_build(vkshader_t *cs, uint64_t um, uint64_t im) {   //
     static int alt = -1; if (alt < 0) { const char *e = getenv("DM_VK_SPV_ALT"); alt = e && atoi(e); }
     VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(VK_SHADER_STAGE_COMPUTE_BIT, cs->local), 0, VK_SHADER_STAGE_COMPUTE_BIT, vk_shader_module(cs, um, im, alt && !um && !im ? 1u << 31 : 0, 0, 0), "main", NULL}, vk_pipeline_layout(dsl, 1), VK_NULL_HANDLE, -1};   // (pNext: DM_VK_SUBGROUP_PIN)
     if (bs >= 0) g_build[bs].phase = 2;
-    VkResult r = PSERIAL(vkCreateComputePipelines(V.dev, V.pcache, 1, &ci, NULL, &p)); build_end(bs);
+    VkResult r = PSERIAL(vkCreateComputePipelines(V.dev, GPL_PCACHE, 1, &ci, NULL, &p)); build_end(bs);
     vk_pipeline_cache_changed();
     if (r) { LOG("[RED] [vk] compute pipeline failed: %016llx", (unsigned long long)cs->key); p = (VkPipeline)1; }
     return p;
@@ -473,6 +473,26 @@ static void *compute_warm(void *arg) {
     }
     VKLOG("compute pipelines made ahead: %d of %d compute shaders in %.0f ms", made, n, (tick() - t0) / 1e6);
     return NULL;
+}
+// the bake's (gfx_vk_gpl.inc gpl_bake): a compute shader's pipeline made for the driver's cache on disk and destroyed. 1 made, -1 not
+static int compute_bake_one(uint64_t key) {
+    vkshader_t *cs = vk_shader(key, 5); if (!cs) return -1;
+    VkPipeline p = compute_build(cs, 0, 0); int ok = p != (void *)1;
+    if (ok) vkDestroyPipeline(V.dev, p, NULL);
+    vk_shader_drop(cs); return ok ? 1 : -1;
+}
+// A big bundle's compute pipeline, made when the game sets the shader in a program (gfx_vk_gpl.inc vk_gpl_announce): compute_warm leaves a bundle of more than
+// DM_VK_COMPUTE_WARM_MAX compute shaders to the replay, which then builds each at its first dispatch, on its own thread (FINAL FANTASY RESONANCE: 2,934 of them)
+static _Atomic uint64_t g_cann_made, g_cann_ns;
+static void compute_ann_make(uint64_t key) {
+    uint64_t ck[3] = {key, 0, 0}, t0 = tick();
+    pthread_mutex_lock(&g_cpipe_mu); int have = nvn_hm_get(&g_cpipes, ck) != NULL; pthread_mutex_unlock(&g_cpipe_mu);
+    if (have || !prewarm_room()) return;
+    vkshader_t *cs = vk_shader(key, 5); if (!cs) return;
+    VkPipeline p = compute_build(cs, 0, 0);
+    pthread_mutex_lock(&g_cpipe_mu); if (!nvn_hm_get(&g_cpipes, ck)) nvn_hm_put(&g_cpipes, ck, p); else if (p != (void *)1) vkDestroyPipeline(V.dev, p, NULL); pthread_mutex_unlock(&g_cpipe_mu);
+    uint64_t n = atomic_fetch_add(&g_cann_made, 1) + 1; atomic_fetch_add(&g_cann_ns, tick() - t0);
+    if (n <= 4 || !(n & (n - 1))) VKLOG("compute pipelines made when the game set their shaders: %llu so far, %.1f ms each on average", (unsigned long long)n, atomic_load(&g_cann_ns) / 1e6 / (double)n);
 }
 static void compute_warm_start(void) {
     if (getenv("DM_VK_NOPREWARM")) return;
@@ -521,6 +541,7 @@ static void dispatch(const p_dispatch *d) {
         if (had) { if (p != (void *)1) vkDestroyPipeline(V.dev, p, NULL); p = had; } else nvn_hm_put(&g_cpipes, ck, p);   // (compute_warm made it meanwhile)
         pthread_mutex_unlock(&g_cpipe_mu);
         if (p != (void *)1) firstuse_note(0, 0, cs->key, ck[1], ck[2], 0, 5);
+        if (g_gpl_big) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 40) VKLOG("compute pipeline built at its dispatch: shader %016llx, integer-texel views %#llx/%#llx (a big bundle: not made when the game set the shader, or a variant)", (unsigned long long)cs->key, (unsigned long long)ck[1], (unsigned long long)ck[2]); }
     }
     if (p == (void *)1) return;
     vk_img_barrier_all(cb);
