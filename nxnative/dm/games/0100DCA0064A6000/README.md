@@ -16,6 +16,8 @@ The profile sets these for you (`android.tsv`); a player changes the pause menu 
 | Row | What it does |
 |---|---|
 | `DM_NVN_CPU_NO_ACCESS_IMAGE_FIRST_USE=1` | 1 = upload initial data for uncompressed 2D colour IMAGE textures in CPU_NO_ACCESS storage once, unless a GPU-written image overlaps them |
+| `DM_VK_ZEROCOPY_LAZY=2` | which zero-copy pools get their buffer only when the GPU first uses them (vk_pool_of, pool_back: a slab's slot or a kept buffer as at creation; until then the … |
+| `DM_VK_ZC_CHUNK_MB=32` | the chunk size in MB that a memory pool over it is cut into (unset: 256 MB, or the largest of 128 / 64 / 32 MB that this gralloc takes when it refuses 256 MB, … |
 
 Read the profile's porting log in the comment header of [`android.tsv`](android.tsv). Back to the [games list](../../../../README.md#games).
 <!-- end of the game facts -->

@@ -8,3 +8,11 @@ orientation	landscape
 env	DM_NVN_CPU_NO_ACCESS_IMAGE_FIRST_USE=1
 readme_image	docs/images/luigis-mansion-3.jpg
 readme_tag	v0.5.0
+# This fork's (2026-11-26, Retroid Pocket Nova, Adreno 740, 12 GB): the game makes 1,685 MB of NVN memory pools and the GPU uses about 640 MB of them, while the backend gave every
+# pool a hardware buffer at creation (memory no swap takes and that only the kernel's Normal zone holds: 7.2 GB of this device's 11.5 GB). With the driver's own allocations
+# rising from 1.4 GB at the title to 3.8-4.5 GB while the opening cutscene loads, that zone ran out: the whole device stalled in memory reclaim for 80-135 s (PSI memory "full"
+# for 71 of 81 s) until Android's low-memory killer ended the game, 6 runs of 9. MemAvailable stayed at 2.4-4.4 GB throughout, so the backend's own memory pressure levels never
+# started. Lazy pools in 32 MB chunks leave a pool on the game's ordinary pages until the GPU first uses it: 370-540 MB of hardware buffers instead of 1,705 MB, and the opening
+# cutscene and a save's load into the lobby then ran without a stall
+env	DM_VK_ZEROCOPY_LAZY=2
+env	DM_VK_ZC_CHUNK_MB=32
