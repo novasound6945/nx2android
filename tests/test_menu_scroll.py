@@ -1,5 +1,6 @@
 """Run the pause menu's real hit testing, gestures and controller navigation."""
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,8 @@ class MenuScroll(unittest.TestCase):
         source = (DM / 'android/gfx_vk_present.c').read_text(encoding='utf-8')
         draw = csrc.between(source, 'typedef struct { uint8_t *px; uint32_t stride', 'static void ov_menu_icon(')
         menu = csrc.between(source, 'static const uint8_t C_BG', "// The layout editor's toolbar")
+        # this fork's: fork_draw_android.inc's Exit game part only (menu_exit_draw.inc, the button row Exit game | Resume); its cloud marks need the Vulkan texture
+        menu = re.sub(r'#include "fork_draw_android.inc"[^\n]*', '#include "menu_exit_draw.inc"', menu)
         code = r'''
 #include <assert.h>
 #include <stdio.h>
@@ -40,6 +43,8 @@ int dm_overlay_custom(int l,int c,float*x,float*y,float*s) {(void)l;(void)c;(voi
 int dm_menu_audio_available(void) { return 0; }
 int dm_overlay_stick_zone(void) { return 0; }   // (the Stick area row's segments)
 int dm_save_note(char *s,int n) { if(n)s[0]=0;return OVX_IDLE; }
+#include "menu_exit.h"
+int dm_menu_exit(float *f, int *chosen) { *f = 0; *chosen = 0; return OV_EXIT_IDLE; }   // (this fork's Exit game: not held)
 ''' + draw + menu + r'''
 int main(int argc,char **argv) {
     (void)C_HOT;
@@ -131,6 +136,23 @@ static void menu_do(int item) { actions++; last_action=item; }
 static void menu_close(void) {}
 static void ed_key(uint64_t bit) { (void)bit; }
 static void sp_key(uint64_t bit) { (void)bit; }
+// this fork's Exit game beside Resume: its real hooks (menu_exit_android.inc, which fork_hooks_android.inc includes), with what they reach of the app stubbed
+#include <pthread.h>
+#include <stdint.h>
+#include <time.h>
+#include <unistd.h>
+#include "menu_exit.h"
+#define LOG(...) do { printf(__VA_ARGS__); putchar('\n'); } while (0)
+typedef struct ANativeActivity ANativeActivity;
+static ANativeActivity *g_act;   // (none: an Exit game held to its end only logs, menu_exit_now)
+static int g_quit;
+static void act_finish(ANativeActivity *a) { (void)a; }
+static int dm_cloud_flush(int ms) { (void)ms; return 0; }
+static int64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (int64_t)t.tv_sec * 1000000000ll + t.tv_nsec; }
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"   // (its hooks menu_touch and menu_key do not call: menu_open, menu_close, a key let go)
+#include "menu_exit_android.inc"
+#pragma GCC diagnostic pop
 ''' + state + csrc.function(front, 'static void menu_sharp(') + csrc.function(front, 'static void menu_opacity(') + next(line for line in front.splitlines(True) if line.startswith('static void menu_tab(int t)')) + csrc.function(front, 'static void menu_touch(') + csrc.function(front, 'static void menu_key(') + r'''
 static void touch(int action, float x, float y, float W, float H) {
     AInputEvent e={action,x,y}; menu_touch(&e,W,H);

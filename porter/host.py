@@ -108,7 +108,8 @@ def profile_hash(title_id):
 
 # Header defines added to dm/games/game.py after profile_h began to be recorded, in the order they were added, each with its value when the key is off. They change no layout:
 # a port made before one was added and a profile that leaves it off differ only by that line, so check_profile accepts the older hash. A new define that is off by default is appended here.
-ADDED_DEFINES = (('DM_GAME_TEX_CPU_UNCACHED', '0'), ('DM_GAME_FPS_CEILING', '0'))
+ADDED_DEFINES = (('DM_GAME_TEX_CPU_UNCACHED', '0'), ('DM_GAME_FPS_CEILING', '0'),
+                 ('DM_GAME_GPU_TICK_NUM', '12ull'))   # (this fork's row: upstream 420ebc2f added the define, gpu_tick_rate, without its row here; 12 is what every host had before)
 # Header lines that moved from the core into the profile without changing what the host does: the per-build tables (dm/games/game.py BUILD_TABLES) were compiled
 # into every host before; a port made then has the same rows in its host, so its profile_h is the header without these lines.
 MOVED_PREFIXES = (b'#define DM_GAME_FPS_LOCKS', b'#define DM_GAME_UE_MALLOC')
@@ -121,10 +122,12 @@ def without_moved(header):
 
 
 def older_hashes(header):
-    """[(names, sha256)] of header without the k most recently added defines (k = 1, 2, ...), as long as each of those is at its default value in header"""
+    """[(names, sha256)] of header without the k most recently added defines (k = 1, 2, ...), as long as each of those is at its default value in header. A define the header
+    has no line for at all is passed over (nothing to drop: a header made by tests, or from a checkout before that define)"""
     lines, out = header.splitlines(keepends=True), []
-    for k in range(1, len(ADDED_DEFINES) + 1):
-        names = ADDED_DEFINES[-k:]
+    added = [(n, v) for n, v in ADDED_DEFINES if any(ln.split()[:2] == [b'#define', n.encode()] for ln in lines)]
+    for k in range(1, len(added) + 1):
+        names = added[-k:]
         drop = {f'#define {n} {v}'.encode() for n, v in names}
         if not all(any(ln.strip() == d for ln in lines) for d in drop): break
         out.append(([n for n, _ in names], hashlib.sha256(b''.join(ln for ln in lines if ln.strip() not in drop)).hexdigest()))

@@ -112,7 +112,7 @@ assert(ov_menu_item(0, OVM_ROWS - 2) == OVM_AUDIO && ov_menu_item(0, OVM_ROWS - 
     assert(!strcmp(TR("Resume", "继续游戏"), "继续游戏"));
     ui_zh = 0;
     {   // (this fork) Exit game: the button row's left half (menu_exit.h), Resume the right
-        float W = 1920, H = 1080, p[4], r[4]; ov_menu_rect(W, H, p); ov_menu_rowrect(p, OVM_ROWS - 1, r);
+        float W = 1920, H = 1080, p[4], r[4]; ov_menu_rect(W, H, p); ov_menu_rowrect(p, OVM_VIEW_ROWS - 1, r);   // (the Resume row: the panel's last slot, however the body scrolls)
         float cy = r[1] + r[3] / 2;
         assert(ov_menu_exit_at(p[0] + p[2] * 0.25f, cy, W, H) && !ov_menu_exit_at(p[0] + p[2] * 0.75f, cy, W, H));
         ov_menu_rowrect(p, 1, r); assert(!ov_menu_exit_at(p[0] + p[2] * 0.25f, r[1] + r[3] / 2, W, H));   // (another row)

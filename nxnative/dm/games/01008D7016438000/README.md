@@ -20,7 +20,7 @@ The profile sets these for you (`android.tsv`); a player changes the pause menu 
 | `DM_PIN_REPLAY=prime` | pin the replay thread to fast cores: 0 = no, "prime" = the fastest core, "need" = the fastest core only while the replay is slow, other values = the big cores |
 | `DM_VK_SETSPLIT=1` | 1 = a descriptor set change may split the command buffer |
 | `DM_VK_PASS_SPLIT=256` | split a pass into command buffers every N draws; 0 = never |
-| `DM_VK_PASS_SPLIT_DEPTH=1` | - |
+| `DM_VK_PASS_SPLIT_DEPTH=1` | with DM_VK_PASS_SPLIT: also split a pass that has a depth attachment (it writes back a depth texel before the second part, for Adreno's LRZ); 0 or unset = such … |
 | `DM_FPS_PIN=60` | pin the governor at 60, 40 or 30 fps; 0 = no pin |
 | `DM_ADAPT_UP_PCT=50` | the governor steps up a rate when frames fit in this percent of the faster rate's budget (1..99) |
 | `DM_VK_DYN_UBO=0` | no dynamic uniform-buffer offsets (descriptor reuse drops) |

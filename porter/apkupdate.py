@@ -100,7 +100,8 @@ HOST_ONLY = frozenset(f'DM_GAME_{k}' for k in (
     'NAME', 'MEM_RESERVE', 'MEM_ALIAS', 'MEM_STACK', 'APP_POOL', 'MEM_USED', 'SYS_RESOURCE', 'ARGS', 'ENV', 'MEM_MAP_LIMIT', 'SMALL_VPOOL_SPARSE', 'PRESENT_DISPLAY',
     'CORE_PREEMPT', 'ALLOC_BIG_ALIGN', 'FPS_TARGET', 'FPS_CEILING', 'FPS_HOLD', 'SHARED_FONT_TTF', 'PAD_LAYOUT', 'OPMODE', 'PERF_BOOST', 'TEX_FLUSH_UPLOAD', 'RENDER_COND',
     'TEX_DIRTY_UPLOAD', 'TEX_DYN_SLOTS', 'TEX_CPU_UNCACHED', 'GPU_TS_SEGMENT', 'VCONV_RANGE', 'ORDER_KEEP', 'NVN_API_MAJOR', 'NVN_API_MINOR',
-    'SOCK_LOOPBACK'))   # SOCK_LOOPBACK (upstream f6cd25ef): the host's offline sockets on the loopback interface
+    'SOCK_LOOPBACK', 'GPU_TICK_NUM'))   # SOCK_LOOPBACK (upstream f6cd25ef): the host's offline sockets on the loopback interface; GPU_TICK_NUM (upstream 420ebc2f,
+                                         # the profile key gpu_tick_rate): the GPU counter's ticks per 625 ns the host converts timestamps with, 12 as before for every game without the key
 VERSIONS = 'DM_GAME_DISPLAY_VERSIONS'   # the builds: a version added is host-only, one changed or gone refuses
 
 

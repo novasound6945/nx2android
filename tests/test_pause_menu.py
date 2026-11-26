@@ -93,7 +93,8 @@ int main(int argc, char **argv) {
     assert(argc == 2); FILE *f = fopen(argv[1], "rb"); assert(f); fseek(f, 0, SEEK_END); long n = ftell(f); rewind(f);
     g_font = malloc((size_t)n); assert(fread(g_font, 1, (size_t)n, f) == (size_t)n); fclose(f);
     // upstream's four tabs (Gamepad, Game, Counter, Style) and their rows, with Exit game beside Resume
-    static const char *const rows[OVM_TABS][OVM_PER_TAB] = {{"Show gamepad", "Opacity", "Edit layout", "Rumble", "Face buttons"}, {"Show FPS", "Mode", "Export save", "Import save", NULL},
+    // (the body shows OVM_VISIBLE rows at a time: these are the ones at scroll position 0; the rest scroll into view, test_menu_scroll.py)
+    static const char *const rows[OVM_TABS][OVM_VISIBLE] = {{"Show gamepad", "Opacity", "Edit layout", "Stick area", "Rumble"}, {"Show FPS", "Super resolution", "Sharpness", "Mode", "Export save"},
                                                             {"FPS row", "SOC row", "BAT row", "Driver row", "Graph row"}, {"Position", "Colour", "Outline", "Size", NULL}};
     const float screens[][2] = {{1920, 1080}, {2400, 1080}, {1280, 960}, {1216, 760}};   // the Retroid Pocket 6, a 20:9 phone, the Retroid Pocket Nova, a 16:10 tablet
     for (unsigned q = 0; q < sizeof screens / sizeof screens[0]; q++) {
@@ -103,10 +104,11 @@ int main(int argc, char **argv) {
         float p[4] = {0, 0, (float)pw, (float)ph}, r[4]; ov_menu_rowrect(p, 0, r);
         int full = -1;   // upstream's letters: one size for every row (that of Resume)
         for (int tab = 0; tab < OVM_TABS; tab++) {
-            g_ndrawn = 0; ov_menu_panel(&cv, (tab & 1) << 8 | (tab >> 1) << 19 | 60 << 9);
+            g_ndrawn = 0; ov_menu_panel(&cv, (tab & 1) << 8 | (tab >> 1) << 19 | 60 << 9, 0);
             const drawn *res = find("Resume"), *ex = find("Exit game"); assert(res && ex && ex->x < res->x); if (full < 0) full = res->scale; assert(res->scale == full && full >= 1);   // Exit game left of Resume
-            for (int k = 0; k < OVM_TABS; k++) assert(find(OVM_TAB_NAMES[k]) && find(OVM_TAB_NAMES[k])->scale == full);
-            for (int k = 0; k < OVM_PER_TAB; k++) if (rows[tab][k]) {
+            // the tab names: one size for all four, the rows' unless a name would not fit its tab (upstream's ov_menu_panel shrinks them together then)
+            for (int k = 0; k < OVM_TABS; k++) { const drawn *t = find(OVM_TAB_NAMES[k]), *t0 = find(OVM_TAB_NAMES[0]); assert(t && t0 && t->scale == t0->scale && t->scale >= 1 && t->scale <= full); }
+            for (int k = 0; k < OVM_VISIBLE; k++) if (rows[tab][k]) {
                 const drawn *l = find(rows[tab][k]); ov_menu_rowrect(p, k + 1, r);
                 assert(l && l->scale == full && fabsf(l->cy - (r[1] + r[3] / 2)) < 0.01f);
             }
@@ -115,11 +117,11 @@ int main(int argc, char **argv) {
             if (tab == 3) assert(find("Top left") && find("White") && find("Box") && find("Normal"));   // the Style tab's values (fpso_*: the defaults)
         }
         // Exit game's half: its word while held (menu_exit.h ov_exit_hold), red filling it from the left
-        exit_state = OV_EXIT_HOLDING; exit_f = 0.5f; g_ndrawn = 0; ov_menu_panel(&cv, 0); assert(find("Hold to exit") && !find("Exit game") && find("Resume"));
-        ov_menu_rowrect(p, OVM_ROWS - 1, r); { const uint8_t *q = px + 4 * ((size_t)(r[1] + r[3] * 0.2f) * pw + (size_t)(r[0] + r[3] * 0.3f));   // near the left end, over the fill
+        exit_state = OV_EXIT_HOLDING; exit_f = 0.5f; g_ndrawn = 0; ov_menu_panel(&cv, 0, 0); assert(find("Hold to exit") && !find("Exit game") && find("Resume"));
+        ov_menu_rowrect(p, OVM_VIEW_ROWS - 1, r); { const uint8_t *q = px + 4 * ((size_t)(r[1] + r[3] * 0.2f) * pw + (size_t)(r[0] + r[3] * 0.3f));   // near the left end, over the fill
             assert(q[0] > 200 && q[1] < 120 && q[2] < 120); }
-        exit_state = OV_EXIT_GOING; g_ndrawn = 0; ov_menu_panel(&cv, 0); assert(find("Exiting…"));
-        exit_state = OV_EXIT_IDLE; exit_f = 0; g_ndrawn = 0; ov_menu_panel(&cv, 0); assert(find("Exit game"));
+        exit_state = OV_EXIT_GOING; g_ndrawn = 0; ov_menu_panel(&cv, 0, 0); assert(find("Exiting…"));
+        exit_state = OV_EXIT_IDLE; exit_f = 0; g_ndrawn = 0; ov_menu_panel(&cv, 0, 0); assert(find("Exit game"));
         free(px);
     }
     return 0;
@@ -149,11 +151,11 @@ int main(void) {
     // the halves of the button row (front_android.c menu_touch): Exit game on the left, Resume on the right, no other row
     const float screens[][2] = {{1280, 960}, {1920, 1080}};
     for (int q = 0; q < 2; q++) {
-        float W = screens[q][0], H = screens[q][1], p[4], r[4]; ov_menu_rect(W, H, p); ov_menu_rowrect(p, OVM_ROWS - 1, r);
+        float W = screens[q][0], H = screens[q][1], p[4], r[4]; ov_menu_rect(W, H, p); ov_menu_rowrect(p, OVM_VIEW_ROWS - 1, r);   // (the button row: the panel's last slot, however the body scrolls)
         float cy = r[1] + r[3] / 2;
         assert(ov_menu_exit_at(r[0] + 4, cy, W, H) && ov_menu_exit_at(p[0] + p[2] / 2 - 1, cy, W, H));
         assert(!ov_menu_exit_at(p[0] + p[2] / 2 + 1, cy, W, H) && !ov_menu_exit_at(r[0] + r[2] - 4, cy, W, H));
-        ov_menu_rowrect(p, OVM_ROWS - 2, r); assert(!ov_menu_exit_at(r[0] + 4, r[1] + r[3] / 2, W, H));
+        ov_menu_rowrect(p, OVM_VIEW_ROWS - 2, r); assert(!ov_menu_exit_at(r[0] + 4, r[1] + r[3] / 2, W, H));
         assert(!ov_menu_exit_at(p[0] - 5, cy, W, H));
     }
     return 0;
@@ -254,13 +256,14 @@ const uint8_t *dm_overlay_font(void) { return g_font; }
 float dm_overlay_scale(void) { return 1; }
 int dm_save_note(char *out, int cap) { snprintf(out, (size_t)cap, "-"); return OVX_IDLE; }
 int dm_menu_audio_available(void) { return 0; }   // no outputs to choose: the Game tab has no audio row (overlay_layout.h ov_menu_item)
+int dm_overlay_stick_zone(void) { return 0; }   // (the Stick area row's segments: Circle)
 static int exit_state; static float exit_f;   // front_android.c: Exit game's hold (overlay_layout.h OV_EXIT_*)
 int dm_menu_exit(float *f, int *chosen) { *f = exit_f; *chosen = 0; return exit_state; }
 ''' + canvas + colours + r'''
-typedef struct { char s[64]; float x, cy; int scale; } drawn;   // each text the panel draws
+typedef struct { char s[64]; float x, cy; int scale; } drawn;   // each text the panel draws (cy: in the panel's rows, whichever canvas drew it: the scrolling body's starts lower, ov_menu_panel target)
 static drawn g_drawn[64]; static int g_ndrawn;
 static void rec_text(const ov_canvas *cv, float x, float cy, const char *s, int scale, const uint8_t c[4]) {
-    if (g_ndrawn < 64) { drawn *d = &g_drawn[g_ndrawn++]; snprintf(d->s, sizeof d->s, "%s", s); d->x = x; d->cy = cy; d->scale = scale; }
+    if (g_ndrawn < 64) { drawn *d = &g_drawn[g_ndrawn++]; snprintf(d->s, sizeof d->s, "%s", s); d->x = x; d->cy = cy + (float)cv->y0; d->scale = scale; }
     cv_text(cv, x, cy, s, scale, c);
 }
 #define cv_text rec_text

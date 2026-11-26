@@ -10,10 +10,12 @@ from porter.adb import AdbError         # noqa: E402
 
 
 class FakeAdb:
-    error, pulled = None, []
+    error, pulled, pointer, card = None, [], None, True   # pointer: the app's nx2a_root.txt (datapack.device_files: this fork's data on an SD card); card: the card is in
     def __init__(self, exe, serial=None, log=print): pass
     def pick(self):
         if self.error: raise AdbError(self.error)
+    def read_text(self, path): return FakeAdb.pointer if path.endswith('/nx2a_root.txt') else None
+    def is_dir(self, path): return FakeAdb.card
     def pull_new(self, rdir, local, pattern=None): FakeAdb.pulled.append((rdir, Path(local))); return ['0123456789abcdef.bin']
 
 
@@ -23,8 +25,8 @@ class PullCaptures(unittest.TestCase):
         p.o, p.cfg, p.tools, p.package, p.aw = types.SimpleNamespace(install=install, device=None), {}, {'adb': adb}, 'org.nx2a.test', Path('android')
         return p
 
-    def pull(self, port, error=None):
-        FakeAdb.error, FakeAdb.pulled = error, []
+    def pull(self, port, error=None, pointer=None, card=True):
+        FakeAdb.error, FakeAdb.pulled, FakeAdb.pointer, FakeAdb.card = error, [], pointer, card
         with mock.patch.object(pipeline, 'Adb', FakeAdb), mock.patch.object(pipeline, 'say') as say: port.pull_captures()
         return [c.args[0] for c in say.call_args_list]
 
@@ -41,6 +43,15 @@ class PullCaptures(unittest.TestCase):
 
     def test_several_devices_are_reported(self):
         self.assertIn('choose one', self.pull(self.port(), 'several devices connected (a, b): choose one')[0])
+
+    def test_sd_card_data(self):   # this fork's: the app keeps its data on the SD card (its pointer), so the captures are pulled from there; a card that is not in is reported
+        card = '/storage/1234-ABCD/Android/data/org.nx2a.test/files'
+        self.pull(self.port(), pointer=f'root={card}\n')
+        self.assertEqual(FakeAdb.pulled[0][0], f'{card}/captured_shaders')
+        self.pull(self.port())
+        self.assertEqual(FakeAdb.pulled[0][0], '/sdcard/Android/data/org.nx2a.test/files/captured_shaders')
+        said = self.pull(self.port(), pointer=f'root={card}\n', card=False)
+        self.assertEqual(FakeAdb.pulled, []); self.assertIn('not pulled', said[0]); self.assertIn('SD card', said[0])
 
     def test_run_no_longer_gates_on_install(self):
         src = Path(pipeline.__file__).read_text(encoding='utf-8')
