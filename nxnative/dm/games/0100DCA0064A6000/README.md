@@ -9,7 +9,7 @@
 | Title ID | `0100DCA0064A6000` |
 | Tested with nx2android | `v0.5.0` |
 | Tested build and device | v327680 Xiaomi 17 (Adreno 840, Android 17) |
-| App package | `org.nx2a.luigis3` |
+| App package | `org.nx2a.luigismansion3` |
 
 The profile sets these for you (`android.tsv`); a player changes the pause menu ones in the game, and the env rows in the data pack's `env.txt`:
 
@@ -18,6 +18,7 @@ The profile sets these for you (`android.tsv`); a player changes the pause menu 
 | `DM_NVN_CPU_NO_ACCESS_IMAGE_FIRST_USE=1` | 1 = upload initial data for uncompressed 2D colour IMAGE textures in CPU_NO_ACCESS storage once, unless a GPU-written image overlaps them |
 | `DM_VK_ZEROCOPY_LAZY=2` | which zero-copy pools get their buffer only when the GPU first uses them (vk_pool_of, pool_back: a slab's slot or a kept buffer as at creation; until then the … |
 | `DM_VK_ZC_CHUNK_MB=32` | the chunk size in MB that a memory pool over it is cut into (unset: 256 MB, or the largest of 128 / 64 / 32 MB that this gralloc takes when it refuses 256 MB, … |
+| `DM_VK_SUBGROUP_LACK=0x30` | this fork's: subgroup classes (`VkSubgroupFeatureFlagBits`: shuffle 0x10, shuffle relative 0x20) a fragment shader is taken not to have, though the device … |
 
 Read the profile's porting log in the comment header of [`android.tsv`](android.tsv). Back to the [games list](../../../../README.md#games).
 <!-- end of the game facts -->

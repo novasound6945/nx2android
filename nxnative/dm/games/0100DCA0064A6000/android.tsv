@@ -3,7 +3,8 @@
 # See README.md for the lobby texture fix and the remaining checks.
 status	experimental
 tested	v327680 Xiaomi 17 (Adreno 840, Android 17)
-package	org.nx2a.luigis3
+# This fork's: the package its release went out under (2026-11-22, @APKS/LuigisMansion3.apk); the upstream merge had put back upstream's org.nx2a.luigis3
+package	org.nx2a.luigismansion3
 orientation	landscape
 env	DM_NVN_CPU_NO_ACCESS_IMAGE_FIRST_USE=1
 readme_image	docs/images/luigis-mansion-3.jpg
@@ -16,3 +17,9 @@ readme_tag	v0.5.0
 # cutscene and a save's load into the lobby then ran without a stall
 env	DM_VK_ZEROCOPY_LAZY=2
 env	DM_VK_ZC_CHUNK_MB=32
+# This fork's (2026-11-27, Retroid Pocket Nova): magenta and blue dotted lines along every triangle edge in the dark rooms (5F, room 501). The deferred lighting
+# shader (fs 55efc9e525f834a3, the first draw of the light pass) takes the screen position of the first lane of each group of four with an indexed shuffle (SHFL.IDX, c 0x1c03), which
+# on the console is the top-left pixel of the pixel's 2x2 quad, and read the depth and G-buffer there. Adreno's lanes are not laid out in quads of four in that order:
+# at a triangle's edge the light read another surface's G-buffer. As subgroups of one invocation (the same rewrite as Echoes of Wisdom's) each pixel reads its own
+# texel; the lines are gone, 30 fps as before
+env	DM_VK_SUBGROUP_LACK=0x30
