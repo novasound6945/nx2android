@@ -45,4 +45,6 @@ Playable on Retroid Pocket 6 with PurpleVK.
 
 ## Quirks and known issues
 
-- **work in progress**: minor transparency artifacts around rifts.
+- Rifts: the rift mask left a house's door and the paths around it uncovered, and the rift looked brighter than on the console (the minor transparency
+  artifacts noted on Retroid Pocket 6). This fork's host copies a depth-stencil texture's stencil too (`gfx_vk_exec_copies.inc`): the game copies its
+  scene depth into the rifts' depth-stencil texture every frame, and the stencil marks of earlier frames had stayed there. Fixed on Retroid Pocket Nova.
