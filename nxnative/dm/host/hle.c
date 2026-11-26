@@ -22,13 +22,29 @@ static int is_gl_name(const char *name) {
 static unsigned g_nstub;
 static const char *g_stub_name[MAX_STUB];
 static uint8_t g_stub_seen[MAX_STUB];
+static uint64_t g_stub_ret[MAX_STUB];   // what the stub returns: 0, unless stub_ret_for (below) names something else
 extern uint64_t unimpl_stubs[MAX_STUB];   // 8 bytes per stub
 
 uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
     if (!g_stub_seen[idx]) {   // once per stub (a counter in the byte wrapped every 256 calls: Ace Attorney Investigations Collection calls nnProfilerRecordHeartbeat every frame)
         g_stub_seen[idx] = 1;
-        LOG("UNIMPL %s (x0=%#llx x1=%#llx x2=%#llx)", g_stub_name[idx], regs[0], regs[1], regs[2]);
+        if (g_stub_ret[idx]) LOG("UNIMPL %s (x0=%#llx x1=%#llx x2=%#llx) -> %llu", g_stub_name[idx], regs[0], regs[1], regs[2], (unsigned long long)g_stub_ret[idx]);
+        else LOG("UNIMPL %s (x0=%#llx x1=%#llx x2=%#llx)", g_stub_name[idx], regs[0], regs[1], regs[2]);
     }
+    return g_stub_ret[idx];
+}
+
+// This fork's: an unimplemented Epic Online Services call that hands a handle back through a pointer (EOS_*_Copy*, EOS_*_Create*Modification,
+// EOS_*_Update*Modification, EOS_*_Create*Search) returns a failure, as the SDK does when nobody is logged in, instead of 0 (EOS_Success) with no handle written.
+// Scott Pilgrim EX's C# wrapper took the 0, read the handle EOS_Lobby_UpdateLobbyModification left null and died at main+0x865de0; on a failure it logs a warning
+// and goes on. Every EOS_* call with these names returns EOS_EResult. 18 = EOS_NotFound (nothing is cached), 3 = EOS_InvalidUser (nobody to modify or search for).
+static uint64_t stub_ret_for(const char *name) {
+    if (strncmp(name, "EOS_", 4)) return 0;
+    const char *f = strchr(name + 4, '_'); if (!f) return 0; f++;   // the function, after the interface: EOS_Lobby_|UpdateLobbyModification
+    size_t n = strlen(f);
+    if (!strncmp(f, "Copy", 4)) return 18;
+    if ((!strncmp(f, "Create", 6) || !strncmp(f, "Update", 6)) && n > 12 && !strcmp(f + n - 12, "Modification")) return 3;
+    if (!strncmp(f, "Create", 6) && n > 6 && !strcmp(f + n - 6, "Search")) return 3;
     return 0;
 }
 
@@ -57,6 +73,7 @@ uint64_t resolve_import(module_t *m, const char *name) {
     if (g_nstub >= MAX_STUB) die("stub overflow");
     unsigned k = g_nstub++;
     g_stub_name[k] = name;
+    g_stub_ret[k] = stub_ret_for(name);
     (void)m;
     return (uint64_t)hlecount_wrap("STUB", name, (void *)&unimpl_stubs[k]);
 }

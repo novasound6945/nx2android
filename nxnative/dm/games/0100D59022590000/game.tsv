@@ -1,0 +1,48 @@
+# Game profile of Scott Pilgrim EX (Switch, update 1.0.0.13755, v65536). This fork's; brought up from MARVEL Cosmic Invasion's profile (010059D020C26000, the same developer and engine)
+# Format: see dm/games/README.md
+# FNA (XNA 4 reimplemented in C#) compiled with .NET NativeAOT, SDL 3, FAudio, SDK 20.5.17. Epic Online Services comes as an NRO (nro/EOSSDK-Switch-Shipping.nro), which the host
+# refuses as an online SDK: the EOS calls main imports are answered offline (dm/host/fork_eos_offline.c).
+# Rendering: as MARVEL Cosmic Invasion, FNA3D draws through SDL_GPU on Vulkan on the console (subsdk0, NintendoSDK_Vulkan) and falls back to its OpenGL driver on the hosts. The
+# driver's code in main is MARVEL Cosmic Invasion's instruction for instruction (only the PC-relative words differ), 0x8f30 bytes further on: patches.py makes it ask for an OpenGL
+# ES 3 context and hands the host the renderer, android.tsv turns on the host's run of the driver's command list (DM_FNA3D_GL_PUMP)
+
+# ---- Identity ----
+title_id	0100D59022590000
+program_id	0100D59022590000
+
+# ---- App ----
+name	Scott Pilgrim EX
+# The control data has the English name only
+name_ko	스콧 필그림 EX
+ipa	ScottPilgrimEx.ipa
+app_category	public.app-category.games
+# The game ships Korean text (Content/Global/Loc/Korean.zpbn) but its control data lists no ko: porter --language ko is allowed
+languages_extra	ko
+
+# ---- Versions ----
+build	v65536	1.0.0.13755	main=e8dc5c9e4f0810e7282dc821310140c8	sdk=0023a1b06130cd795f7bc4613772af0a
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk0 (NintendoSDK_Vulkan), subsdk1 (NintendoSDK_OpenGL)
+modules	main sdk
+romfs_marker	Content/Audio/SFXPack.pbn
+zip_store	.dat:.nro:.nrs:.ogg:.ogv:.pbn:.metallib
+
+# ---- Memory ----
+# The NPDM declares 64 MB of system resource (virtual address memory) and main never sets a heap: the game maps its memory itself in address regions of the alias region.
+# As in MARVEL Cosmic Invasion, nninitStartup (main+0x14f0) takes StandardAllocator::Initialize(nullptr, 40 GB: main+0xf8b10 returns 0xa00000000) and the .NET GC then asks
+# AllocateAddressRegion for 20 GB more (0x500000000): the provisional profile's 4.375 GB alias region refused that and the game aborted through nn::diag 0.3 s after start
+# (Retroid Pocket Nova). MARVEL Cosmic Invasion's block: 256 MB in front + a 64 GB alias region + 256 MB stack region + 128 MB heap region. The SDK's address region manager
+# has its node area cut (dm/tools/sdk_patches.py, sdk 0023a1b0…, already there for FINAL FANTASY RESONANCE)
+mem_reserve	0x1028000000
+mem_alias	0x1000000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x4000000
+
+# ---- Shader split ----
+# (the game compiles GLSL that MojoShader writes at run time: nothing is translated ahead)
+shader_groups	/Content/=content /nro/=nro /.nrr/=nrr /icu/=icu
+shader_note	Scott Pilgrim EX shaders

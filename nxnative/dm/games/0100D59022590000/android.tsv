@@ -1,0 +1,14 @@
+# Scott Pilgrim EX (0100D59022590000) on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android"). This fork's, derived from MARVEL Cosmic Invasion's
+# (010059D020C26000/android.tsv): the same developer's FNA game, whose FNA3D OpenGL driver is the same code in main.
+# An OpenGL game here (see game.tsv): the device's OpenGL ES driver draws it, and the host shows its frames through Vulkan (dm/android/gl_android.c).
+# Retroid Pocket Nova, 2026-11-27: the intro movie (Theora), the title, the menus, a new game's opening scene and three rooms of play with fights (25,200 frames at 60 fps,
+# 1 shown late, no crash). Built with --language ko the game starts in Korean. The first lobby update after the opening (EOS_Lobby_UpdateLobbyModification) now fails as
+# offline (dm/host/hle.c stub_ret_for): it returned EOS_Success with no handle and the game died at main+0x865de0
+status	playable
+tested	v65536 Retroid Pocket Nova (QCS8550, Adreno 740, Android 13)
+package	org.nx2a.scottpilgrimex
+orientation	landscape
+# FNA3D's OpenGL driver makes the GL calls of other threads on the main thread, once a frame in SwapBuffers; MARVEL Cosmic Invasion stopped before its first frame without the
+# host's run of that list when the main thread waits (dm/host/fork_fna3d_pump.c). Here the same driver: SwapBuffers at main+0x1b0390, the list at renderer+0x578, under the
+# lock at +0x580 (SwapBuffers takes and empties it at main+0x1b0510..0x1b0784; CreateTexture2D called from another thread appends to it at main+0x1b3810)
+env	DM_FNA3D_GL_PUMP=0x1b0390,0x578

@@ -371,7 +371,12 @@ static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create)
     for (int i = 0; i < g_nmnt; i++) {
         if (strlen(g_mnt[i].name) != ln || strncmp(g_mnt[i].name, p, ln)) continue;
         if (ro) *ro = g_mnt[i].ro;
-        char normed[1024]; const char *rest = c + 1;
+        char normed[1024], slashed[1024]; const char *rest = c + 1;
+        // this fork's: a backslash separates components, as the console takes it. Scott Pilgrim EX's FNA content manager asks for "rom:/Content/Global\\InputActionSets"
+        // (C# Path.Combine with '\\'); read as one name the file was not found, the game took a null asset and crashed at main+0x81efe4 before its first frame
+        if (strchr(rest, '\\')) { size_t k = strlcpy(slashed, rest, sizeof slashed); if (k >= sizeof slashed) { errno = ENAMETOOLONG; return 0; }
+            for (char *q = slashed; *q; q++) if (*q == '\\') *q = '/';
+            rest = slashed; }
         if (strstr(rest, "/.")) { if (!norm_rest(rest, normed, sizeof normed)) return 0; rest = normed; }   // only paths with "." components are normalized; the rest walk component by component as before
         if (g_mnt[i].overlay[0] && !create) return rom_overlay_path(&g_mnt[i], rest, out, n);
         strlcpy(out, g_mnt[i].dir, n);
