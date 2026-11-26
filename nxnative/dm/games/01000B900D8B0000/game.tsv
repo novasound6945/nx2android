@@ -1,0 +1,42 @@
+# Game profile of Cadence of Hyrule: Crypt of the NecroDancer featuring The Legend of Zelda (Switch, base game v0 + update 1.5.0 = v458752, four DLC). Plays on Android (Retroid Pocket Nova)
+# Format: see dm/games/README.md
+# Brace Yourself Games, NVN, SDK 6; subsdk0 is the movie module and subsdk1 the GLSLC compiler module; 22 shaders. The DLC (Character Pack, Melody Pack, Symphony of the Mask, Season Pass Bonus Items) are in the dump folder.
+# Ported 2026-11-26 from a provisional profile (dm/games/profile_guess.py, from the survey): its values are kept as they ran
+
+# ---- Identity ----
+title_id	01000B900D8B0000
+program_id	01000B900D8B0000
+
+# ---- App ----
+name	Cadence of Hyrule: Crypt of the NecroDancer featuring The Legend of Zelda
+name_ko	케이던스 오브 하이랄
+ipa	CadenceOfHyrule.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v458752	1.5.0	main=095b8bf19189f1a0323fe41b49abb6ee	subsdk0=305ef5b2e6cd40196faf6e42e21b222d	subsdk1=8d073b25b9abda677e6967cef9ef6070	sdk=b2872a7bcc589969fb7afb8e372414e4
+package	v458752
+shader_versions	v458752
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 subsdk1 sdk
+romfs_marker	sound_banks/DLC_Music_Common.bank
+zip_store	.bank:.bffnt:.bin:.mp4:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/pois/=pois /sound_banks/=soundbanks /music/=music /video/=video /textures_bin/=texturesbin /shaders_bin/=shadersbin /fonts_bin/=fontsbin /luts_bin/=lutsbin
+shader_note	Cadence of Hyrule: Crypt of the NecroDancer featuring The Legend of Zelda shaders
+
+# ---- After the rewrite ----
+# the rewritten modules are larger than the default 64 MB of used memory (Age of Calamity: 66.6 MB → 72 MB)
+mem_used	0x5400000

@@ -1,0 +1,10 @@
+# Cadence of Hyrule: Crypt of the NecroDancer featuring The Legend of Zelda (01000B900D8B0000) on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android")
+# This fork's. Retroid Pocket Nova (PurpleVK), 2026-11-26: title, new game, latency calibration, the intro movie and the first overworld screen, in Korean; no error line.
+# The game puts an NVN barrier between almost every two draws and each one ended the render pass: 1,223 draws in 1,223 passes a frame at 1280x720, GPU 20.7 ms a frame,
+# 30 fps in play. With invalidate-only barriers keeping the pass open (as for SUPER ROBOT WARS T): 6 passes a frame, GPU 3.2 ms, 60 fps (300 frames shown, none dropped,
+# p99 16.67 ms). Pinning 60 fps (DM_FPS_PIN) alone changed nothing. Not checked: sound and the rhythm timing by ear, dungeons, long sessions, Retroid Pocket 6
+status	playable
+tested	v458752 Retroid Pocket Nova (QCS8550, Adreno 740, Android 13)
+package	org.nx2a.cadenceofhyrule
+orientation	landscape
+env	DM_VK_INVAL_KEEP=1
