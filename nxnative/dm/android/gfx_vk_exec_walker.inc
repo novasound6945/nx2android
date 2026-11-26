@@ -207,7 +207,11 @@ static void exec_ops(const uint8_t *p) {
         case OP_BARRIER: {   // the pass ends at every barrier: kept across XC3's fragment- and primitive-order barriers (0x1 0x2 0x4) its characters drew torn in some frames
             int32_t bits = *(const int32_t *)a; int32_t km = (g_order_keep ? 0x7 : 0) | (g_inval_keep ? 0x70 : 0);   // (g_order_keep, g_inval_keep)
             int keep = km && S.pass_open == 1 && !(bits & ~km);
-            if (g_x_listpasses) VKLOG("    barrier %#x%s", bits, keep ? " (kept: decided at the next draw)" : "");
+            if (g_x_listpasses) VKLOG("    barrier %#x%s", bits,
+                S.pass_open == 2 && !(bits & ~0x7) ? " (deferred pass: kept for loadOp clear)" :
+                keep ? " (order/invalidate only: decided at the next draw)" : "");
+            // A deferred pass (pass_open == 2) has no draws yet, only folded loadOp=CLEARs; an order-only barrier is already satisfied before the first draw by Vulkan's loadOp ordering.
+            if (S.pass_open == 2 && !(bits & ~0x7)) break;
             if (keep) { g_order_pending = 1; break; }
             vk_end_pass(); vk_img_barrier_all(vk_cmd()); g_order_pending = 0; break; }
         case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: {   // bound handles were rebased when recorded (hle_nvn.c bind_handles); handles read from memory are rebased by these (mem_handle)

@@ -9,4 +9,4 @@ orientation	landscape
 # FNA3D's OpenGL driver makes the GL calls of other threads on the main thread, once a frame in SwapBuffers. The game's preload threads load content under one lock, and a texture
 # among it waited for a frame the main thread could not reach: it was still in LoadContent, waiting for that lock. With this row the main thread runs the driver's list when it
 # waits (dm/host/fork_fna3d_pump.c): SwapBuffers at main+0x1a7460, the list at renderer+0x578
-env	DM_FNA3D_GL_PUMP=4b8064a4a57b1ec333220daf331d31de:0x1a7460,0x578
+env	DM_FNA3D_GL_PUMP=0x1a7460,0x578

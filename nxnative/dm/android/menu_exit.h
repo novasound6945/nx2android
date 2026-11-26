@@ -6,7 +6,7 @@
 #include "overlay_layout.h"
 static inline int ov_menu_exit_at(float x, float y, float W, float H) {   // (x, y) on Exit game's half (front_android.c menu_touch; the drawing splits the row at the same midline)
     float p[4]; ov_menu_rect(W, H, p);
-    return ov_menu_row_at(x, y, W, H) == OVM_ROWS - 1 && x < p[0] + p[2] / 2;
+    return ov_menu_row_at(x, y, W, H) == OVM_VIEW_ROWS - 1 && x < p[0] + p[2] / 2;   // (the Resume row: the panel's last slot, OVM_VIEW_ROWS - 1, however the body scrolls)
 }
 // Exit game ends the game only when held OV_EXIT_HOLD_NS (a finger on its half, or A with it chosen): a tap, or a slip of the finger onto it, never does. While held its
 // half fills red from the left and reads "Hold to exit"; let go before the end, or the finger off its half, and it is as it was. A tap (let go within OV_EXIT_TAP_NS) shows

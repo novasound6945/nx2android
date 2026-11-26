@@ -196,6 +196,7 @@ static void force_init(void) {
 static void *force_lookup(const char *name) {
     for (unsigned i = 0; i < g_nforce; i++)
         if (!strcmp(g_force[i].name, name)) {
+            if (g_force[i].gate) { const char *e = getenv(g_force[i].gate); if (!e || !strtol(e, NULL, 0)) return NULL; }   // Gated entry, switch off: the module keeps its definition
             if (!g_force_hits[i]++ && g_flag.imports) LOG("force %s  (%s)", name, g_force[i].why);
             void *hlecount_wrap(const char *, const char *, void *); return hlecount_wrap("FORCE", name, g_force[i].fn);   // A counting stub when DM_HLECOUNT is set
         }
@@ -334,12 +335,10 @@ static unsigned relr_apply(module_t *m, uint64_t relr, uint64_t relrsz, uint64_t
     return n;
 }
 
-__attribute__((weak)) void *dm_fork_takeover(const char *name);
 // The address a symbol relocation of module m binds to, as Horizon's rtld would with the modules loaded now (forced take-over, then the loaded modules in load order, then HLE / stub).
 // *other: the module's own definition was taken over by an earlier module's; *weak0: an undefined weak symbol nothing defines, bound to 0
 static uint64_t bind_sym(module_t *m, const Elf64_Sym *s, int *other, int *weak0) {
     uint64_t v = (uint64_t)force_lookup(m->strtab + s->st_name);
-    if (!v && dm_fork_takeover) v = (uint64_t)dm_fork_takeover(m->strtab + s->st_name);   // this fork's take-overs that depend on a switch (fork_fna3d_pump.c)
     *other = *weak0 = 0;
     // Symbols the module defines itself are also looked up globally in load order (the ELF default; Horizon's rtld does the same): the definition of an earlier-loaded module overrides a later one; only local / non-default visibility binds to itself.
     // Engage's main defines its own operator new / delete (Unity's memory manager) and sdk has a copy too (forwarding to malloc / free): previously sdk bound its own delete,

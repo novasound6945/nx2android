@@ -6,7 +6,11 @@
 // frame: a preload thread loads content under the content manager's one lock (main+0x162a750), a texture in it waits for the main thread's next SwapBuffers, and the main
 // thread, still in LoadContent ("Stages\StageData"), waits for that lock.
 //
-//   DM_FNA3D_GL_PUMP=<main's build ID, 32 hex>:<SwapBuffers offset in main>,<offset of the command list in the renderer>      (start-up; a game's android.tsv env row)
+//   DM_FNA3D_GL_PUMP=<SwapBuffers offset in main, hex>,<offset of the command list in the renderer, hex>      (start-up; a game's android.tsv env row)
+//
+// The value starts with a nonzero number because the switch is also the gate of the two take-overs below (hle.h HLE_FORCE_IF: set and nonzero). The offsets are a
+// build's: the row is good for the main whose patches.py has the renderer gate, and without that gate in the running main the pump stays off. (The first release's
+// rows had main's build ID and a colon in front; that form is still read, and then the ID must be the running main's.)
 //
 // With it the thread that holds the GL context runs the list when it would sleep with the list not empty: its pthread_cond_wait (the .NET runtime's lock and event waits) calls
 // the driver's SwapBuffers with no window. SDL refuses that swap ("Invalid window"), so nothing is presented, and the rest of the function runs the list and frees the
@@ -14,6 +18,7 @@
 // call on the list and goes to its sem_wait wakes the context's thread when that one already sleeps.
 // The renderer comes from an observation gate at the head of the driver's CreateTexture2D (OBS_FNA3D_RENDERER in the game's patches.py: x19).
 #include "dm.h"
+#include "hle.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -30,8 +35,9 @@ static int pump_on(void) {   // (read at the first import binding: the app's env
     if (g_on >= 0) return g_on;
     const char *e = getenv("DM_FNA3D_GL_PUMP"); char *end;
     if (!e || !*e) return g_on = 0;
-    if (strlen(e) < 34 || e[32] != ':' || !(g_swap_off = strtoull(e + 33, &end, 16)) || *end != ',' || !(g_cmd_off = strtoull(end + 1, &end, 16)) || *end) {
-        LOG("[RED] FNA3D GL pump: DM_FNA3D_GL_PUMP is not <main's build ID>:<SwapBuffers offset>,<command list offset>: off"); return g_on = 0; }
+    const char *v = strlen(e) > 33 && e[32] == ':' ? e + 33 : e;   // (after the old form's build ID)
+    if (!(g_swap_off = strtoull(v, &end, 16)) || *end != ',' || !(g_cmd_off = strtoull(end + 1, &end, 16)) || *end) {
+        LOG("[RED] FNA3D GL pump: DM_FNA3D_GL_PUMP is not <SwapBuffers offset>,<command list offset>: off"); return g_on = 0; }
     return g_on = 1;
 }
 static void (*g_swap)(void *, void *, void *, void *);
@@ -39,7 +45,8 @@ static int g_ready;
 static void pump_ready_once(void) {   // once main is loaded: the row must be for this main
     const char *e = getenv("DM_FNA3D_GL_PUMP"), *build = dm_main_build(); module_t *m = NULL;
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
-    if (!m || strncmp(e, build, 32) || g_swap_off >= m->size) { LOG("[RED] FNA3D GL pump: DM_FNA3D_GL_PUMP is for main %.32s, this main is %s: off", e, build); return; }
+    if (!m || g_swap_off >= m->size) { LOG("[RED] FNA3D GL pump: DM_FNA3D_GL_PUMP's SwapBuffers offset is outside main: off"); return; }
+    if (strlen(e) > 33 && e[32] == ':' && strncmp(e, build, 32)) { LOG("[RED] FNA3D GL pump: DM_FNA3D_GL_PUMP is for main %.32s, this main is %s: off", e, build); return; }
     if (!gate_obs_present(OBS_FNA3D_RENDERER)) { LOG("[RED] FNA3D GL pump: main is rewritten without the renderer gate (OBS of its patches.py): off"); return; }
     g_swap = (void (*)(void *, void *, void *, void *))(m->base + g_swap_off);
     LOG("FNA3D GL pump: the GL context's thread runs the driver's command list when it waits (SwapBuffers main+%#llx, list at renderer+%#llx)", (unsigned long long)g_swap_off, (unsigned long long)g_cmd_off);
@@ -66,9 +73,9 @@ static int origs(void) {
     if (!o_cond_wait || !o_cond_broadcast || !o_mutex_lock || !o_mutex_unlock || !s) die("FNA3D GL pump: the SDK lacks a pthread function the pump calls");
     o_sem_wait = s; return 1;
 }
-static int pump_cond_wait(void *cond, void *mutex) {
+HLE_FORCE_IF("DM_FNA3D_GL_PUMP", "pthread_cond_wait", "FNA3D's OpenGL driver: the GL context's thread runs the driver's command list when it would sleep with the list not empty", int, pump_cond_wait, void *cond, void *mutex) {
     origs();
-    if (t_in_pump || !dm_gl_has_context || !dm_gl_has_context() || !pump_ready()) return o_cond_wait(cond, mutex);
+    if (!pump_on() || t_in_pump || !dm_gl_has_context || !dm_gl_has_context() || !pump_ready()) return o_cond_wait(cond, mutex);
     if (pending()) { o_mutex_unlock(mutex); pump(); o_mutex_lock(mutex); return 0; }   // (a spurious wake-up: the caller tests its condition and waits again)
     pthread_mutex_lock(&g_pm); g_park_cond = cond; g_park_mutex = mutex; pthread_mutex_unlock(&g_pm);
     int r = o_cond_wait(cond, mutex);
@@ -76,20 +83,12 @@ static int pump_cond_wait(void *cond, void *mutex) {
     if (pending()) { o_mutex_unlock(mutex); pump(); o_mutex_lock(mutex); }
     return r;
 }
-static int pump_sem_wait(void *sem) {
+HLE_FORCE_IF("DM_FNA3D_GL_PUMP", "sem_wait", "FNA3D's OpenGL driver: a thread with a call on the driver's list wakes the GL context's thread when that one sleeps", int, pump_sem_wait, void *sem) {
     origs();
-    if (!t_in_pump && pending() && pump_ready()) {
+    if (pump_on() && !t_in_pump && pending() && pump_ready()) {
         pthread_mutex_lock(&g_pm); void *c = g_park_cond, *m = g_park_mutex; pthread_mutex_unlock(&g_pm);
         // with the sleeper's mutex held, so the wake-up cannot fall between its last test and its wait
         if (c) { o_mutex_lock(m); o_cond_broadcast(c); o_mutex_unlock(m); }
     }
     return o_sem_wait(sem);
-}
-// The loader asks here for every symbol a module binds (loader.c bind_sym), after the forced take-over table: these two only with the switch set
-void *dm_fork_takeover(const char *name);
-void *dm_fork_takeover(const char *name) {
-    if (name[0] != 'p' && name[0] != 's') return NULL;
-    if (!strcmp(name, "pthread_cond_wait")) return pump_on() ? (void *)pump_cond_wait : NULL;
-    if (!strcmp(name, "sem_wait")) return pump_on() ? (void *)pump_sem_wait : NULL;
-    return NULL;
 }

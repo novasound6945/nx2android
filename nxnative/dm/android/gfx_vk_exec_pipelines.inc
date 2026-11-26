@@ -46,6 +46,7 @@ static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshade
 static void pipe_record(const pkey *k);
 // The last key and its pipeline (the replay thread's only; vk_pipes_drop_idle, on that thread too, clears it): runs of draws with one pipeline skip the 992-byte hash and the lock
 static pkey g_last_k; static VkPipeline g_last_p;
+static struct { pkey k; VkPipeline p; uint64_t seen; } *g_fc; static int g_fc_on = -1;   // graphics_pipeline's front cache (the replay thread's only; seen: 1 + the present its pipeline was last noted drawn in, pipe_seen)
 // 1 + the present each graphics pipeline was last drawn with, by handle (the replay thread's only: vk_pipes_drop_idle), noted once a present on the fast path. Only under
 // memory pressure (gfx_vk_core.c g_mem_pressure), the only time pipelines go: g_seen_since is the present from which every pipeline drawn with is in it (~0: not under
 // pressure now), and one not in it since then counts as last drawn with then
@@ -163,6 +164,17 @@ static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
         if (!g_last_fast) { extern uint64_t g_tex_frame; if (g_last_seen != __atomic_load_n(&g_tex_frame, __ATOMIC_RELAXED)) pipe_seen(g_last_p); }   // (a linked pipeline never goes: vk_pipes_drop_idle takes whole ones)
         return g_last_p == (void *)1 ? VK_NULL_HANDLE : g_last_p; }
     g_pipe_fast = 0;
+    // The pipelines of the last few hundred keys, in front of the locked map: where materials alternate the one-entry memo above misses most draws, and each miss
+    // took the mutex and the map's hash of the whole key (Donkey Kong Bananza's hub on an Odin 3: nvn_hm_get 2.6 % of the replay thread). One slot a hash of a few
+    // of the key's words; a hit compares the whole key. Only the replay thread reads these. DM_VK_PIPE_FRONT=0 (start-up): off
+    // This fork's: only whole pipelines found in the map are put here (never a linked one, never a pending key), so a hit is the map path's "drawn before" case;
+    // vk_pipes_drop_idle, which takes whole pipelines out of the map, empties it. Each slot notes its pipeline drawn (pipe_seen) once a present, as the memo does
+    if (g_fc_on < 0) { const char *e = getenv("DM_VK_PIPE_FRONT"); g_fc_on = !(e && *e == '0') && (g_fc = calloc(256, sizeof *g_fc)) != NULL; }
+    const uint64_t *kw = (const uint64_t *)(const void *)k; const size_t nkw = sizeof *k / 8;
+    unsigned fi = (unsigned)(((k->key[0] ^ k->key[1] * 3 ^ k->key[2] * 5 ^ kw[3] * 7 ^ kw[nkw / 4] * 11 ^ kw[nkw / 2] * 13 ^ kw[nkw - 1] * 17) * 0x9E3779B97F4A7C15ull) >> 56);
+    if (g_fc_on && g_fc[fi].p && !memcmp(k, &g_fc[fi].k, sizeof *k)) { VkPipeline fp = g_fc[fi].p; g_last_k = *k; g_last_p = fp; g_last_fast = 0;
+        extern uint64_t g_tex_frame; uint64_t fr = __atomic_load_n(&g_tex_frame, __ATOMIC_RELAXED); if (g_fc[fi].seen != fr + 1) { pipe_seen(fp); g_fc[fi].seen = fr + 1; }
+        return fp == (void *)1 ? VK_NULL_HANDLE : fp; }
     pthread_mutex_lock(&g_pipe_mu); VkPipeline p = nvn_hm_get(&g_pipes, k); pthread_mutex_unlock(&g_pipe_mu);
     int opt = !p ? GPL_OPT_NONE : p == PIPE_PENDING ? GPL_OPT_PENDING : p == (void *)1 ? GPL_OPT_FAILED : GPL_OPT_OK;
     // DM_VK_GPL_LINK=0 (live, debugging: a DM_CTL env line): no linked pipelines, each new pipeline is built whole where it is drawn as without libraries,
@@ -185,6 +197,7 @@ static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
         if (V.gpl && p != (void *)1) { VkPipeline f = nvn_hm_get(&g_gfast, k);   // the whole pipeline's first draw where a linked one drew before (vk_device_lost's report)
             if (f && f != (void *)1 && !nvn_hm_get(&g_gtook, k)) { nvn_hm_put(&g_gtook, k, (void *)1); g_sub_takeovers++; g_pipe_new = 2; g_pipe_first = 3; vk_ev(VKEV_TAKEOVER, k->key[0], k->key[1], (uint64_t)(uintptr_t)p); } }
         if (p != (void *)1 && !nvn_hm_get(&g_pipe_drawn, &p)) { nvn_hm_put(&g_pipe_drawn, &p, (void *)1); if (!g_pipe_first) g_pipe_first = 4; }
+        if (g_fc_on > 0) { extern uint64_t g_tex_frame; g_fc[fi].k = *k; g_fc[fi].p = p; g_fc[fi].seen = __atomic_load_n(&g_tex_frame, __ATOMIC_RELAXED) + 1; }   // (pipe_seen above)
         return p == (void *)1 ? VK_NULL_HANDLE : p; }
     if (async_pipe(k)) return VK_NULL_HANDLE;
     vkshader_t *stg[3] = {S.sh[0], S.sh[1], S.sh[2]};
@@ -215,6 +228,7 @@ uint64_t vk_pipes_drop_idle(uint64_t idle) {
             nvn_hm_del(&g_pipes, &ks[j]); nvn_hm_del(&g_pipe_seen, &p); nvn_hm_del(&g_pipe_drawn, &p); vk_defer_free_pipeline(p); n++; }
     }
     g_last_p = VK_NULL_HANDLE;
+    if (n && g_fc_on > 0) for (int i = 0; i < 256; i++) g_fc[i].p = VK_NULL_HANDLE;   // (this fork's: the front cache holds whole pipelines, and some just went)
     pthread_mutex_unlock(&g_pipe_mu);
     return n;
 }
@@ -356,8 +370,42 @@ static uint32_t int_out_bits(const pkey *k, const vkshader_t *fs) {
     return u << 8 | s << 16;
 }
 static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshader_t *const stg_in[3]) {
-    // #404: the vertex attribute formats are checked here, after integer remapping and for keys restored by prewarm (pkey_vi_ok)
-    if (!pkey_vi_ok(k, 1)) return (VkPipeline)1;
+    // #404: the Samsung driver crashed compiling a pipeline after reporting no vertex-buffer support for RGB16F.
+    // Check the final formats here, after integer remapping and for keys restored by prewarm. (This fork's GPL link path asks pkey_vi_ok, which rejects every such
+    // format: a key that takes the scaled fallback below is never linked, it is built whole here)
+    // DM_VK_SCALED_FETCH=1 (profile, start-up; off by default): a scaled format the device cannot fetch, read by a float input, is fetched as the integer format of its
+    // layout and converted in the vertex shader (vk_spv_vertex.h; Adreno 740 has no R8G8B8A8_USCALED, the bone indices of Toy Story 3 Complete Edition's characters,
+    // which were all skipped). Vulkan orders each layout UNORM, SNORM, USCALED, SSCALED, UINT, SINT: the integer format is 2 further on. Off, nothing below changes
+    static _Atomic int scaled_on = -1; int scaled = atomic_load(&scaled_on);
+    if (scaled < 0) { const char *e = getenv("DM_VK_SCALED_FETCH"); scaled = e && atoi(e) > 0; atomic_store(&scaled_on, scaled); }
+    VkFormat afmt[16]; uint64_t vi_scaled = 0;
+    for (uint32_t i = 0; i < k->nattr; i++) {
+        VkFormat format = (VkFormat)k->attr[i].fmt; afmt[i] = format;
+        VkFormatProperties properties;
+        vkGetPhysicalDeviceFormatProperties(V.pd, format, &properties);
+        if (!(properties.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)) {
+            int sign = 0; uint32_t l = k->attr[i].loc;
+            if (scaled) switch (format) {
+            case VK_FORMAT_R8_USCALED: case VK_FORMAT_R8G8_USCALED: case VK_FORMAT_R8G8B8_USCALED: case VK_FORMAT_B8G8R8_USCALED: case VK_FORMAT_R8G8B8A8_USCALED:
+            case VK_FORMAT_B8G8R8A8_USCALED: case VK_FORMAT_A8B8G8R8_USCALED_PACK32: case VK_FORMAT_A2R10G10B10_USCALED_PACK32: case VK_FORMAT_A2B10G10R10_USCALED_PACK32:
+            case VK_FORMAT_R16_USCALED: case VK_FORMAT_R16G16_USCALED: case VK_FORMAT_R16G16B16_USCALED: case VK_FORMAT_R16G16B16A16_USCALED: sign = 1; break;
+            case VK_FORMAT_R8_SSCALED: case VK_FORMAT_R8G8_SSCALED: case VK_FORMAT_R8G8B8_SSCALED: case VK_FORMAT_B8G8R8_SSCALED: case VK_FORMAT_R8G8B8A8_SSCALED:
+            case VK_FORMAT_B8G8R8A8_SSCALED: case VK_FORMAT_A8B8G8R8_SSCALED_PACK32: case VK_FORMAT_A2R10G10B10_SSCALED_PACK32: case VK_FORMAT_A2B10G10R10_SSCALED_PACK32:
+            case VK_FORMAT_R16_SSCALED: case VK_FORMAT_R16G16_SSCALED: case VK_FORMAT_R16G16B16_SSCALED: case VK_FORMAT_R16G16B16A16_SSCALED: sign = 2; break;
+            default: break;
+            }
+            if (sign && l < 16 && stg_in[0] && !((stg_in[0]->local[1] | stg_in[0]->local[2]) >> l & 1)) {
+                VkFormat alt = (VkFormat)(format + 2); vkGetPhysicalDeviceFormatProperties(V.pd, alt, &properties);
+                if (properties.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) { afmt[i] = alt; vi_scaled |= 1ull << (l + (sign == 1 ? 16 : 32)); continue; }
+            }
+            // Core vertex formats fit here. Prewarm workers can reject the same format concurrently.
+            static atomic_uchar noted[256];
+            if ((unsigned)format >= sizeof noted / sizeof *noted || !atomic_exchange(&noted[format], 1))
+                VKLOG("[RED] graphics pipeline skipped: vertex attribute %u format %d lacks vertex-buffer support (vertex shader %016llx)",
+                      k->attr[i].loc, (int)format, (unsigned long long)k->key[0]);
+            return (VkPipeline)1;
+        }
+    }
     // DM_VK_PIPE_LOG: one line per pipeline built, with the state that decides how a material is drawn (shaders, cull/front, depth test/write/func,
     // colour formats, blend). For a game where some materials render wrong and others do not, the lines of the wrong material name the state to compare.
     { static int on = -1; if (on < 0) on = getenv("DM_VK_PIPE_LOG") ? atoi(getenv("DM_VK_PIPE_LOG")) : 0;
@@ -381,10 +429,16 @@ static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshade
     if (stg[0]) xo[0] = (stg[2] ? stg[2]->in_locs : fs ? fs->in_locs : 0) & ~stg[0]->out_locs;
     if (stg[2]) xo[2] = (fs ? fs->in_locs : 0) & ~stg[2]->out_locs;
     // (the alpha test's reference: a push constant of the fragment shader's variant, gfx_vk_shader.c spv_alpha_test; prepare_draw pushes it)
-    uint32_t vi_flip = vi_flip_of(k, stg[0]);
+    uint64_t vi_flip = vi_scaled | vi_flip_of(k, stg[0]);
     for (int i = 0; i < 3; i++) if (stg[i] && !(i == 1 && k->raster_discard)) {
         VkShaderModule mod = i == 2 && k->gs_split ? stg[i]->gs_mod[k->gs_split - 1] :
             vk_shader_module(stg[i], k->um[i], k->im[i], k->alt && !k->um[i] && !k->im[i] && !xo[i] ? 1u << 31 : xo[i], i == 1 ? (k->fdz ? 1 : 0) | (k->dual ? 2 : 0) | (int)(k->atest & 15) << 4 | (int)int_out_bits(k, stg[1]) : 0, i == 0 ? vi_flip : 0);
+        if (i == 0 && vi_scaled && mod == stg[0]->mod) {   // no vertex variant could be made (vk_shader_module fell back to the original): the integer fetch chosen above
+            // would feed a float input, which Vulkan leaves undefined. Skip the pipeline, as for a format with no fallback
+            static atomic_uchar noted_var; if (!atomic_exchange(&noted_var, 1))
+                VKLOG("[RED] graphics pipeline skipped: no vertex shader variant for the scaled attributes %#llx (vertex shader %016llx)", (unsigned long long)vi_scaled, (unsigned long long)k->key[0]);
+            build_end(bs); return (VkPipeline)1;   // (this fork's: the crash dump's build slot is given back)
+        }
         ss[ns++] = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(fl[i], NULL), 0, fl[i], mod, "main", NULL};   // (pNext: DM_VK_SUBGROUP_PIN)
     }
     int flat = (int)k->debug_mode;
@@ -396,7 +450,7 @@ static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshade
     if (flat) { static int n; if (n++ < 12) VKLOG("debugging: vertex shader %016llx with fragment %016llx: mode %d (1 magenta, 2 no depth test, 4 no blending); %u colour targets, blending %#x (target 0: src %u dst %u op %u, alpha src %u dst %u op %u, write mask %#x), depth test %u write %u func %u",
         (unsigned long long)stg[0]->key, (unsigned long long)fs->key, flat, k->ncol, k->blend_en, k->bl[0].src, k->bl[0].dst, k->bl[0].eq, k->bl[0].srca, k->bl[0].dsta, k->bl[0].eqa, k->wmask[0], k->dt, k->dw, k->df); }
     VkVertexInputAttributeDescription ad[16]; VkVertexInputBindingDescription bd[17]; VkVertexInputBindingDivisorDescriptionEXT dd[17]; uint32_t ndd = 0;
-    for (uint32_t i = 0; i < k->nattr; i++) ad[i] = (VkVertexInputAttributeDescription){k->attr[i].loc, k->attr[i].binding, (VkFormat)k->attr[i].fmt, k->attr[i].off};
+    for (uint32_t i = 0; i < k->nattr; i++) ad[i] = (VkVertexInputAttributeDescription){k->attr[i].loc, k->attr[i].binding, afmt[i], k->attr[i].off};
     for (uint32_t i = 0; i < k->nbind; i++) { bd[i] = (VkVertexInputBindingDescription){k->bind[i].binding, k->bind[i].stride, (VkVertexInputRate)k->bind[i].rate};
         if (k->bind[i].rate && k->bind[i].divisor > 1) {
             if (V.has_divisor) dd[ndd++] = (VkVertexInputBindingDivisorDescriptionEXT){k->bind[i].binding, k->bind[i].divisor};

@@ -8,8 +8,8 @@
 #   requires     device features, separated by spaces: bcn (BC texture compression)
 #   sysdata      system data titles the game reads from the console's firmware, 16-digit hex title IDs separated by spaces (0100000000000802: MiiModel, the Mii heads Mario Kart 8 Deluxe builds; 0100000000000811 and 0100000000000810: the shared fonts, standard and Nintendo extension; 0100000000000814, 0100000000000813 and 0100000000000812: simplified Chinese, traditional Chinese and Korean);
 #                porter extracts each from the player's firmware dump (--firmware) into the data pack, and the host mounts it in place of its stand-in (the fonts: the host decodes them)
-#   setting      <name>=<value>, one row each: the pause menu's defaults on first launch (overlay, rumble, docked, fps, opacity: 20..80 by 5, rate: the frame rate
-#                limit, 0 auto (env.txt's DM_FPS_PIN, else the adaptive rate) or 60, 40, 30); a device that already has a settings.txt keeps it, so a new row reaches new installs only
+#   setting      <name>=<value>, one row each: the pause menu's defaults on first launch (overlay, rumble, docked, fps, sr: super resolution, sharpness: 0..100 by 25, opacity: 20..80 by 5, stick_zone: 1 half screen,
+#                aspect, limit: the frame rate limit, 0 auto (env.txt's DM_FPS_PIN, else the adaptive rate) or 60, 40, 30); a device that already has a settings.txt keeps it, so a new row reaches new installs only
 #   env          <KEY>=<VALUE>, one row each: host switches the game needs on Android (the data pack's env.txt)
 #   overlay      <tablet|phone> <control> <x> <y>: moves one control of that layout (dm/android/overlay_default.tsv) to x, y as fractions of the window
 #   variant      <name> [<KEY>=<VALUE> ...]: a second rewrite of the code modules for another screen, one row each; name 4x3 is the only one the app picks (front_android.c
@@ -39,8 +39,9 @@ sys.path.insert(0, str(HERE))
 import settings_registry   # noqa: E402  (nxnative/dm/settings.tsv: which switches a profile may set)
 
 STATUS = ('playable', 'wip', 'boots', 'experimental')
-SETTINGS = {'overlay': ('0', '1'), 'rumble': ('0', '1'), 'docked': ('0', '1'), 'fps': ('0', '1'), 'aspect': ('auto', '4:3', '16:9'),   # the pause menu's settings (front_android.c settings_load)
+SETTINGS = {'overlay': ('0', '1'), 'rumble': ('0', '1'), 'docked': ('0', '1'), 'fps': ('0', '1'), 'sr': ('0', '1'), 'stick_zone': ('0', '1'), 'aspect': ('auto', '4:3', '16:9'),   # the pause menu's settings (front_android.c settings_load)
             'opacity': tuple(str(v) for v in range(20, 81, 5)),                                    # the gamepad's, percent (overlay_layout.h OV_OPACITY_MIN..MAX)
+            'sharpness': tuple(str(v) for v in range(0, 101, 25)),                                 # super resolution's, percent by 25
             'limit': ('0', '60', '40', '30'),                                                      # the frame rate limit, 0 auto (front_android.c LIMIT_STEPS)
             'fps_rows': tuple(str(v) for v in range(32)), 'fps_pos': tuple('0123'), 'fps_colour': tuple('01234'),   # the frame rate counter's rows (a bit each: 1 FPS, 2 SOC, 4 BAT,
             'fps_outline': tuple('01234'), 'fps_size': tuple('0123')}                                               # 8 driver, 16 graph), corner, colour, outline and size (overlay_layout.h fpso_*)

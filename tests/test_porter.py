@@ -76,10 +76,25 @@ class AndroidProfiles(unittest.TestCase):
         self.assertEqual(android_profile.load(profile_dir([('status', 'boots'), ('setting', 'limit=40')]).name).settings, {'limit': '40'})
         for v in ('45', '120', 'auto', '-1'):
             with self.assertRaises(android_profile.ProfileError, msg=v): android_profile.load(profile_dir([('status', 'boots'), ('setting', f'limit={v}')]).name)
-        steps = re.search(r'LIMIT_STEPS\[OVM_LIMITS\] = \{([^}]*)\}', (REPO / 'nxnative/dm/android/front_android.c').read_text(encoding='utf-8')).group(1)
+        steps = re.search(r'LIMIT_STEPS\[GOPT_LIMITS\] = \{([^}]*)\}', (REPO / 'nxnative/dm/android/game_opts_android.inc').read_text(encoding='utf-8')).group(1)
         self.assertEqual(sorted(s.strip() for s in steps.split(',')), sorted(android_profile.SETTINGS['limit']))   # the porter takes the values the app reads
         os.environ.pop('DM_GAMES_DIR', None)
         self.assertEqual(android_profile.load('010054B01AD92000').settings, {'docked': '0'})   # Unicorn Overlord: the menu left at Auto (the profile's 60 fps pin), the player's choice
+
+    def test_sharpness_setting(self):   # super resolution's Sharpness slider, 0..100 by 25 (front_android.c settings_load sharpness=)
+        d = profile_dir([('status', 'boots'), ('setting', 'sharpness=75')])
+        self.assertEqual(android_profile.load(d.name).settings, {'sharpness': '75'})
+        with self.assertRaises(android_profile.ProfileError): android_profile.load(profile_dir([('status', 'boots'), ('setting', 'sharpness=60')]).name)
+
+    def test_sr_setting(self):   # super resolution, off or on (the pause menu's row, front_android.c settings_load sr=)
+        d = profile_dir([('status', 'boots'), ('setting', 'sr=1')])
+        self.assertEqual(android_profile.load(d.name).settings, {'sr': '1'})
+        with self.assertRaises(android_profile.ProfileError): android_profile.load(profile_dir([('status', 'boots'), ('setting', 'sr=2')]).name)
+
+    def test_stick_zone_setting(self):   # Stick area, circle or half screen (the pause menu's Gamepad tab row, front_android.c settings_load stick_zone=; issue #589)
+        d = profile_dir([('status', 'boots'), ('setting', 'stick_zone=1')])
+        self.assertEqual(android_profile.load(d.name).settings, {'stick_zone': '1'})
+        with self.assertRaises(android_profile.ProfileError): android_profile.load(profile_dir([('status', 'boots'), ('setting', 'stick_zone=2')]).name)
 
     def test_default_package(self):
         d = profile_dir([('status', 'boots')])
@@ -765,7 +780,7 @@ class UnrealShaders(unittest.TestCase):
             d = Path(tmp); (d / 'RomFS').mkdir(); (d / 'ue_shaders').mkdir()
             (d / 'RomFS/game.pak').write_bytes(b'pak')
             (d / 'ue_shaders/stamp').write_text(pipeline.nsp.ue_stamp(d))
-            p = SimpleNamespace(game=d, g=mock.Mock(), dirs={'v1': d}, versions=['v1'], tools={}, app_name='test')
+            p = SimpleNamespace(game=d, g=mock.Mock(get=lambda k, d=None: d), dirs={'v1': d}, versions=['v1'], tools={}, app_name='test')
             kinds = {k: (False, '') for k in ('oodle_packs', 'glslc_capture', 'ue_legacy')}
             kinds.update(graphics=('nvn', ''), ue_decode=(True, 'Unreal shader archive'))
             with mock.patch.object(pipeline.profile_guess, 'build_sources', return_value=kinds), mock.patch.object(pipeline, 'Adb') as adb:

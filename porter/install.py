@@ -151,6 +151,22 @@ def bundle_plan(fj, have):
         if 'bundle' in f and have.get(f['path']) != f['size']: full[f['bundle']] = False
     need = [k for k, ok in enumerate(full) if not ok]
     return need, [k for k in need if have.get(fj['bundles'][k]['path']) == fj['bundles'][k]['size']]
+
+
+def push_mismatch(data, have, skip=(), exclude=(), n=5):
+    """What keeps the files folder's listing (have) from holding the pack after a push (issue #74: env.txt arrived as "e", and the install still reported success), the first n
+    of each kind; '' when it holds it. skip / exclude: as push_tree's. A file the player keeps (KEEP_ON_DEVICE) only has to be there, at any size. Only ASCII paths are compared:
+    adb's output is decoded in the PC's locale, so another name can read differently here without being wrong on the device"""
+    data, missing, other = Path(data), [], []
+    for p in sorted(p for top in data.iterdir() if top.name not in exclude for p in (top.rglob('*') if top.is_dir() else [top]) if p.is_file()):
+        rel = p.relative_to(data).as_posix()
+        if rel in skip or rel.startswith('.dmpart') or not rel.isascii(): continue
+        if rel not in have: missing.append(rel)
+        elif rel not in datapack.KEEP_ON_DEVICE and have[rel] != p.stat().st_size: other.append(f'{rel}: {have[rel]:,} bytes, the pack has {p.stat().st_size:,}')
+    first = lambda xs: ', '.join(xs[:n]) + (', …' if len(xs) > n else '')
+    return '; '.join(([f'{len(missing):,} files are not there ({first(missing)})'] if missing else []) + ([f'{len(other):,} have another size ({first(other)})'] if other else []))
+
+
 def sibling_parts(adb, man, files):
     """{part: files folder of another port on the device whose pack has the same content key for that part} (datapack.part_key), for the parts this pack has"""
     want = man.get('parts') or {}
@@ -349,8 +365,8 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
         elif not target and seed_from_sibling(adb, man, files, have, data): have = adb.remote_sizes(files)   # another port of the game on the device gives its RomFS / DLC (a pack without bundles)
         PROG.set(step='pushing the game data')
         base, bkeep = push_bundles(adb, data, files, fj, have, lambda d, t, note: PROG.set(done=d, total=t, note=note)) if bund else (0, set())
-        adb.push_tree(data, files, keep=datapack.KEEP_ON_DEVICE, skip=(datapack.MANIFEST, datapack.ENV) + ((publish.FILES,) if bund else ()),
-                      exclude=(datapack.ROMFS,) if target else (datapack.BUNDLES,) if bund else (),
+        pushed = dict(skip=(datapack.MANIFEST, datapack.ENV) + ((publish.FILES,) if bund else ()), exclude=(datapack.ROMFS,) if target else (datapack.BUNDLES,) if bund else ())
+        adb.push_tree(data, files, keep=datapack.KEEP_ON_DEVICE, **pushed,
                       verify=lambda rel: rel.split('/', 1)[0] not in ('RomFS', 'aoc'),   # the game's own files change only with their version
                       progress=lambda d, t, note: PROG.set(done=base + d, total=base + t, note=note), have=have)
         if own and extra:   # files of an older game version in the installer's own card folder, which the game would still find
@@ -367,7 +383,7 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
         with tempfile.TemporaryDirectory(prefix='nx2a_env_') as t:
             env = Path(t) / datapack.ENV
             env.write_text(merge_env((data / datapack.ENV).read_text(encoding='utf-8'), adb.read_text(f'{files}/{datapack.ENV}'), target, prev_keys), encoding='utf-8', newline='\n')
-            adb.push_file(env, f'{files}/{datapack.ENV}')
+            adb.push_file(env, f'{files}/{datapack.ENV}'); env_size = env.stat().st_size
         if not target and was and romfs_at == APP:
             if sd_dir: PROG.set(step='removing the RomFS from the SD card'); adb.shell(f'rm -rf {shlex.quote(was)}', timeout=1200); say(f'the app reads its RomFS from its files folder again; {was} (the earlier --romfs-at sd copy) is removed')
             else: say(f'the app reads its RomFS from its files folder again; {was} is left as it is')
@@ -388,6 +404,12 @@ def install(apk, data, adb_exe, serial=None, replace_signer=False, romfs_at=None
             PROG.set(step='removing the RomFS copy in the files folder')
             adb.shell(f'rm -rf {shlex.quote(f"{files}/{datapack.ROMFS}")}', timeout=1200)
             say(f'removed the earlier copy of the RomFS from the app\'s files folder ({len(old):,} files, {sum(have[r] for r in old) / 2**30:.1f} GB)')
+        now = adb.remote_sizes(files)
+        bad = '; '.join(x for x in (push_mismatch(data, now, **pushed),   # env.txt is pushed on its own (merge_env): checked against the merged file
+                                    '' if now.get(datapack.ENV) == env_size else f'{datapack.ENV} is not there' if datapack.ENV not in now
+                                    else f'{datapack.ENV}: {now[datapack.ENV]:,} bytes, the merged file has {env_size:,}') if x)
+        if bad:   # no manifest on a pack that did not arrive whole: the next install pushes what is missing
+            raise BuildError(f'after the push, {files} is not the whole pack: {bad}. Install again; if the same files fail, update adb (platform-tools)')
         if bund: adb.push_file(data / publish.FILES, f'{files}/{publish.FILES}')   # the list the app unpacks by, once everything it names is on the device
         adb.push_file(data / datapack.MANIFEST, f'{files}/{datapack.MANIFEST}')   # last: a pack on the device with its manifest is a complete one
     except AdbError as e:
