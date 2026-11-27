@@ -18,6 +18,9 @@ The profile sets these for you (`android.tsv`); a player changes the pause menu 
 | `DM_VK_SUBGROUP_LACK=0x30` | this fork's: subgroup classes (`VkSubgroupFeatureFlagBits`: shuffle 0x10, shuffle relative 0x20) a fragment shader is taken not to have, though the device … |
 | `DM_GPU_TURBO=1` | "auto" or 1: ask the GPU for its high clocks while the game is GPU-bound; "need": only while the game is held below its target; unset or 0 = no |
 | `DM_FPS_PIN=60` | pin the governor at 60, 40 or 30 fps; 0 = no pin |
+| `DM_VK_GPL_PREP_MAX=5000` | a shader bundle of more vertex and fragment shaders than this is not prepared whole: the parts earlier runs listed are made at the start, a shader's parts when … |
+| `DM_VK_ZEROCOPY_LAZY=2` | which zero-copy pools get their buffer only when the GPU first uses them (vk_pool_of, pool_back: a slab's slot or a kept buffer as at creation; until then the … |
+| `DM_VK_ZC_CHUNK_MB=32` | the chunk size in MB that a memory pool over it is cut into (unset: 256 MB, or the largest of 128 / 64 / 32 MB that this gralloc takes when it refuses 256 MB, … |
 
 Read the profile's porting log in the comment header of [`android.tsv`](android.tsv). Back to the [games list](../../../../README.md#games).
 <!-- end of the game facts -->

@@ -16,6 +16,14 @@ env	DM_VK_SUBGROUP_LACK=0x30
 # sits near the period, where the adaptive rate stepped down to 40 and back
 env	DM_GPU_TURBO=1
 env	DM_FPS_PIN=60
+# This fork's (2026-11-27, Retroid Pocket 6, 7.3 GB of RAM): the game was killed by lmkd ("device is not responding", 1.58 GB resident + 2.1 GB swapped) after
+# graphics loaded slowly for minutes, and the device's VPN app was pushed out while it ran. The game's own heap is 3.1 GB; on top of it the host prepared every
+# shader part of the bundle (9,858 shaders < the 30,000 default of DM_VK_GPL_PREP_MAX: all SPIR-V unpacked and 16,618 parts made at the start) and turned every
+# memory pool into a hardware buffer up front (621 MB at the start). With the parts made when a program is first set (as Flight Simulator's 5000) and the pools
+# made lazily in 32 MB chunks (as Luigi's Mansion 3's) the user played a dungeon without a kill
+env	DM_VK_GPL_PREP_MAX=5000
+env	DM_VK_ZEROCOPY_LAZY=2
+env	DM_VK_ZC_CHUNK_MB=32
 # This fork's (2026-11-27): 9,702 of the data pack's 10,996 files are at most 1 MB (0.81 GB of 7.7 GB); one request each made a new install slow (Demons
 # Night Fever's 20,478 files took 29 minutes). They go into packs the host reads in place
 data_bundles	1048576	67108864
