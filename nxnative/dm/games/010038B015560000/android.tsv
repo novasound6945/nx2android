@@ -4,3 +4,7 @@
 # the title and the prologue's first battle draw right at 60 fps. Not played further yet.
 status	experimental
 env	DM_VK_UBWC=7
+# This fork's (2026-11-27): 34,061 of the data pack's 36,019 files are at most 1 MB (2.95 GB of 12.3 GB); one request each made a new install slow. They go
+# into packs the host reads in place (the Korean patch's overlay folder stays as it is)
+data_bundles	1048576	67108864
+romfs_packs	on

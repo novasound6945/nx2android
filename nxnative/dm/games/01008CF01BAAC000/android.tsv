@@ -16,3 +16,7 @@ env	DM_VK_SUBGROUP_LACK=0x30
 # sits near the period, where the adaptive rate stepped down to 40 and back
 env	DM_GPU_TURBO=1
 env	DM_FPS_PIN=60
+# This fork's (2026-11-27): 9,702 of the data pack's 10,996 files are at most 1 MB (0.81 GB of 7.7 GB); one request each made a new install slow (Demons
+# Night Fever's 20,478 files took 29 minutes). They go into packs the host reads in place
+data_bundles	1048576	67108864
+romfs_packs	on

@@ -12,3 +12,6 @@ orientation	landscape
 # host's run of that list when the main thread waits (dm/host/fork_fna3d_pump.c). Here the same driver: SwapBuffers at main+0x1b0390, the list at renderer+0x578, under the
 # lock at +0x580 (SwapBuffers takes and empties it at main+0x1b0510..0x1b0784; CreateTexture2D called from another thread appends to it at main+0x1b3810)
 env	DM_FNA3D_GL_PUMP=0x1b0390,0x578
+# This fork's (2026-11-27): 3,700 of the data pack's 3,753 files are at most 1 MB (0.07 GB of 0.9 GB); they go into packs the host reads in place
+data_bundles	1048576	67108864
+romfs_packs	on
